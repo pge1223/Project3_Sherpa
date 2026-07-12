@@ -216,3 +216,22 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# 절대 올리면 안 되는 파일
+*.key
+secrets.json
+
+# 대용량 파일 (GitHub 100MB 제한)
+*.csv
+*.pkl
+*.h5
+models/
+data/raw/
+
+# IDE 설정
+.vscode/
+.idea/
+.DS_Store
+
+# Claude Code 개인 로컬 설정
+.claude/settings.local.json
