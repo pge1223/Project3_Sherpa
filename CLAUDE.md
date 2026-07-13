@@ -1,74 +1,111 @@
-# 지원금 셰르파 (Support Fund Sherpa) — 프로젝트 컨텍스트
+# AI Review Board — 프로젝트 컨텍스트
 
 > 이 파일은 레포 루트에 위치하며, Claude Code가 어떤 하위 폴더에서 실행되든
-> 자동으로 읽어들이는 "전역 컨텍스트"입니다. 각자 담당 폴더(apps/mobile,
-> apps/server, services/rag, services/pipeline)로 들어가면 그 폴더의
-> CLAUDE.md가 이 내용에 **추가**됩니다 (덮어쓰는 게 아님).
+> 자동으로 읽어들이는 "전역 컨텍스트"입니다.
 
 ## 프로젝트 한 줄 요약
-한국 스타트업 창업자가 정부 지원사업 공고를 찾고(FIND), 본인 자격을
-확인하고(CHECK), 신청 계획을 세우는 것(PLAN)을 돕는 모바일 앱.
-마감: **7/31 최종 발표**.
+문서를 평가하는 AI가 아니라, 문서를 놓고 전문가들이 회의하는 AI 위원회.
+사업계획서·공모전 기획서·IR 덱 등을 업로드하면 관련 공고문·평가기준을
+RAG로 수집해 그에 맞는 전문가 페르소나(위원)를 자동 구성하고, 각 위원이
+독립적으로 검토한 뒤 위원장이 종합해 회의록 형태로 피드백을 돌려준다.
 
-## 팀 & 역할 (담당 외 코드 수정 시 반드시 담당자와 상의)
-| 이름 | 담당 |
-|---|---|
-| 가은 | PM 총괄 + 모바일 프론트엔드 (React Native / Expo) |
-| 김윤한 | 데이터 파이프라인 + NCP 서버 설정 |
-| 김용준 | RAG 인프라 + FIND 블록 |
-| 이재인 | 백엔드/AI 로직 — CHECK, PLAN 단계 |
-| 민경 | 백엔드 CRUD + AI 페르소나 설계/구현 |
+> 참고: 이 레포는 이전에 "지원금 셰르파"(정부 지원사업 매칭 앱)로
+> 시작했으나 폐기되었다. 관련 문서나 코드가 남아 있어도 현재 프로젝트와
+> 무관하므로 되살리거나 참고하지 말 것.
 
-## 아키텍처: FIND → CHECK → PLAN
-- **FIND**: BM25 + 벡터 하이브리드 검색으로 공고 서핑 (담당: 김용준)
-- **CHECK**: 자격요건 판정, **4단계 신뢰도 체계 🟢🟡🟠🔴**,
-  할루시네이션 방지 규칙 엄격 적용 (담당: 이재인)
-- **PLAN**: 마감일/제출서류 체크리스트 추출 (담당: 이재인)
-- 모든 LLM 호출에는 **공용 시스템 프롬프트**(친근한 창업 가이드 페르소나)가
-  적용됨 (담당: 민경) — 프롬프트 원본 위치는 `services/rag/persona/` 참고
+## 팀 & 역할 (최종 역할 분담)
+| 이름 | 담당 영역 | 핵심 결과물 |
+|---|---|---|
+| 가은 | PM, React 프론트, 페르소나·프롬프트 기획 | 화면 흐름, Persona Card, 프롬프트 초안, React UI |
+| 윤한 | FastAPI, MongoDB, CRUD, NCP | API, DB 스키마, 파일·영상 저장, 배포 환경 |
+| 경이 | LangGraph, 점수 엔진, 평가 결과 구조 | 회의 워크플로, 평가 결과 JSON, 점수 계산 |
+| 용준 | RAG 파이프라인 | 문서 파싱, 청킹, 임베딩, 검색, 출처 연결 |
+| 재인 | AI 휴먼 영상 제작 | 페르소나 영상 2종, TTS, MuseTalk, 영상 폴백 |
 
-## 기술 스택 (변경 시 이 파일도 같이 업데이트)
-- 서버: NCP 서버 위 FastAPI + MongoDB
-- 프론트: React Native (Expo)
-- LLM: **PERSO API** (주력)
-- RAG 평가: **Ragas** (Faithfulness, Answer Relevance, Context Precision/Recall),
-  Golden Set 20~50개 QA triple 기반
-- 데이터 소스: K-Startup API + 기업마당 API (dual-source)
+담당 외 영역(특히 `contracts/`, `docs/architecture/`, `.env.example`,
+`docker-compose.yml`, `README.md` 등 공통 파일) 수정 시 반드시 해당
+담당자와 상의할 것.
 
-## 데이터 소스 전략 (확정)
-1. API 본문(`bsnsSumryCn`) — RAG 1차 소스
-2. 공고 URL 크롤링 — 본문 보강
-3. PDF 파싱 — 정규 파이프라인 단계 (선택 아님, 필수)
-4. **HWP 파싱은 명시적으로 제외** (라이브러리 불안정 → 리스크 판단 완료,
-   다시 논의하지 말 것)
+## 아키텍처 — 회의 진행 순서
+1. **문서 업로드** — 검토받을 사업계획서·기획서·IR 덱 등
+2. **공고문·평가기준 RAG 수집** — 해당 공모전/사업의 심사 기준을 검색해 문서 성격 파악
+3. **위원회 구성** — 문서 종류에 따라 필요한 역량을 추출해 위원 페르소나 매칭 (도메인마다 참석자·회의 문화가 다름)
+4. **1차 회의 — 개별 리뷰** — 각 위원이 서로의 발언을 보지 않고 독립적으로 검토
+5. **2차 회의 — 위원장 종합** — 1차 의견을 종합해 쟁점 정리 및 액션 아이템 제시
+6. **회의록 반환·반복 검토** — 회의록 기반 수정 후 재검토 가능
 
-배치 동기화: 매일 upsert, 만료 공고는 soft-delete.
+핵심 차별점: RAG는 답변이 아니라 **위원 페르소나를 만드는 재료**로 쓰이며,
+평가 점수가 아니라 **회의(각자 근거를 든 발언 + 위원장 종합)** 형태로
+결과를 돌려준다.
 
-## UX 원칙
-- 회원가입 시 프로필 = FIND 단계의 기반 데이터
-- CHECK 단계에서 신뢰도가 애매할 때만 추가 질문(clarifying question) —
-  풀 대화형 슬롯필링은 하지 않음 (엔지니어링 리스크로 이미 기각됨,
-  FR-PROF-002 참고)
+## 기술 스택
+| 영역 | 기술 | 역할 |
+|---|---|---|
+| Frontend | React + Vite | 회의실 UI, 위원별 발언 화면 |
+| Backend | FastAPI | RAG·에이전트 파이프라인과 프론트를 연결하는 API 서버 |
+| RAG | LangChain · KURE-v1 · Chroma (Persistent) | 공고문·평가기준 수집/임베딩/검색, 페르소나 생성 기반 자료 |
+| Workflow | LangGraph | 위원별 독립 리뷰(1차) → 위원장 종합(2차) 오케스트레이션 |
+| LLM | OpenAI / Anthropic API | 역할별로 경량·고성능 모델 분리 사용 |
+| Document Parsing | PyMuPDF · python-docx · python-pptx | PDF/워드/PPT 파싱 |
+| Database | MongoDB | 사용자 문서, 회의 기록, 위원 평점 저장 |
+| Infra / Hosting | NCP (Naver Cloud Platform) | 서버 호스팅 및 배포 |
+| Human AI | TTS + LivePortrait / Wav2Lip / MuseTalk (Colab GPU) | 위원 발언 영상화 |
+| Monitoring | LangSmith / 자체 로그 | 프롬프트·검색 품질, 근거 인용 정확도 추적 |
 
-## 코딩 컨벤션
-- 요구사항 문서의 FR/DR/NFR 번호를 커밋 메시지 또는 PR 제목에 참조
-  (예: `feat(FR-CHECK-003): 신뢰도 티어 계산 로직`)
-- RAG 관련 로직은 김용준 담당 파이프라인 단일 소유권 유지 —
-  다른 파트에서 RAG 청킹/임베딩 로직 직접 수정 금지, 이슈로 요청
+## 개발 방식 — 공통 계약 우선 (Mock 기반 병렬 개발)
+각 담당자는 다른 담당자의 완성본을 기다리지 않고, **미리 정의된 JSON
+계약과 Mock 데이터**를 기준으로 동시에 개발한다.
 
-## 우선순위 원칙 (충돌 시)
-공식 **3차 프로젝트 가이드라인**이 킥오프 슬라이드보다 항상 우선
-(타임라인, LLM 스택, 페르소나 요건, 채점 기준 등 모든 항목)
+- 공통 계약 기준 파일: `contracts/meeting_contract_v1.json`
+- Mock 데이터: `contracts/mocks/*.json`
+- 필드 삭제·이름 변경은 피하고, 필요하면 새 선택 필드를 추가한다
+  (버전 규칙: v1.0.0 최초 확정 → v1.1.0 선택 필드 추가 → v2.0.0 구조 변경)
+- 공통 JSON 구조 변경 시: 변경 제안 → 영향받는 담당자 확인 → 팀 동의 →
+  schema_version 변경 → Mock 파일 갱신 → 코드 반영
 
-## 환경변수 / 시크릿
-- 실제 값은 이 레포에 **절대 커밋하지 않음** — `.env.example` 참고 후
-  실제 값은 팀 공유 채널(비공개)에서 받을 것
-- 각자 로컬 설정은 `CLAUDE.local.md`에 적고 git에 올리지 말 것
-  (`.gitignore`에 이미 포함)
+## 프롬프트 파일 구분
+- **기획용** (`docs/prompts/`): 가은이 작성하는, 사람이 읽는 기획 문서
+  (Persona Card, 평가 관점, 말투, 회의 순서, 근거 사용 규칙)
+- **실행용** (`ai/meeting/prompts/`): 경이가 LangGraph에서 실제로 불러오는
+  실행 파일 (`prompt_loader.py`, `reviewer_prompt.txt`, `chair_prompt.txt`)
+- 흐름: 가은 기획 초안 → 경이가 실행용 프롬프트로 변환 → LangGraph 노드에서 호출
+
+## 소스 폴더 구조
+모노레포 구조. 최상위: `frontend/`, `backend/`, `ai/{rag,meeting,media}/`,
+`contracts/{schemas,mocks}/`, `docs/{requirements,architecture,prompts}/`,
+`scripts/`, `tests/`. 상세 트리는 `AI_Review_Board_소스폴더구조_Git운영가이드.md` 참고.
+
+## Git에 올리면 안 되는 파일
+실제 API Key, `.env`, 사용자 업로드 문서, 실제 사업계획서·공고문 원본,
+Chroma 벡터DB 데이터, MongoDB 로컬 데이터, 대용량 모델 파일, 생성된
+음성·영상, 로그 파일, 가상환경/패키지 설치 폴더. 규칙은 레포 루트
+`.gitignore`에 반영되어 있다.
+
+- `ai/**/models/` 하위(대용량 모델 파일)만 무시하며, `backend/app/models/`
+  (DB 모델 코드 폴더)는 예외로 추적 대상이다 — 이 둘을 혼동해 규칙을
+  되돌리지 말 것
+- AI 영상·모델 파일은 GitHub에 올리지 않고 NCP Object Storage 등 외부
+  저장소에 보관, 레포에는 URL만 기록
+- `pge_doc/`은 팀원 개인 스크래치/기획 문서 폴더로 항상 gitignore 대상
+
+## 환경변수 관리
+실제 키는 로컬 `.env`에 작성하고 Git에 올리지 않는다. 팀 공유용으로는
+값이 비어 있는 `.env.example`만 커밋한다 (`cp .env.example .env`로 로컬
+설정). 주요 키: `MONGODB_URL`, `MONGODB_DB`, `OPENAI_API_KEY`,
+`GOOGLE_API_KEY`, `NCP_ACCESS_KEY`, `NCP_SECRET_KEY`, `NCP_BUCKET_NAME`,
+`CHROMA_PERSIST_DIR`.
+
+## 브랜치 운영
+`main`(배포/시연 가능한 안정 버전)과 `dev`만 사용한다. `develop`이나
+`feature/*` 같은 별도 브랜치를 새로 만들지 않는다 (팀 확정 사항). `main`은
+GitHub 브랜치 보호 규칙이 걸려 있을 수 있으니, 보호 규칙 변경이 필요하면
+반드시 먼저 확인받을 것.
 
 ## Claude Code에게: 이 프로젝트에서 지켜야 할 것
-- CHECK 단계 응답에서 신뢰도 근거 없이 단정적으로 "자격 있음/없음"이라고
-  말하는 코드/프롬프트를 작성하지 말 것 — 항상 4단계 티어 중 하나로 귀결
-- HWP 파서 관련 코드/라이브러리 제안하지 말 것 (이미 제외 결정됨)
-- 새 기능 제안 시 담당자 매핑 표를 참고해서 어느 폴더/누구 영역인지 먼저
-  명시할 것
+- "지원금 셰르파" 관련 문서/코드가 눈에 띄어도 현재 프로젝트와 무관하니
+  참고하거나 되살리지 말 것
+- 공통 계약 파일(`contracts/`)이나 `docs/architecture/` 등 공용 파일을
+  수정할 때는 어느 담당자 영역인지 먼저 확인하고 언급할 것
+- `.gitignore`의 `ai/**/models/` 규칙과 `backend/app/models/` 코드 폴더를
+  혼동하지 말 것
+- `main`/`dev` 외 새 브랜치(특히 `develop`)를 임의로 만들지 말 것
