@@ -1,1 +1,65 @@
 pge_doc/
+
+# 환경변수
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# Node
+node_modules/
+dist/
+.vite/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 로그
+logs/
+*.log
+
+# 업로드 문서
+uploads/
+storage/
+temp/
+tmp/
+
+# Vector DB
+chroma_db/
+vector_store/
+
+# MongoDB 데이터
+mongodb_data/
+
+# 모델 및 대용량 파일 (backend/app/models 코드 폴더는 제외)
+ai/**/models/
+checkpoints/
+*.ckpt
+*.pth
+*.pt
+*.onnx
+*.safetensors
+
+# 생성된 음성·영상
+generated/
+outputs/
+*.mp3
+*.wav
+*.mp4
+*.avi
+
+# 사용자 제출 자료
+data/private/
+data/uploads/
