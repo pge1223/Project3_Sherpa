@@ -1,0 +1,110 @@
+{
+  "schema_version": "1.0",
+  "meeting_name": "AI Review Board Standard Meeting",
+  "purpose": "문서 근거와 평가기준을 바탕으로 위원별 독립 평가를 종합하고 수정 우선순위를 생성한다.",
+  "language": "ko-KR",
+  "phases": [
+    {
+      "order": 1,
+      "id": "prepare",
+      "name": "준비",
+      "actor": "system",
+      "rules": [
+        "평가 대상 문서와 기준 문서의 처리 상태를 확인한다.",
+        "도메인과 적용 rubric을 확정한다.",
+        "위원별 Persona Card와 검색 질의를 준비한다."
+      ]
+    },
+    {
+      "order": 2,
+      "id": "retrieve",
+      "name": "근거 검색",
+      "actor": "retriever",
+      "rules": [
+        "위원 역할별로 독립 검색한다.",
+        "문서명, 페이지 또는 슬라이드, 섹션, chunk_id를 유지한다.",
+        "근거 부족 상태를 sufficient, partial, insufficient 중 하나로 표시한다."
+      ]
+    },
+    {
+      "order": 3,
+      "id": "independent_review",
+      "name": "위원별 독립 평가",
+      "actor": "reviewers",
+      "rules": [
+        "다른 위원의 평가를 보지 않는다.",
+        "모든 핵심 지적에 evidence_id를 연결한다.",
+        "근거가 부족하면 추정하지 않는다.",
+        "강점, 문제점, 개선안을 분리한다."
+      ]
+    },
+    {
+      "order": 4,
+      "id": "score",
+      "name": "점수 계산",
+      "actor": "score_engine",
+      "rules": [
+        "LLM 출력에서 계산에 필요한 구조화 값만 받는다.",
+        "가중치, 누락 감점, 상한과 하한을 Python 규칙으로 적용한다.",
+        "계산 버전을 기록한다.",
+        "점수는 평가기준 충족도로 표현한다."
+      ]
+    },
+    {
+      "order": 5,
+      "id": "synthesize",
+      "name": "위원장 종합",
+      "actor": "chair",
+      "rules": [
+        "위원 평가와 기존 근거만 사용한다.",
+        "새 근거를 생성하지 않는다.",
+        "합의와 이견을 분리한다.",
+        "수정 우선순위는 최대 5개로 정리한다.",
+        "이견을 숨기지 말고 해결 근거를 기록한다."
+      ]
+    },
+    {
+      "order": 6,
+      "id": "media",
+      "name": "영상 스크립트 생성",
+      "actor": "chair",
+      "rules": [
+        "핵심 페르소나 2명의 발언만 생성한다.",
+        "발언 순서를 order로 고정한다.",
+        "각 발언은 TTS에 적합한 길이로 작성한다.",
+        "영상 실패 시 이미지 + TTS 폴백을 허용한다."
+      ]
+    },
+    {
+      "order": 7,
+      "id": "finalize",
+      "name": "결과 확정",
+      "actor": "system",
+      "rules": [
+        "review_output.schema.json 검증을 통과해야 한다.",
+        "결과와 근거를 저장한다.",
+        "완료 또는 실패 상태를 기록한다."
+      ]
+    }
+  ],
+  "global_rules": [
+    "답변은 한국어로 작성한다.",
+    "공고문이나 기준 문서에 없는 항목을 공식 기준처럼 표현하지 않는다.",
+    "가상 사용자 의견을 실제 시장조사 결과처럼 표현하지 않는다.",
+    "동일 입력과 동일 점수 규칙에는 동일 점수 결과가 나와야 한다.",
+    "위원장은 평가 의견을 조정할 수 있으나 원문 근거를 변조할 수 없다.",
+    "최종 출력은 review_output.schema.json을 따라야 한다."
+  ],
+  "termination_conditions": [
+    "필수 위원 평가가 모두 완료되었다.",
+    "점수 엔진 계산이 완료되었다.",
+    "위원장 종합이 완료되었다.",
+    "최종 JSON Schema 검증을 통과했다."
+  ],
+  "failure_policy": {
+    "retrieval_failure": "해당 criterion의 evidence_status를 insufficient로 설정하고 평가를 제한한다.",
+    "reviewer_failure": "재시도 후 실패하면 해당 위원 결과를 실패로 기록하고 전체 회의는 가능한 범위에서 계속한다.",
+    "score_failure": "최종 결과를 completed로 처리하지 않는다.",
+    "media_failure": "최종 리포트는 유지하고 정적 이미지 + TTS 또는 텍스트 폴백을 사용한다."
+  }
+}
