@@ -5,6 +5,9 @@ pge_doc/
 .env.*
 !.env.example
 
+# 개인 테스트용 requirements
+local.requirements.txt
+
 # Python
 __pycache__/
 *.py[cod]
@@ -21,6 +24,7 @@ dist/
 # IDE
 .vscode/
 .idea/
+.claude/settings.local.json
 
 # OS
 .DS_Store
