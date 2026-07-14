@@ -1,0 +1,344 @@
+{
+  "meta": {
+    "project_name": "AI Review Board",
+    "schema_name": "sample_review_result",
+    "schema_version": "1.0.0",
+    "language": "ko-KR",
+    "mock": true,
+    "created_at": "2026-07-14T20:00:00+09:00"
+  },
+  "meeting": {
+    "meeting_id": "MTG-MOCK-001",
+    "project_id": "PRJ-MOCK-001",
+    "document_id": "DOC-MOCK-001",
+    "domain": "startup_business_plan",
+    "title": "AI 기반 소상공인 재고관리 서비스 사업계획서 검토",
+    "status": "completed",
+    "meeting_mode": "sequential_review_meeting",
+    "current_round": 2,
+    "started_at": "2026-07-14T19:55:00+09:00",
+    "completed_at": "2026-07-14T20:00:00+09:00"
+  },
+  "rubric": {
+    "rubric_id": "RUBRIC-MOCK-001",
+    "source_document_id": "NOTICE-MOCK-001",
+    "total_max_score": 100,
+    "criteria": [
+      {
+        "criterion_id": "marketability",
+        "criterion_name": "시장성",
+        "max_score": 30,
+        "description": "타깃 고객, 시장 수요, 성장 가능성의 구체성과 근거를 평가한다."
+      },
+      {
+        "criterion_id": "technical_feasibility",
+        "criterion_name": "기술·실현 가능성",
+        "max_score": 30,
+        "description": "기술 적합성, 구현 가능성, 데이터 확보 및 운영 계획을 평가한다."
+      },
+      {
+        "criterion_id": "differentiation",
+        "criterion_name": "차별성",
+        "max_score": 20,
+        "description": "기존 대안과 비교한 독창성과 경쟁력을 평가한다."
+      },
+      {
+        "criterion_id": "execution_plan",
+        "criterion_name": "실행계획",
+        "max_score": 20,
+        "description": "일정, 인력, 예산, 위험관리 계획의 구체성을 평가한다."
+      }
+    ]
+  },
+  "reviews": [
+    {
+      "review_id": "REV-MOCK-001",
+      "meeting_id": "MTG-MOCK-001",
+      "persona_id": "business_strategy",
+      "persona_name": "사업전략 전문가",
+      "review_round": 1,
+      "review_summary": "타깃 고객과 해결하려는 문제는 명확하지만, 실제 수요와 경쟁 우위를 입증하는 근거가 부족합니다. 고객 검증 자료와 기존 서비스 비교표를 우선 보강해야 합니다.",
+      "review_items": [
+        {
+          "criterion_id": "marketability",
+          "criterion_name": "시장성",
+          "max_score": 30,
+          "score_recommendation": 20,
+          "judgment": "needs_improvement",
+          "confidence": "high",
+          "strengths": [
+            "타깃 고객을 소규모 오프라인 매장 운영자로 구체화했습니다.",
+            "수기 재고관리로 인한 폐기와 품절 문제를 핵심 문제로 제시했습니다."
+          ],
+          "weaknesses": [
+            "고객 인터뷰나 설문 결과가 없어 문제의 빈도와 지불 의사를 확인하기 어렵습니다.",
+            "초기 목표 시장 규모의 산정 근거가 제시되지 않았습니다."
+          ],
+          "evidence_refs": [
+            {
+              "source_id": "DOC-MOCK-001",
+              "chunk_id": "CHUNK-004",
+              "source_type": "submission",
+              "page": 3,
+              "quote": "주요 고객은 재고관리 전담 인력이 없는 소규모 오프라인 매장이다.",
+              "relevance": "타깃 고객이 구체적으로 정의되었음을 보여줍니다."
+            },
+            {
+              "source_id": "DOC-MOCK-001",
+              "chunk_id": "CHUNK-006",
+              "source_type": "submission",
+              "page": 4,
+              "quote": "정식 개발 이후 고객 인터뷰를 진행할 예정이다.",
+              "relevance": "현재 단계에서는 수요 검증이 완료되지 않았음을 보여줍니다."
+            }
+          ],
+          "improvement_actions": [
+            "시장 분석 항목에 최소 10명 이상의 타깃 고객 인터뷰 결과와 공통 불편 사항을 추가합니다.",
+            "목표 시장 규모의 계산 기준과 사용한 출처를 명시합니다."
+          ]
+        },
+        {
+          "criterion_id": "differentiation",
+          "criterion_name": "차별성",
+          "max_score": 20,
+          "score_recommendation": 11,
+          "judgment": "needs_improvement",
+          "confidence": "medium",
+          "strengths": [
+            "소상공인이 별도의 학습 없이 사용할 수 있는 자동 추천 기능을 차별 요소로 제안했습니다."
+          ],
+          "weaknesses": [
+            "기존 POS와 재고관리 서비스 대비 차이가 기능 설명만으로 제시되어 있습니다.",
+            "경쟁사가 쉽게 모방하기 어려운 요소가 설명되지 않았습니다."
+          ],
+          "evidence_refs": [
+            {
+              "source_id": "DOC-MOCK-001",
+              "chunk_id": "CHUNK-010",
+              "source_type": "submission",
+              "page": 6,
+              "quote": "AI가 판매 이력을 분석하여 다음 발주 수량을 자동으로 추천한다.",
+              "relevance": "제안 서비스가 주장하는 핵심 차별 기능입니다."
+            }
+          ],
+          "improvement_actions": [
+            "주요 경쟁 서비스 3개와 비교하여 대상 고객, 입력 방식, 추천 기능, 가격, 도입 난이도를 표로 정리합니다.",
+            "독점 데이터, 운영 노하우 또는 고객 전환 비용 등 모방 방어 요소를 설명합니다."
+          ]
+        }
+      ],
+      "cross_reviews": [],
+      "priority_actions": [
+        {
+          "priority": 1,
+          "criterion_id": "marketability",
+          "action": "타깃 고객 인터뷰와 설문 결과를 추가합니다.",
+          "reason": "시장 수요를 입증할 직접 근거가 부족합니다."
+        },
+        {
+          "priority": 2,
+          "criterion_id": "differentiation",
+          "action": "기존 서비스와의 비교표를 작성합니다.",
+          "reason": "현재 차별성 주장이 경쟁 대안과 비교되지 않았습니다."
+        }
+      ],
+      "out_of_scope": [
+        {
+          "topic": "AI 발주 추천 모델의 구현 가능성",
+          "reason": "모델 학습 데이터와 구현 난이도에 대한 기술적 검토가 필요합니다.",
+          "handoff_persona_id": "technical_feasibility"
+        }
+      ]
+    },
+    {
+      "review_id": "REV-MOCK-002",
+      "meeting_id": "MTG-MOCK-001",
+      "persona_id": "technical_feasibility",
+      "persona_name": "기술·실현가능성 전문가",
+      "review_round": 2,
+      "review_summary": "기본적인 웹 서비스 구현은 가능하지만, 8주 안에 데이터 수집부터 개인화 AI 추천까지 모두 완성하는 계획은 범위가 큽니다. 규칙 기반 추천으로 PoC를 검증한 뒤 모델을 고도화하는 단계적 접근이 필요합니다.",
+      "review_items": [
+        {
+          "criterion_id": "technical_feasibility",
+          "criterion_name": "기술·실현 가능성",
+          "max_score": 30,
+          "score_recommendation": 18,
+          "judgment": "needs_improvement",
+          "confidence": "high",
+          "strengths": [
+            "판매 이력과 재고 데이터를 핵심 입력 데이터로 명시했습니다.",
+            "웹 기반 대시보드를 MVP 제공 방식으로 정했습니다."
+          ],
+          "weaknesses": [
+            "초기 학습 데이터의 확보 규모와 품질 관리 방법이 없습니다.",
+            "추천 정확도를 검증할 지표와 기준값이 정의되지 않았습니다."
+          ],
+          "evidence_refs": [
+            {
+              "source_id": "DOC-MOCK-001",
+              "chunk_id": "CHUNK-014",
+              "source_type": "submission",
+              "page": 8,
+              "quote": "판매 이력과 현재 재고를 학습하여 매장별 발주량을 추천한다.",
+              "relevance": "추천 기능에 필요한 입력 데이터는 제시되어 있으나 확보 방안은 확인되지 않습니다."
+            },
+            {
+              "source_id": "DOC-MOCK-001",
+              "chunk_id": "CHUNK-017",
+              "source_type": "submission",
+              "page": 9,
+              "quote": "MVP 단계에서 개인화 AI 추천 모델을 완성한다.",
+              "relevance": "제한된 기간 안에 데이터 수집과 개인화 모델 완성을 동시에 계획하고 있습니다."
+            }
+          ],
+          "improvement_actions": [
+            "PoC에서는 규칙 기반 발주 추천을 구현하고 데이터가 축적된 뒤 예측 모델로 전환하는 단계 계획을 작성합니다.",
+            "추천 오차율, 품절 감소율, 폐기 감소율 등 검증 지표를 정의합니다."
+          ]
+        },
+        {
+          "criterion_id": "execution_plan",
+          "criterion_name": "실행계획",
+          "max_score": 20,
+          "score_recommendation": 12,
+          "judgment": "critical_risk",
+          "confidence": "high",
+          "strengths": [
+            "전체 개발 기간을 8주로 명시했습니다."
+          ],
+          "weaknesses": [
+            "데이터 수집, 모델 개발, 웹 개발, 실사용 검증이 같은 기간에 병렬로 배치되어 있습니다.",
+            "외부 POS 연동 실패 시 사용할 대체 입력 방식이 없습니다."
+          ],
+          "evidence_refs": [
+            {
+              "source_id": "DOC-MOCK-001",
+              "chunk_id": "CHUNK-020",
+              "source_type": "submission",
+              "page": 11,
+              "quote": "8주 동안 POS 연동, 데이터 수집, AI 모델 개발, 웹 서비스 개발과 현장 검증을 완료한다.",
+              "relevance": "핵심 작업이 같은 기간에 집중되어 일정 위험이 높음을 보여줍니다."
+            }
+          ],
+          "improvement_actions": [
+            "8주 목표를 데이터 입력·기본 대시보드·규칙 기반 추천으로 축소하고 AI 모델 고도화는 후속 단계로 분리합니다.",
+            "POS 연동이 지연될 경우 CSV 업로드를 사용하는 대체 계획을 추가합니다."
+          ]
+        }
+      ],
+      "cross_reviews": [
+        {
+          "target_persona_id": "business_strategy",
+          "relation": "supplement",
+          "target_criterion_id": "differentiation",
+          "comment": "AI 추천 기능은 차별 요소가 될 수 있지만, 초기 데이터가 부족하면 실제 품질을 입증하기 어렵습니다. 차별성 설명에 단계별 성능 검증 계획을 함께 제시해야 합니다.",
+          "evidence_refs": [
+            {
+              "source_id": "DOC-MOCK-001",
+              "chunk_id": "CHUNK-017",
+              "source_type": "submission",
+              "page": 9,
+              "quote": "MVP 단계에서 개인화 AI 추천 모델을 완성한다.",
+              "relevance": "차별 기능의 실현 가능성을 검증할 계획이 필요한 근거입니다."
+            }
+          ]
+        }
+      ],
+      "priority_actions": [
+        {
+          "priority": 1,
+          "criterion_id": "execution_plan",
+          "action": "MVP 범위를 기본 대시보드와 규칙 기반 추천으로 축소합니다.",
+          "reason": "현재 일정 안에 데이터 수집과 개인화 모델 완성을 동시에 추진하기 어렵습니다."
+        },
+        {
+          "priority": 2,
+          "criterion_id": "technical_feasibility",
+          "action": "데이터 확보·품질 관리·추천 성능 검증 기준을 추가합니다.",
+          "reason": "추천 기능의 구현과 평가에 필요한 데이터 계획이 누락되어 있습니다."
+        }
+      ],
+      "out_of_scope": [
+        {
+          "topic": "타깃 고객의 실제 지불 의사",
+          "reason": "고객 수요와 수익성에 대한 사업 관점 검토가 필요합니다.",
+          "handoff_persona_id": "business_strategy"
+        }
+      ]
+    }
+  ],
+  "score_engine_result": {
+    "status": "calculated",
+    "calculation_method": "criterion_owner_recommendation",
+    "criteria_scores": [
+      {
+        "criterion_id": "marketability",
+        "criterion_name": "시장성",
+        "max_score": 30,
+        "final_score": 20,
+        "source_review_ids": ["REV-MOCK-001"]
+      },
+      {
+        "criterion_id": "technical_feasibility",
+        "criterion_name": "기술·실현 가능성",
+        "max_score": 30,
+        "final_score": 18,
+        "source_review_ids": ["REV-MOCK-002"]
+      },
+      {
+        "criterion_id": "differentiation",
+        "criterion_name": "차별성",
+        "max_score": 20,
+        "final_score": 11,
+        "source_review_ids": ["REV-MOCK-001"]
+      },
+      {
+        "criterion_id": "execution_plan",
+        "criterion_name": "실행계획",
+        "max_score": 20,
+        "final_score": 12,
+        "source_review_ids": ["REV-MOCK-002"]
+      }
+    ],
+    "total_score": 61,
+    "total_max_score": 100
+  },
+  "chair_summary": {
+    "chair_id": "review_chair",
+    "overall_assessment": "문제와 타깃 고객은 명확하지만, 고객 수요 검증과 AI 추천 기능의 단계적 구현 계획이 부족합니다. 시장 검증 자료를 보강하고 MVP 범위를 축소하면 사업성과 실현 가능성을 함께 높일 수 있습니다.",
+    "consensus": [
+      "타깃 고객과 해결하려는 문제는 비교적 명확합니다.",
+      "AI 추천 기능을 뒷받침할 고객 검증과 데이터 확보 계획이 부족합니다.",
+      "현재 8주 MVP 범위는 축소가 필요합니다."
+    ],
+    "disagreements": [],
+    "top_strengths": [
+      "소규모 오프라인 매장이라는 타깃 고객이 구체적입니다.",
+      "재고 부족과 폐기 문제를 해결하려는 서비스 목적이 분명합니다."
+    ],
+    "top_risks": [
+      "고객 수요와 지불 의사를 입증할 근거가 없습니다.",
+      "초기 데이터 없이 개인화 추천 모델을 완성하려는 일정 위험이 큽니다.",
+      "기존 서비스 대비 차별성이 충분히 검증되지 않았습니다."
+    ],
+    "final_priority_actions": [
+      {
+        "priority": 1,
+        "action": "타깃 고객 인터뷰와 설문 결과를 사업계획서에 추가합니다.",
+        "related_criteria": ["marketability"]
+      },
+      {
+        "priority": 2,
+        "action": "MVP를 기본 대시보드와 규칙 기반 추천으로 축소합니다.",
+        "related_criteria": ["technical_feasibility", "execution_plan"]
+      },
+      {
+        "priority": 3,
+        "action": "경쟁 서비스 비교표와 차별 기능의 검증 계획을 추가합니다.",
+        "related_criteria": ["differentiation"]
+      }
+    ],
+    "final_decision": null,
+    "decision_note": "Mock 데이터에서는 합격·불합격 기준이 제공되지 않아 최종 선정 여부를 판단하지 않습니다."
+  }
+}
