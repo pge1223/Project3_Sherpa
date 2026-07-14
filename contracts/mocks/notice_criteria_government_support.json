@@ -1,0 +1,57 @@
+{
+  "meta": {
+    "project_name": "AI Review Board",
+    "schema_name": "notice_criteria",
+    "schema_version": "1.0.0",
+    "mock": true,
+    "owner": "용준 (RAG 파이프라인)",
+    "note": "용준의 실제 공고문 평가기준 추출 기능이 완료되기 전까지, 가은이 PER-002(동적 rubric 보정) 개발을 진행하기 위해 합의된 포맷으로 직접 작성한 샘플 데이터.",
+    "_comment": "이 파일은 RAG가 공고문에서 뽑아내는 '평가기준 추출 결과'를 흉내낸 목업이다. 실제 용준의 추출 기능이 완성되면 이 파일과 같은 구조의 JSON을 API 응답으로 반환하게 되고, 그 결과가 그대로 ai/meeting/personas/rubric_mapping_*.json 생성 로직의 입력이 된다. criteria[].weight가 null인 항목(execution_plan)은 공고문에 배점이 아직 공개되지 않은 경우를 재현한 것으로, rubric_mapping 파일에서 남은 배점을 배분하는 규칙을 테스트하기 위해 의도적으로 넣었다. 도메인을 추가할 때는 domain 값과 criterion_id만 바꿔 같은 구조로 새 mock 파일(notice_criteria_<domain>.json)을 만들면 된다.",
+    "created_at": "2026-07-14"
+  },
+  "domain": "government_support",
+  "notice_document_id": "NOTICE-MOCK-GOV-001",
+  "notice_title": "2026년 지역 소상공인 디지털 전환 지원사업 공고(예시)",
+  "criteria": [
+    {
+      "criterion_id": "necessity",
+      "name": "사업 필요성",
+      "description": "지원사업 목적 및 정책 방향에 부합하는 문제 인식과 추진 배경의 타당성",
+      "weight": 20,
+      "source_text": "본 사업의 필요성 및 추진 배경이 명확하고 지역 소상공인 디지털 전환 정책 목표에 부합하는지 평가한다.",
+      "page": 8
+    },
+    {
+      "criterion_id": "feasibility",
+      "name": "사업화 가능성",
+      "description": "제안 내용의 시장성과 사업화 실현 가능성",
+      "weight": 25,
+      "source_text": "제품·서비스의 시장 진입 가능성과 사업화 전략의 구체성을 평가한다.",
+      "page": 9
+    },
+    {
+      "criterion_id": "tech_capability",
+      "name": "기술성 및 수행역량",
+      "description": "제안 기술의 완성도와 신청기관의 수행 역량",
+      "weight": 25,
+      "source_text": "제안 기술의 완성도, 차별성 및 신청기관의 기술 수행 역량을 평가한다.",
+      "page": 10
+    },
+    {
+      "criterion_id": "execution_plan",
+      "name": "추진계획 적정성",
+      "description": "일정, 예산 배분, 위험관리 계획의 구체성과 실현 가능성",
+      "weight": null,
+      "source_text": "세부 추진 일정과 예산 집행 계획이 사업 목표 달성에 적합한지 평가한다. (배점은 별도 공고 예정)",
+      "page": 11
+    },
+    {
+      "criterion_id": "policy_alignment",
+      "name": "정책 부합성",
+      "description": "국가 및 지자체 디지털 전환 정책과의 연계성",
+      "weight": 10,
+      "source_text": "지역 디지털 뉴딜 정책 및 소상공인 지원 시책과의 연계성을 평가한다.",
+      "page": 8
+    }
+  ]
+}

@@ -1,0 +1,52 @@
+{
+  "_meta": {
+    "author": "경이",
+    "created": "2026-07-14",
+    "milestone": "M1",
+    "requirement": "MTG-001(개별평가) 입력용 - Mock Retriever 결과",
+    "role": "경이가 입력으로 소비하는 Mock (실제 규격은 용준 Retriever JSON으로 교체 예정)",
+    "references": [
+      "docs/claude_context.md#8.1 RAG 검색 결과",
+      "docs/AI_Review_Board_병렬개발_업무흐름.md#5.3"
+    ],
+    "note": "용준 확정 규격 대기 중인 잠정 계약. JSON 주석 불가로 _meta 사용. contracts/mocks 승격 시 _meta 제거."
+  },
+  "data": [
+    {
+      "schema_version": "1.0",
+      "project_id": "project_001",
+      "document_id": "document_001",
+      "persona_id": "business_strategy",
+      "query": "시장 문제와 목표 고객이 구체적으로 정의되어 있는가?",
+      "evidence": [
+        {
+          "chunk_id": "chunk_001",
+          "document_name": "사업계획서.pdf",
+          "page": 3,
+          "section": "문제 정의",
+          "text": "초기 창업자는 지원사업 정보를 찾는 데 평균적으로 많은 시간을 사용한다.",
+          "score": 0.87
+        }
+      ],
+      "evidence_status": "sufficient"
+    },
+    {
+      "schema_version": "1.0",
+      "project_id": "project_001",
+      "document_id": "document_001",
+      "persona_id": "market_analysis",
+      "query": "시장 규모 주장에 정량적 근거와 출처가 제시되어 있는가?",
+      "evidence": [
+        {
+          "chunk_id": "chunk_005",
+          "document_name": "사업계획서.pdf",
+          "page": 5,
+          "section": "시장 규모",
+          "text": "국내 예비창업자 시장은 매년 성장하고 있으며 잠재 수요가 크다.",
+          "score": 0.81
+        }
+      ],
+      "evidence_status": "partial"
+    }
+  ]
+}

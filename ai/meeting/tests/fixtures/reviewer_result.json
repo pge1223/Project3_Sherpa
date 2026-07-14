@@ -1,0 +1,107 @@
+{
+  "_meta": {
+    "author": "경이",
+    "created": "2026-07-14",
+    "milestone": "M1",
+    "requirement": "MTG-001(위원별 독립 평가) 출력용 - 경이가 생산",
+    "role": "LangGraph reviewer 노드가 생산하는 위원별 평가 결과 (위원 2명분)",
+    "references": [
+      "contracts/schemas/review_output.schema.json#/$defs/reviewerResult"
+    ],
+    "note": "data 배열의 각 항목이 review_output.schema.json 의 reviewerResult 정의를 통과함. JSON 주석 불가로 _meta 사용."
+  },
+  "data": [
+    {
+      "persona_id": "business_strategy",
+      "role": "사업전략 전문가",
+      "summary": "문제 정의는 명확하나 목표 고객 범위가 넓어 우선순위가 불분명하다.",
+      "rubric_scores": [
+        {
+          "criterion_id": "market_need",
+          "criterion_name": "시장 필요성",
+          "score": 72,
+          "max_score": 100,
+          "strengths": [
+            "문제 상황이 사용자 관점에서 설명되어 있다."
+          ],
+          "issues": [
+            "목표 고객의 범위가 넓어 핵심 대상이 불분명하다."
+          ],
+          "suggestions": [
+            "예비창업자와 초기 법인 대표를 구분해 각각의 니즈를 기술한다."
+          ],
+          "evidence_ids": [
+            "ev_001"
+          ],
+          "evidence_status": "sufficient"
+        },
+        {
+          "criterion_id": "solution_feasibility",
+          "criterion_name": "솔루션 실현 가능성",
+          "score": 65,
+          "max_score": 100,
+          "strengths": [
+            "핵심 기능이 정의되어 있다."
+          ],
+          "issues": [
+            "구현 일정과 자원 계획이 부족하다."
+          ],
+          "suggestions": [
+            "MVP 범위와 마일스톤, 필요한 자원을 명시한다."
+          ],
+          "evidence_ids": [
+            "ev_003"
+          ],
+          "evidence_status": "partial"
+        }
+      ],
+      "confidence": "medium"
+    },
+    {
+      "persona_id": "market_analysis",
+      "role": "시장분석 전문가",
+      "summary": "시장 규모 주장에 대한 정량적 근거와 출처가 부족하다.",
+      "rubric_scores": [
+        {
+          "criterion_id": "market_need",
+          "criterion_name": "시장 필요성",
+          "score": 68,
+          "max_score": 100,
+          "strengths": [
+            "목표 시장의 문제의식이 드러난다."
+          ],
+          "issues": [
+            "시장 규모 수치의 출처가 제시되지 않았다."
+          ],
+          "suggestions": [
+            "시장 규모 추정 근거와 출처(통계·보고서)를 추가한다."
+          ],
+          "evidence_ids": [
+            "ev_002"
+          ],
+          "evidence_status": "partial"
+        },
+        {
+          "criterion_id": "solution_feasibility",
+          "criterion_name": "솔루션 실현 가능성",
+          "score": 70,
+          "max_score": 100,
+          "strengths": [
+            "경쟁 대비 차별점이 언급된다."
+          ],
+          "issues": [
+            "차별점의 지속 가능성 근거가 약하다."
+          ],
+          "suggestions": [
+            "진입장벽과 방어 전략을 보강한다."
+          ],
+          "evidence_ids": [
+            "ev_003"
+          ],
+          "evidence_status": "partial"
+        }
+      ],
+      "confidence": "medium"
+    }
+  ]
+}
