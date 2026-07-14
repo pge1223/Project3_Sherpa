@@ -1,0 +1,43 @@
+{
+  "meta": {
+    "project_name": "AI Review Board",
+    "schema_name": "domain_committee",
+    "schema_version": "1.0.0",
+    "mock": false,
+    "_comment": "PER-001 산출물: persona_cards.json(전문가 라이브러리)에서 공모전형 문서 검토에 쓸 위원 4명 + 위원장 1명을 선택하고 발언 순서를 정의한다. committee의 persona_id는 반드시 persona_cards.json에 존재해야 하며, 이 파일 자체는 각 위원의 상세 프롬프트를 담지 않는다(상세는 라이브러리 쪽 책임).",
+    "created_at": "2026-07-14"
+  },
+  "domain": "competition",
+  "domain_display_name": "공모전형",
+  "chair_id": "review_chair",
+  "committee": [
+    {
+      "seat_order": 1,
+      "persona_id": "creativity_originality",
+      "focus_note": "아이디어의 참신성과 접근 방식의 차별성을 검토"
+    },
+    {
+      "seat_order": 2,
+      "persona_id": "technical_feasibility",
+      "focus_note": "구현 가능성과 완성 난이도를 검토"
+    },
+    {
+      "seat_order": 3,
+      "persona_id": "business_strategy",
+      "focus_note": "사업화·확장 가능성을 검토(공모전 유형에 따라 비중 조정)"
+    },
+    {
+      "seat_order": 4,
+      "persona_id": "presentation_completeness",
+      "focus_note": "결과물 완성도와 전달력을 검토"
+    }
+  ],
+  "speaking_order": [
+    "creativity_originality",
+    "technical_feasibility",
+    "business_strategy",
+    "presentation_completeness",
+    "review_chair"
+  ],
+  "notes": "완성도·전달력은 보통 마지막에 종합적으로 판단하는 경우가 많아 speaking_order 마지막에 배치했다. business_strategy는 사업화 요소가 없는 순수 기술/아이디어 공모전에서는 not_applicable 판단이 나올 수 있음을 감안한다. 1차 회의는 이 순서대로 독립 평가하고, 2차 회의에서 review_chair가 종합한다."
+}
