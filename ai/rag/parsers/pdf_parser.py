@@ -4,7 +4,7 @@ PDF Parser using PyMuPDF
 """
 
 import fitz  # PyMuPDF
-from typing import Optional
+from typing import Optional, Set
 
 from ai.rag.parsers.base_parser import BaseParser
 from ai.rag.parsers.base_ocr import BaseOCR, OCRResult
@@ -167,6 +167,9 @@ class PDFParser(BaseParser):
         ocr_images_count = 0
         ocr_failed_count = 0
 
+        # 페이지 간 중복 OCR 방지: 이미 처리된 이미지 xref 추적
+        processed_xrefs: Set[int] = set()
+
         for page_num in range(page_count):
             page = doc[page_num]
             page_text = page.get_text("text").strip()
@@ -205,7 +208,29 @@ class PDFParser(BaseParser):
                                 global_order += 1
 
             # 이미지 블록 추출 및 OCR 수행
-            for img_index, img in enumerate(page.get_images(full=True)):
+            # page.get_images()가 반환하는 이미지 중 실제 페이지에 표시되는 것만 필터링
+            page_images = page.get_images(full=True)
+
+            for img_index, img in enumerate(page_images):
+                xref = img[0]
+
+                # 이미 전체 문서에서 처리된 이미지인지 확인
+                if xref in processed_xrefs:
+                    continue
+
+                # 해당 이미지가 현재 페이지에 실제 표시되는지 확인
+                try:
+                    rects = page.get_image_rects(xref)
+                    if not rects:
+                        # rect가 없으면 현재 페이지에 표시되지 않는 이미지
+                        continue
+                except Exception:
+                    # get_image_rects 실패 시 안전하게 건너뛰기
+                    continue
+
+                # 처리 대상으로 표시
+                processed_xrefs.add(xref)
+
                 block_obj, global_order = self._extract_image_with_ocr(
                     page=page,
                     img=img,
@@ -246,6 +271,13 @@ class PDFParser(BaseParser):
             warnings.append(
                 "EasyOCR이 설치되어 있지 않습니다. 이미지 OCR을 건너뜁니다. "
                 "pip install easyocr으로 설치해주세요."
+            )
+
+        # OCR 성공 후 텍스트가 비어 있는 경우 경고
+        if ocr_images_count > 0 and ocr_failed_count == ocr_images_count:
+            warnings.append(
+                f"모든 이미지 OCR이 실패했습니다. 이미지가 스캔된 텍스트가 아니거나 "
+                f"OCR 모델이 해당 언어를 지원하지 않을 수 있습니다."
             )
 
         if len(blocks) == 0:

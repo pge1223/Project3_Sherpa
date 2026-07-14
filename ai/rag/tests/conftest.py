@@ -14,6 +14,16 @@ project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 
+def pytest_configure(config):
+    """Pytest 커스텀 마커 등록"""
+    config.addinivalue_line(
+        "markers", "ocr: 스캔 PDF OCR 통합 테스트 (실제 EasyOCR 모델 사용)"
+    )
+    config.addinivalue_line(
+        "markers", "slow: 실행 시간이 오래 걸리는 테스트"
+    )
+
+
 @pytest.fixture
 def fixtures_dir() -> Path:
     """테스트 픽스처 디렉토리 경로"""
@@ -63,11 +73,17 @@ def txt_file(fixtures_dir: Path) -> Path:
 
 
 @pytest.fixture
+def scanned_pdf(fixtures_dir: Path) -> Path:
+    """스캔 PDF 파일 (테스트용)"""
+    return fixtures_dir / "test2.pdf"
+
+
+@pytest.fixture
 def ocr_engine():
-    """테스트용 EasyOCR 엔진"""
+    """테스트용 EasyOCR 엔진 (lazy initialization, 모델 다운로드 안 함)"""
     try:
         from ai.rag.parsers.easyocr_engine import EasyOCR
-        ocr = EasyOCR(languages=["ko", "en"], gpu=False)
+        ocr = EasyOCR(languages=["ko", "en"], gpu=False, download_enabled=False)
         if ocr.is_available():
             return ocr
         return None
