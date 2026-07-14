@@ -2,9 +2,9 @@
   "meta": {
     "project_name": "AI Review Board",
     "schema_name": "domain_committee",
-    "schema_version": "1.0.0",
+    "schema_version": "1.1.0",
     "mock": false,
-    "_comment": "PER-001 산출물: persona_cards.json(전문가 라이브러리)에서 스타트업형 문서 검토에 쓸 위원 4명 + 위원장 1명을 선택하고 발언 순서를 정의한다. committee의 persona_id는 반드시 persona_cards.json에 존재해야 하며, 이 파일 자체는 각 위원의 상세 프롬프트를 담지 않는다(상세는 라이브러리 쪽 책임).",
+    "_comment": "PER-001 산출물: persona_cards.json(전문가 라이브러리)에서 스타트업형 문서 검토에 쓸 위원 4명 + 위원장 1명을 선택하고 발언 순서를 정의한다. committee의 persona_id는 반드시 persona_cards.json에 존재해야 하며, 이 파일 자체는 각 위원의 상세 프롬프트를 담지 않는다(상세는 라이브러리 쪽 책임). PER-003에서 meeting_culture 필드를 추가해 도메인별 회의 분위기·위원장 질문 초점·개입 방식을 정의했다. guardrails는 tone이 실제 평가 기준이나 점수 규칙을 바꾸지 않도록 막는 안전장치다.",
     "created_at": "2026-07-14"
   },
   "domain": "startup",
@@ -39,5 +39,20 @@
     "investment_readiness",
     "review_chair"
   ],
+  "meeting_culture": {
+    "tone_keywords": ["빠름", "실용적", "실행 중심"],
+    "pace": "fast",
+    "interaction_style": "위원 간 cross_reviews를 적극 사용해 서로의 판단에 agree·supplement·disagree를 자주 표시한다. 각 위원 발언은 짧고 핵심 위주로 유지한다.",
+    "chair_focus_questions": [
+      "이 사업이 지금 이 시점에 필요한 이유는 무엇인가",
+      "다음 단계에서 가장 먼저 검증해야 할 핵심 가설은 무엇인가",
+      "현재 자금·리소스로 어디까지 실행 가능한가"
+    ],
+    "chair_intervention_style": "위원 의견을 실행 가능성 중심으로 빠르게 압축해 수정 우선순위 3~5개로 정리한다.",
+    "guardrails": [
+      "회의 분위기(tone)는 위원 말투 조정에만 쓰고, 평가 기준이나 배점을 임의로 바꾸지 않는다.",
+      "속도감 있는 진행이 근거 없는 단정으로 이어지지 않도록 한다."
+    ]
+  },
   "notes": "1차 회의(개별 리뷰)에서는 위 순서대로 독립 평가를 생성하고, 2차 회의에서 review_chair가 마지막에 종합한다. MVP 영상화 대상(HAI-001)은 이 4명 중 business_strategy·technical_feasibility 2인만 우선 사용한다."
 }

@@ -1,0 +1,49 @@
+@property --login-glow-angle {
+  syntax: '<angle>';
+  initial-value: 0deg;
+  inherits: false;
+}
+
+.login-card-glow {
+  position: relative;
+  z-index: 2;
+  border-radius: 18px;
+}
+
+.login-card-glow::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 18px;
+  padding: 3px;
+  background: conic-gradient(
+    from var(--login-glow-angle),
+    transparent 0%,
+    rgba(122, 164, 255, 0.67) 10%,
+    rgba(184, 139, 255, 0.67) 22%,
+    rgba(122, 164, 255, 0.67) 34%,
+    transparent 46%,
+    transparent 100%
+  );
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  mask-composite: exclude;
+  animation: loginGlowSpin 4.5s linear infinite;
+  pointer-events: none;
+}
+
+.login-card-glow::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 18px;
+  box-shadow: 0 0 27px rgba(120, 160, 255, 0.37), 0 0 8px rgba(184, 139, 255, 0.27);
+  pointer-events: none;
+}
+
+@keyframes loginGlowSpin {
+  to {
+    --login-glow-angle: 360deg;
+  }
+}

@@ -2,9 +2,9 @@
   "meta": {
     "project_name": "AI Review Board",
     "schema_name": "domain_committee",
-    "schema_version": "1.0.0",
+    "schema_version": "1.1.0",
     "mock": false,
-    "_comment": "PER-001 산출물: persona_cards.json(전문가 라이브러리)에서 공모전형 문서 검토에 쓸 위원 4명 + 위원장 1명을 선택하고 발언 순서를 정의한다. committee의 persona_id는 반드시 persona_cards.json에 존재해야 하며, 이 파일 자체는 각 위원의 상세 프롬프트를 담지 않는다(상세는 라이브러리 쪽 책임).",
+    "_comment": "PER-001 산출물: persona_cards.json(전문가 라이브러리)에서 공모전형 문서 검토에 쓸 위원 4명 + 위원장 1명을 선택하고 발언 순서를 정의한다. committee의 persona_id는 반드시 persona_cards.json에 존재해야 하며, 이 파일 자체는 각 위원의 상세 프롬프트를 담지 않는다(상세는 라이브러리 쪽 책임). PER-003에서 meeting_culture 필드를 추가해 도메인별 회의 분위기·위원장 질문 초점·개입 방식을 정의했다. guardrails는 tone이 실제 평가 기준이나 점수 규칙을 바꾸지 않도록 막는 안전장치다.",
     "created_at": "2026-07-14"
   },
   "domain": "competition",
@@ -39,5 +39,20 @@
     "presentation_completeness",
     "review_chair"
   ],
+  "meeting_culture": {
+    "tone_keywords": ["호기심", "격려", "냉정한 평가 기준 적용"],
+    "pace": "moderate",
+    "interaction_style": "창의성 위원이 먼저 아이디어의 판을 깔고, 기술 위원이 현실성을 점검하며, 위원장이 창의성과 실현 가능성 사이 균형을 조율한다. 격려하는 어조를 쓰되 평가 기준 적용은 냉정하게 유지한다.",
+    "chair_focus_questions": [
+      "이 아이디어가 기존 접근과 다른 지점은 무엇인가",
+      "제출된 형태로 실제 구현·시연이 가능한가",
+      "제출물이 심사 기준을 충분히 전달하고 있는가"
+    ],
+    "chair_intervention_style": "위원장은 창의성 점수와 실현 가능성 점수가 크게 엇갈리는 경우 이를 이견으로 명확히 드러내고, 완성도 보완을 우선순위에 반영한다.",
+    "guardrails": [
+      "회의 분위기(tone)는 위원 말투 조정에만 쓰고, 평가 기준이나 배점을 임의로 바꾸지 않는다.",
+      "격려하는 어조가 근거 없는 칭찬이나 과도한 역할극으로 흐르지 않도록 한다."
+    ]
+  },
   "notes": "완성도·전달력은 보통 마지막에 종합적으로 판단하는 경우가 많아 speaking_order 마지막에 배치했다. business_strategy는 사업화 요소가 없는 순수 기술/아이디어 공모전에서는 not_applicable 판단이 나올 수 있음을 감안한다. 1차 회의는 이 순서대로 독립 평가하고, 2차 회의에서 review_chair가 종합한다."
 }
