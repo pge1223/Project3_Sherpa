@@ -1,0 +1,229 @@
+{
+  "_meta": {
+    "author": "경이",
+    "created": "2026-07-14",
+    "milestone": "M1",
+    "requirement": "MTG-002(위원장 종합) 및 최종 회의 결과 - 경이가 생산",
+    "role": "LangGraph 회의 종료 시 생산하는 최종 결과. 윤한(저장/API)·가은(리포트 UI) 참조용",
+    "references": [
+      "contracts/schemas/review_output.schema.json (전체)",
+      "contracts/meeting_rules.json"
+    ],
+    "note": "data 가 review_output.schema.json 전체를 통과함. score_result 값은 M2 점수 엔진이 계산할 예정(여기선 예시). JSON 주석 불가로 _meta 사용."
+  },
+  "data": {
+    "schema_version": "1.0",
+    "meeting_id": "meeting_001",
+    "project_id": "project_001",
+    "document_id": "document_001",
+    "status": "completed",
+    "domain": "startup",
+    "reviewer_results": [
+      {
+        "persona_id": "business_strategy",
+        "role": "사업전략 전문가",
+        "summary": "문제 정의는 명확하나 목표 고객 범위가 넓어 우선순위가 불분명하다.",
+        "rubric_scores": [
+          {
+            "criterion_id": "market_need",
+            "criterion_name": "시장 필요성",
+            "score": 72,
+            "max_score": 100,
+            "strengths": [
+              "문제 상황이 사용자 관점에서 설명되어 있다."
+            ],
+            "issues": [
+              "목표 고객의 범위가 넓어 핵심 대상이 불분명하다."
+            ],
+            "suggestions": [
+              "예비창업자와 초기 법인 대표를 구분해 각각의 니즈를 기술한다."
+            ],
+            "evidence_ids": [
+              "ev_001"
+            ],
+            "evidence_status": "sufficient"
+          },
+          {
+            "criterion_id": "solution_feasibility",
+            "criterion_name": "솔루션 실현 가능성",
+            "score": 65,
+            "max_score": 100,
+            "strengths": [
+              "핵심 기능이 정의되어 있다."
+            ],
+            "issues": [
+              "구현 일정과 자원 계획이 부족하다."
+            ],
+            "suggestions": [
+              "MVP 범위와 마일스톤, 필요한 자원을 명시한다."
+            ],
+            "evidence_ids": [
+              "ev_003"
+            ],
+            "evidence_status": "partial"
+          }
+        ],
+        "confidence": "medium"
+      },
+      {
+        "persona_id": "market_analysis",
+        "role": "시장분석 전문가",
+        "summary": "시장 규모 주장에 대한 정량적 근거와 출처가 부족하다.",
+        "rubric_scores": [
+          {
+            "criterion_id": "market_need",
+            "criterion_name": "시장 필요성",
+            "score": 68,
+            "max_score": 100,
+            "strengths": [
+              "목표 시장의 문제의식이 드러난다."
+            ],
+            "issues": [
+              "시장 규모 수치의 출처가 제시되지 않았다."
+            ],
+            "suggestions": [
+              "시장 규모 추정 근거와 출처(통계·보고서)를 추가한다."
+            ],
+            "evidence_ids": [
+              "ev_002"
+            ],
+            "evidence_status": "partial"
+          },
+          {
+            "criterion_id": "solution_feasibility",
+            "criterion_name": "솔루션 실현 가능성",
+            "score": 70,
+            "max_score": 100,
+            "strengths": [
+              "경쟁 대비 차별점이 언급된다."
+            ],
+            "issues": [
+              "차별점의 지속 가능성 근거가 약하다."
+            ],
+            "suggestions": [
+              "진입장벽과 방어 전략을 보강한다."
+            ],
+            "evidence_ids": [
+              "ev_003"
+            ],
+            "evidence_status": "partial"
+          }
+        ],
+        "confidence": "medium"
+      }
+    ],
+    "score_result": {
+      "total_score": 69,
+      "max_score": 100,
+      "score_label": "evaluation_criteria_alignment",
+      "calculation_version": "score_v1",
+      "breakdown": [
+        {
+          "criterion_id": "market_need",
+          "raw_score": 70,
+          "weight": 0.6,
+          "weighted_score": 42,
+          "penalty": 0
+        },
+        {
+          "criterion_id": "solution_feasibility",
+          "raw_score": 67.5,
+          "weight": 0.4,
+          "weighted_score": 27,
+          "penalty": 0
+        }
+      ]
+    },
+    "agreements": [
+      "두 위원 모두 문제 정의 자체는 이해 가능하다고 평가했다.",
+      "두 위원 모두 목표 고객과 시장 근거의 구체성이 부족하다고 보았다."
+    ],
+    "disagreements": [
+      {
+        "topic": "시장 필요성 점수 수준",
+        "positions": [
+          "사업전략 전문가: 72점 - 문제 정의가 상대적으로 명확하다.",
+          "시장분석 전문가: 68점 - 시장 규모 근거 부족이 더 큰 감점 요인이다."
+        ],
+        "chair_resolution": "두 의견의 공통 근거(목표 고객·시장 근거의 구체성 부족)를 반영해 개선 우선순위 1순위로 지정한다."
+      }
+    ],
+    "top_revisions": [
+      {
+        "priority": 1,
+        "title": "목표 고객 세분화",
+        "reason": "목표 고객 범위가 넓어 평가 근거가 분산된다.",
+        "target": "문제 정의 / 목표 고객 섹션",
+        "action": "예비창업자와 초기 법인 대표를 구분해 각각의 니즈를 기술한다.",
+        "evidence_ids": [
+          "ev_001"
+        ]
+      },
+      {
+        "priority": 2,
+        "title": "시장 규모 근거 보강",
+        "reason": "시장 규모 수치의 출처가 제시되지 않았다.",
+        "target": "시장 규모 섹션",
+        "action": "추정 방식과 출처(통계·보고서)를 추가한다.",
+        "evidence_ids": [
+          "ev_002"
+        ]
+      },
+      {
+        "priority": 3,
+        "title": "실행 계획 구체화",
+        "reason": "구현 일정과 자원 계획이 부족하다.",
+        "target": "솔루션 / 실행 계획 섹션",
+        "action": "MVP 범위와 마일스톤, 필요한 자원을 명시한다.",
+        "evidence_ids": [
+          "ev_003"
+        ]
+      }
+    ],
+    "evidence": [
+      {
+        "evidence_id": "ev_001",
+        "chunk_id": "chunk_001",
+        "document_name": "사업계획서.pdf",
+        "page": 3,
+        "section": "문제 정의",
+        "text": "초기 창업자는 지원사업 정보를 찾는 데 평균적으로 많은 시간을 사용한다.",
+        "score": 0.87
+      },
+      {
+        "evidence_id": "ev_002",
+        "chunk_id": "chunk_005",
+        "document_name": "사업계획서.pdf",
+        "page": 5,
+        "section": "시장 규모",
+        "text": "국내 예비창업자 시장은 매년 성장하고 있으며 잠재 수요가 크다.",
+        "score": 0.81
+      },
+      {
+        "evidence_id": "ev_003",
+        "chunk_id": "chunk_008",
+        "document_name": "사업계획서.pdf",
+        "page": 7,
+        "section": "솔루션",
+        "text": "핵심 기능은 문서 자동 분석과 개선 사항 추천이다.",
+        "score": 0.79
+      }
+    ],
+    "media_script": [
+      {
+        "speaker_id": "business_strategy",
+        "speaker_name": "사업전략 전문가",
+        "order": 1,
+        "text": "문제 정의는 명확하지만 목표 고객의 범위가 넓어 우선순위가 불분명합니다.",
+        "emotion": "serious"
+      },
+      {
+        "speaker_id": "market_analysis",
+        "speaker_name": "시장분석 전문가",
+        "order": 2,
+        "text": "시장 규모 주장에는 출처가 필요합니다. 근거를 보강하면 설득력이 올라갑니다.",
+        "emotion": "supportive"
+      }
+    ]
+  }
+}
