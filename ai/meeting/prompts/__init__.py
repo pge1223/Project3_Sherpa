@@ -1,0 +1,21 @@
+# 작성자: 경이
+# 목적: ai/meeting/prompts 패키지 공개 인터페이스. prompt_loader 의 조립 함수를 노출한다.
+# import: 같은 패키지의 prompt_loader 모듈.
+
+from .prompt_loader import (
+    build_chair_prompt,
+    build_reviewer_prompt,
+    get_persona_card,
+    load_persona_cards,
+    render_persona_block,
+    reviewer_personas_for_domain,
+)
+
+__all__ = [
+    "build_chair_prompt",
+    "build_reviewer_prompt",
+    "get_persona_card",
+    "load_persona_cards",
+    "render_persona_block",
+    "reviewer_personas_for_domain",
+]
