@@ -1,0 +1,5 @@
+# 최소 의존성 — ai/meeting(LangGraph) 모듈 로컬 개발 unblock 용
+# 전체 배포/공통 requirements.txt는 윤한과 상의 후 확정 필요
+langgraph
+jsonschema
+pytest
