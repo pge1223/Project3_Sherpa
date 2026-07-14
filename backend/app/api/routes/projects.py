@@ -20,7 +20,7 @@ def get_current_user(authorization: str) -> str:
 
 # PRJ-001 프로젝트 생성
 @router.post("/", response_model=ProjectResponse)
-async def create_project(request: ProjectCreateRequest, authorization: str = Header(...)):
+async def create_project(request: ProjectCreateRequest, authorization: str = Header(..., alias="authorization")):
     user_email = get_current_user(authorization)
 
     project = ProjectModel(
@@ -44,7 +44,7 @@ async def create_project(request: ProjectCreateRequest, authorization: str = Hea
 
 # PRJ-002 프로젝트 목록 조회
 @router.get("/", response_model=list[ProjectResponse])
-async def get_projects(authorization: str = Header(...)):
+async def get_projects(authorization: str = Header(..., alias="authorization")):
     user_email = get_current_user(authorization)
     projects = await project_repo.find_by_user(user_email)
 
@@ -64,7 +64,7 @@ async def get_projects(authorization: str = Header(...)):
 
 # PRJ-003 프로젝트 상세 조회
 @router.get("/{project_id}", response_model=ProjectResponse)
-async def get_project(project_id: str, authorization: str = Header(...)):
+async def get_project(project_id: str, authorization: str = Header(..., alias="authorization")):
     user_email = get_current_user(authorization)
     project = await project_repo.find_by_id_and_user(project_id, user_email)
 
@@ -84,7 +84,7 @@ async def get_project(project_id: str, authorization: str = Header(...)):
 
 # PRJ-004 프로젝트 삭제
 @router.delete("/{project_id}")
-async def delete_project(project_id: str, authorization: str = Header(...)):
+async def delete_project(project_id: str, authorization: str = Header(..., alias="authorization")):
     user_email = get_current_user(authorization)
     project = await project_repo.find_by_id_and_user(project_id, user_email)
 
