@@ -1,0 +1,76 @@
+.space-bg {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+  background: radial-gradient(ellipse at 50% 0%, #142042 0%, #0a0e1e 60%, #060812 100%);
+}
+
+.space-blob {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(70px);
+  opacity: 0.55;
+  pointer-events: none;
+}
+
+.space-nebula {
+  position: absolute;
+  filter: blur(50px);
+  opacity: 0.65;
+  pointer-events: none;
+  border-radius: 42% 58% 60% 40% / 45% 40% 60% 55%;
+}
+
+.space-nebula-1 {
+  width: 620px;
+  height: 560px;
+  top: -40px;
+  left: 20px;
+  background:
+    radial-gradient(circle at 28% 32%, rgba(120, 90, 240, 0.55) 0%, transparent 45%),
+    radial-gradient(circle at 62% 40%, rgba(60, 130, 230, 0.5) 0%, transparent 48%),
+    radial-gradient(circle at 48% 66%, rgba(180, 70, 190, 0.4) 0%, transparent 45%),
+    radial-gradient(circle at 70% 68%, rgba(50, 190, 210, 0.3) 0%, transparent 42%);
+  animation: nebulaDrift1 70s ease-in-out infinite;
+}
+
+.space-nebula-2 {
+  width: 640px;
+  height: 580px;
+  bottom: -200px;
+  right: -160px;
+  background:
+    radial-gradient(circle at 35% 30%, rgba(140, 70, 220, 0.5) 0%, transparent 46%),
+    radial-gradient(circle at 65% 45%, rgba(200, 80, 170, 0.4) 0%, transparent 48%),
+    radial-gradient(circle at 50% 70%, rgba(50, 110, 230, 0.45) 0%, transparent 45%),
+    radial-gradient(circle at 25% 65%, rgba(60, 200, 200, 0.28) 0%, transparent 42%);
+  animation: nebulaDrift2 84s ease-in-out infinite;
+}
+
+@keyframes nebulaDrift1 {
+  0% { transform: translate(0, 0) rotate(0deg) scale(1); }
+  50% { transform: translate(50px, 70px) rotate(180deg) scale(1.08); }
+  100% { transform: translate(0, 0) rotate(360deg) scale(1); }
+}
+
+@keyframes nebulaDrift2 {
+  0% { transform: translate(0, 0) rotate(0deg) scale(1); }
+  50% { transform: translate(-60px, -40px) rotate(-180deg) scale(1.06); }
+  100% { transform: translate(0, 0) rotate(-360deg) scale(1); }
+}
+
+.space-blob-3 {
+  width: 360px;
+  height: 360px;
+  background: radial-gradient(circle, #1f9be0 0%, transparent 70%);
+  top: 40%;
+  left: 55%;
+  animation: blobFloat3 22s ease-in-out infinite;
+}
+
+@keyframes blobFloat3 {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  50% { transform: translate(-40px, 40px) scale(0.95); }
+}
