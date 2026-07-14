@@ -60,3 +60,16 @@ def large_file(fixtures_dir: Path) -> Path:
 def txt_file(fixtures_dir: Path) -> Path:
     """텍스트 파일 (지원하지 않는 형식)"""
     return fixtures_dir / "sample.txt"
+
+
+@pytest.fixture
+def ocr_engine():
+    """테스트용 EasyOCR 엔진"""
+    try:
+        from ai.rag.parsers.easyocr_engine import EasyOCR
+        ocr = EasyOCR(languages=["ko", "en"], gpu=False)
+        if ocr.is_available():
+            return ocr
+        return None
+    except ImportError:
+        return None

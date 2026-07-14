@@ -187,6 +187,53 @@ class TestBlockIDDeterminism:
             assert b1.block_id == b2.block_id, "동일 파일에서 생성된 block_id가 같아야 합니다"
 
 
+class TestOCRService:
+    """OCR 서비스 테스트"""
+
+    def test_ocr_engine_import(self):
+        """OCR 모듈 import 가능"""
+        try:
+            from ai.rag.parsers.base_ocr import BaseOCR
+            from ai.rag.parsers.easyocr_engine import EasyOCR
+            from ai.rag.parsers import BaseOCR, OCRResult
+            assert True
+        except ImportError:
+            pytest.skip("OCR 종속성 설치 필요")
+
+    def test_ocr_result_dataclass(self):
+        """OCRResult 데이터 클래스 테스트"""
+        if self._is_ocr_available(raise_skip=False):
+            from ai.rag.parsers.base_ocr import OCRResult
+            result = OCRResult(text="테스트", confidence=0.95)
+            assert result.text == "테스트"
+            assert result.confidence == 0.95
+            assert result.bounding_boxes is None
+
+    def test_easyocr_initialization(self, ocr_engine):
+        """EasyOCR 초기화 테스트"""
+        if ocr_engine is None:
+            pytest.skip("EasyOCR 설치 필요")
+
+        assert ocr_engine.name == "EasyOCR"
+        assert "ko" in ocr_engine.supported_languages
+        assert "en" in ocr_engine.supported_languages
+
+    def _is_ocr_available(self, raise_skip: bool = True):
+        """OCR가 사용 가능한지 확인"""
+        try:
+            from ai.rag.parsers.easyocr_engine import EasyOCR
+            ocr = EasyOCR(languages=["ko", "en"], gpu=False)
+            if ocr.is_available():
+                return True
+            if raise_skip:
+                pytest.skip("EasyOCR 설치 및 모델 다운로드 필요")
+            return False
+        except ImportError:
+            if raise_skip:
+                pytest.skip("EasyOCR 설치 필요: pip install easyocr")
+            return False
+
+
 class TestScannedPDFDetection:
     """스캔 PDF 탐지 테스트"""
 
@@ -201,6 +248,51 @@ class TestScannedPDFDetection:
         if result.is_scanned_pdf:
             assert result.requires_ocr is True
             assert any("OCR" in w or "스캔" in w for w in result.warnings)
+
+
+class TestPDFParserOCR:
+    """PDF 파서 OCR 통합 테스트"""
+
+    def test_pdf_parser_with_ocr_disabled(self, sample_pdf: Path):
+        """OCR 비활성화 상태로 PDF 파싱"""
+        if not sample_pdf.exists():
+            pytest.skip(f"Test fixture not found: {sample_pdf}")
+
+        from ai.rag.parsers import PDFParser
+
+        parser = PDFParser(str(sample_pdf), enable_ocr=False)
+        result = parser.parse()
+
+        assert result.file_type == FileType.PDF
+        assert result.block_count > 0
+
+    def test_pdf_parser_ocr_engine_property(self, sample_pdf: Path):
+        """PDFParser OCR 엔진 프로퍼티 테스트"""
+        if not sample_pdf.exists():
+            pytest.skip(f"Test fixture not found: {sample_pdf}")
+
+        from ai.rag.parsers import PDFParser
+
+        parser = PDFParser(str(sample_pdf))
+
+        # OCR 비활성화 시 None 반환
+        parser_disabled = PDFParser(str(sample_pdf), enable_ocr=False)
+        assert parser_disabled.ocr_engine is None
+
+    def test_pdf_parser_with_custom_ocr_engine(self, sample_pdf: Path, ocr_engine):
+        """커스텀 OCR 엔진으로 PDF 파싱"""
+        if not sample_pdf.exists():
+            pytest.skip(f"Test fixture not found: {sample_pdf}")
+        if ocr_engine is None:
+            pytest.skip("EasyOCR 설치 필요")
+
+        from ai.rag.parsers import PDFParser
+
+        parser = PDFParser(str(sample_pdf), ocr_engine=ocr_engine)
+        assert parser.is_ocr_available() is True
+
+        result = parser.parse()
+        assert result.block_count > 0
 
 
 class TestFileSizeLimit:
