@@ -4,8 +4,10 @@ PDF Parser using PyMuPDF
 """
 
 import fitz  # PyMuPDF
+from typing import Optional
 
 from ai.rag.parsers.base_parser import BaseParser
+from ai.rag.parsers.base_ocr import BaseOCR, OCRResult
 from ai.rag.parsers.schemas import (
     FileType,
     LocationType,
@@ -19,6 +21,50 @@ from ai.rag.parsers.config import MIN_TEXT_LENGTH_PER_PAGE, SCAN_PAGE_RATIO_THRE
 class PDFParser(BaseParser):
     """PyMuPDF 기반 PDF 파서"""
 
+    def __init__(
+        self,
+        file_path: str,
+        ocr_engine: Optional[BaseOCR] = None,
+        enable_ocr: bool = True,
+    ):
+        """
+        PDFParser 초기화
+
+        Args:
+            file_path: PDF 파일 경로
+            ocr_engine: OCR 엔진 (기본값: None, lazy initialization)
+            enable_ocr: OCR 활성화 여부 (기본값: True)
+        """
+        super().__init__(file_path)
+        self._ocr_engine = ocr_engine
+        self._enable_ocr = enable_ocr
+
+    @property
+    def ocr_engine(self) -> Optional[BaseOCR]:
+        """OCR 엔진 지연 초기화 (lazy initialization)"""
+        if self._ocr_engine is None and self._enable_ocr:
+            self._ocr_engine = self._create_default_ocr_engine()
+        return self._ocr_engine
+
+    def _create_default_ocr_engine(self) -> Optional[BaseOCR]:
+        """
+        기본 OCR 엔진 생성 시도
+
+        EasyOCR을 우선 시도하고, 사용 불가능하면 None 반환
+        """
+        try:
+            from ai.rag.parsers.easyocr_engine import EasyOCR
+            ocr = EasyOCR(languages=["ko", "en"], gpu=True)
+            if ocr.is_available():
+                return ocr
+            return None
+        except ImportError:
+            return None
+
+    def is_ocr_available(self) -> bool:
+        """OCR 엔진 사용 가능 여부"""
+        return self.ocr_engine is not None and self.ocr_engine.is_available()
+
     def get_file_type(self) -> FileType:
         return FileType.PDF
 
@@ -31,8 +77,80 @@ class PDFParser(BaseParser):
         except Exception:
             return None
 
+    def _extract_image_with_ocr(
+        self,
+        page: fitz.Page,
+        img: tuple,
+        page_num: int,
+        document_id: str,
+        global_order: int,
+    ) -> tuple[DocumentBlock, int]:
+        """
+        페이지에서 이미지를 추출하고 OCR 수행
+
+        Args:
+            page: PyMuPDF 페이지 객체
+            img: 이미지 정보 튜플
+            page_num: 페이지 번호 (1부터 시작)
+            document_id: 문서 ID
+            global_order: 글로벌 순서
+
+        Returns:
+            tuple[DocumentBlock, int]: OCR 결과 블록 및 업데이트된 global_order
+        """
+        ocr_result: OCRResult | None = None
+        ocr_performed = False
+        ocr_confidence = 0.0
+
+        # 이미지에서 텍스트 추출 시도
+        try:
+            xref = img[0]
+            base_image = page.parent.extract_image(xref)
+            image_bytes = base_image["image"]
+
+            if self.is_ocr_available():
+                ocr_result = self.ocr_engine.extract_text_from_bytes(image_bytes)
+                ocr_performed = True
+                ocr_confidence = ocr_result.confidence
+        except Exception as e:
+            # OCR 실패 시 조용히 진행
+            pass
+
+        # OCR 결과 또는 폴백 텍스트 설정
+        if ocr_performed and ocr_result and ocr_result.text.strip():
+            content = ocr_result.text.strip()
+            metadata = {
+                "xref": img[0],
+                "ocr_engine": self.ocr_engine.name if self.ocr_engine else None,
+                "ocr_confidence": ocr_confidence,
+                "ocr_performed": True,
+            }
+        else:
+            content = "[이미지 - 텍스트 없음]"
+            metadata = {
+                "xref": img[0],
+                "ocr_performed": ocr_performed,
+            }
+
+        block_obj = DocumentBlock(
+            block_id=self.generate_block_id(
+                document_id,
+                LocationType.PAGE,
+                page_num,
+                global_order,
+            ),
+            block_type=BlockType.IMAGE,
+            content=content,
+            location_type=LocationType.PAGE,
+            location_number=page_num,
+            order=global_order,
+            metadata=metadata,
+        )
+
+        return block_obj, global_order + 1
+
     def parse(self) -> DocumentExtractionResult:
-        """PDF 문서 파싱"""
+        """PDF 문서 파싱 (텍스트 + 이미지 OCR)"""
         file_size = self.file_path.stat().st_size
         warnings: list[str] = []
         blocks: list[DocumentBlock] = []
@@ -46,6 +164,8 @@ class PDFParser(BaseParser):
 
         document_id = self.generate_document_id(self.file_path)
         global_order = 0
+        ocr_images_count = 0
+        ocr_failed_count = 0
 
         for page_num in range(page_count):
             page = doc[page_num]
@@ -84,27 +204,21 @@ class PDFParser(BaseParser):
                                 blocks.append(block_obj)
                                 global_order += 1
 
-            # 이미지 블록 추가 (OCR 필요)
+            # 이미지 블록 추출 및 OCR 수행
             for img_index, img in enumerate(page.get_images(full=True)):
-                block_obj = DocumentBlock(
-                    block_id=self.generate_block_id(
-                        document_id,
-                        LocationType.PAGE,
-                        page_num + 1,
-                        global_order,
-                    ),
-                    block_type=BlockType.IMAGE,
-                    content="[이미지 - OCR 필요]",
-                    location_type=LocationType.PAGE,
-                    location_number=page_num + 1,
-                    order=global_order,
-                    metadata={
-                        "xref": img[0],
-                        "img_index": img_index,
-                    },
+                block_obj, global_order = self._extract_image_with_ocr(
+                    page=page,
+                    img=img,
+                    page_num=page_num + 1,
+                    document_id=document_id,
+                    global_order=global_order,
                 )
                 blocks.append(block_obj)
-                global_order += 1
+                ocr_images_count += 1
+                if block_obj.metadata.get("ocr_performed") and not block_obj.content.startswith("[이미지"):
+                    pass  # OCR 성공
+                elif block_obj.metadata.get("ocr_performed"):
+                    ocr_failed_count += 1
 
         doc.close()
 
@@ -126,6 +240,13 @@ class PDFParser(BaseParser):
                 warnings.append(
                     f"일부 페이지(페이지 {scanned_pages})에서 텍스트 추출량이 적습니다."
                 )
+
+        # OCR 관련 경고 추가
+        if self._enable_ocr and not self.is_ocr_available():
+            warnings.append(
+                "EasyOCR이 설치되어 있지 않습니다. 이미지 OCR을 건너뜁니다. "
+                "pip install easyocr으로 설치해주세요."
+            )
 
         if len(blocks) == 0:
             raise EmptyDocumentError(
