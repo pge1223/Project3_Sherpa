@@ -59,7 +59,7 @@ class EasyOCR(BaseOCR):
     def supported_languages(self) -> list[str]:
         return ["ko", "en", "ja", "zh"]
 
-    def _get_reader(self) -> easyocr.Reader:
+    def _get_reader(self) -> easyocr.Reader | None:
         """
         Lazy initialization of EasyOCR Reader.
 

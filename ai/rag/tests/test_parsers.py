@@ -224,6 +224,15 @@ class TestOCRService:
         except ImportError:
             pytest.skip("EasyOCR 설치 필요: pip install easyocr")
 
+    def test_easyocr_initialization(self, ocr_engine):
+        """사용 가능한 EasyOCR fixture의 기본 설정 테스트"""
+        if ocr_engine is None:
+            pytest.skip("EasyOCR 모델 설치 필요")
+
+        assert ocr_engine.name == "EasyOCR"
+        assert "ko" in ocr_engine.supported_languages
+        assert "en" in ocr_engine.supported_languages
+
     def test_ocr_engine_not_downloading_on_unavailable(self):
         """OCR 엔진 사용 불가 시 모델 다운로드 방지"""
         try:
