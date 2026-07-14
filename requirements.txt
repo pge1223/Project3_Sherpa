@@ -11,5 +11,11 @@ motor
 pydantic-settings
 python-multipart
 python-dotenv
-bcrypt
 python-jose[cryptography]
+bcrypt
+email-validator
+
+# scripts/export_sherpa_raw_data.py (1회성 데이터 export)
+sshtunnel
+paramiko
+pymongo

@@ -1,0 +1,14 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: -apple-system, 'Pretendard', 'Malgun Gothic', sans-serif;
+  background: #eaf3fb;
+  color: #17324a;
+}
+
+button {
+  font-family: inherit;
+}

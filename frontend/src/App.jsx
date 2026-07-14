@@ -1,9 +1,19 @@
+import { Routes, Route } from 'react-router-dom'
+import LandingPage from './pages/LandingPage'
+import LoginPage from './pages/LoginPage'
+import ProjectListPage from './pages/ProjectListPage'
+import ProjectDetailPage from './pages/ProjectDetailPage'
+import DocumentUploadPage from './pages/DocumentUploadPage'
+
 function App() {
   return (
-    <main style={{ fontFamily: 'sans-serif', maxWidth: 640, margin: '80px auto', textAlign: 'center' }}>
-      <h1>AI Review Board</h1>
-      <p>문서를 놓고 전문가들이 회의하는 AI 위원회</p>
-    </main>
+    <Routes>
+      <Route path="/" element={<LandingPage />} />
+      <Route path="/login" element={<LoginPage />} />
+      <Route path="/projects" element={<ProjectListPage />} />
+      <Route path="/projects/new" element={<DocumentUploadPage />} />
+      <Route path="/projects/:projectId" element={<ProjectDetailPage />} />
+    </Routes>
   )
 }
 
