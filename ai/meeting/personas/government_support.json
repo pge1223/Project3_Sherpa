@@ -1,0 +1,43 @@
+{
+  "meta": {
+    "project_name": "AI Review Board",
+    "schema_name": "domain_committee",
+    "schema_version": "1.0.0",
+    "mock": false,
+    "_comment": "PER-001 산출물: persona_cards.json(전문가 라이브러리)에서 정부지원사업형 문서 검토에 쓸 위원 4명 + 위원장 1명을 선택하고 발언 순서를 정의한다. committee의 persona_id는 반드시 persona_cards.json에 존재해야 하며, 이 파일 자체는 각 위원의 상세 프롬프트를 담지 않는다(상세는 라이브러리 쪽 책임). PER-002 단계의 정부지원사업 rubric 매핑 샘플(ai/meeting/personas/rubric_mapping_government_support.json)은 이 위원 구성이 아니라 HAI-001 영상 MVP용 공통 2인만 사용했으므로 서로 다른 목적의 파일임에 주의.",
+    "created_at": "2026-07-14"
+  },
+  "domain": "government_support",
+  "domain_display_name": "정부지원사업형",
+  "chair_id": "review_chair",
+  "committee": [
+    {
+      "seat_order": 1,
+      "persona_id": "policy_fit",
+      "focus_note": "정책목표 부합성과 공공성·신청자격을 검토"
+    },
+    {
+      "seat_order": 2,
+      "persona_id": "business_strategy",
+      "focus_note": "사업화 가능성과 시장성을 검토"
+    },
+    {
+      "seat_order": 3,
+      "persona_id": "technical_feasibility",
+      "focus_note": "기술성과 수행 역량을 검토"
+    },
+    {
+      "seat_order": 4,
+      "persona_id": "budget_execution",
+      "focus_note": "예산 배분과 집행계획의 적정성을 검토"
+    }
+  ],
+  "speaking_order": [
+    "policy_fit",
+    "business_strategy",
+    "technical_feasibility",
+    "budget_execution",
+    "review_chair"
+  ],
+  "notes": "정부지원사업 공고는 보통 정책 부합성·신청자격이 먼저 걸러지는 항목이므로 policy_fit을 첫 발언으로 배치했다. 1차 회의는 이 순서대로 독립 평가하고, 2차 회의에서 review_chair가 종합한다. MVP 영상화 대상(HAI-001)은 business_strategy·technical_feasibility 2인만 우선 사용한다."
+}
