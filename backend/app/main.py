@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.db.mongodb import connect_db, close_db
 from app.api.routes.auth import router as auth_router
+
 app = FastAPI(
     title="AI Review Board API",
     description="RAG 기반 AI 심사위원회 시스템",
@@ -16,6 +17,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(auth_router)
+
 
 @app.on_event("startup")
 async def startup():
