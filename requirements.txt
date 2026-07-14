@@ -11,3 +11,5 @@ motor
 pydantic-settings
 python-multipart
 python-dotenv
+bcrypt
+python-jose[cryptography]
