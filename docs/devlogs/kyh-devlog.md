@@ -1,3 +1,29 @@
+## 2026-07-15
+
+- 한 일:
+  - DOC-001~002 문서 업로드 API 구현 및 테스트 완료
+  - MongoDB 계정 변경 (sherpa_admin → reviewboard_admin)
+  - reviewboard_admin 계정 root 권한 추가
+  - Claude Code 세팅 완료
+  - NCP 서버 배포 및 dev 브랜치 최신화
+  - 용준님 MongoDB 연결 문제 해결
+  - 가은님 로그인 오류 해결 (openai 패키지 누락 원인 파악 및 requirements.txt 추가)
+  - fail2ban 설치 및 SSH 무차별 접속 차단 설정 (설치 즉시 8개 IP 차단 확인)
+
+- 결정/이유:
+  - MongoDB 계정명 전체 변경 → 프로젝트명 리뷰보드로 통일
+  - fail2ban maxretry=5, bantime=3600, findtime=600 설정 → 10분 안에 5번 실패 시 1시간 차단
+  - openai를 requirements.txt에 추가 → meetings.py에서 import하는데 누락되어 있었음
+
+- 막힌 점:
+  - 가은님 로그인 Failed to fetch 원인 추적 → 백엔드 서버 자체가 openai 모듈 없어서 실행 안 되던 거였음
+
+- 다음 할 일:
+  - MTG-005: 회의 기록 저장 API
+  - INF-003~007: 파일 스토리지, 보안, 로깅
+  - 재인님 avatar API 연동
+  - 홈서버 SSH 비번 변경 (qwer1234 → 새 비번)
+
 ## 2026-07-14
 
 - 한 일:
