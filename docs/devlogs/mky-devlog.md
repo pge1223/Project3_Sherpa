@@ -1,5 +1,33 @@
 # mky Devlog
 
+## 2026-07-15
+
+- 한 일:
+  - **rubric_mapping_government_support 4인 확장**: 회의 진행 위원회를 government_support.json과 동일한 4인(policy_fit·business_strategy·technical_feasibility·budget_execution)으로 맞추고, policy_alignment→policy_fit·execution_plan→budget_execution 재배정, `required:true`(source:notice) 반영 (#27)
+  - **M3 LangGraph State**: 회의 1회 공유 상태(TypedDict) 정의. reviewer_results/evidence에 병렬 fan-in 병합 리듀서를 둬 위원 결과 유실 방지 (#30)
+  - **M4 노드+그래프 조립**: reviewer(위원별 독립 병렬) → score(M2 계산 엔진 연결) → chair(종합+top_revisions) 노드, rubric_mapping→v2 rubric 변환기, 위원 raw(judgment 6종)→v2 reviewerResult(4종) 변환기, EvidencePool. LLM은 인터페이스만 분리하고 stub으로 테스트 (머지됨)
+  - **실제 LLM 연동 + 엔트리포인트**: `make_openai_llm_call`(모델명 필수 인자로 강제), `run_meeting`(rubric_mapping+문서→v2 결과 조립). backend가 analyze() 내부만 교체하면 되게 시그니처 맞춤
+  - **MTG-006 완성**: `run_meeting(on_progress=...)` 진행률 통지 + `assemble_meeting_graph(checkpointer=...)`로 실패 노드부터 재시도
+  - **RPT-006**: `build_score_explanation` 점수 설명 카드 로직(계산값에서만 설명 생성)
+  - **MTG-007**: `rerun_reviewer` 특정 위원만 재평가+재종합, 나머지 위원 결과 유지
+  - **RPT-004**: `build_revision_comparison` 수정 전후 비교(항목별 증감·해결/신규 지적, 평가기준 변경 시 직접 비교 제한)
+  - `contracts/mocks/final_meeting_result.v2.json` 추가(가은 프론트 스텁 API용, v2 검증 통과). 기존 `final_meeting_resault.json`은 v2 이전(17개 위반)이라 쓰지 말 것으로 가은에게 전달
+  - 테스트 총 23개(scoring 5 + explanation 4 + comparison 3 + graph 9 + rerun 2) 통과
+- 결정/이유:
+  - **required 필드 v2 표준은 경이가 확정**(가은 위임): source:notice 항목은 전부 required:true, default_supplementary_perspectives는 채점 제외. 관련 파트(윤한·용준·가은)에 공유
+  - **government_support 회의 과정=4인 / 영상 MVP=2인**: 4인으로 평가·종합하되 media_script는 2인분만(테스트 후 4인 확장 예정)
+  - **점수/설명/비교 리포트는 LLM이 아니라 계산값에서만 생성**: RPT-006 예외("LLM 자연어와 계산값 불일치 방지")를 구조적으로 차단 — 카드의 어떤 수치도 M2 출력과 어긋날 수 없음
+  - **위원 raw 출력 스키마는 가은 초안 그대로 유지, v2 변환은 경이 노드가 전담**(담당 경계). judgment 6종 중 insufficient_evidence/not_applicable은 rubric_scores에서 제외 → M2 누락 감점 로직이 자연 처리
+  - **chair_prompt.txt의 final_priority_actions에 title/target/reason/evidence_ids 보강**: 기존 스키마로는 MTG-004 검수 기준("이유·대상 문단 제시")을 못 지켜서 실행 프롬프트 자체를 수정
+- 막힌 점:
+  - LangGraph 노드 이름에 `:` 예약문자 불가 → `reviewer__{persona_id}`로 변경
+  - openai 패키지 미설치 → requirements.txt에 추가. 실제 사용 모델은 가은이 비용/품질 검토 중이라 `make_openai_llm_call` model을 기본값 없는 필수 인자로 둠
+- 다음 할 일:
+  - **TST-002 위원 일관성 테스트**(내 담당 마지막 요구사항): 반복 실행 편차 측정 하네스. 실제 편차는 LLM 붙어야 의미 있으므로 stub으로 파이프라인 결정론 baseline부터
+  - 윤한: 진행률/재시도/재실행 API 연결, RPT-004 두 회의 조회, meetings.py 스텁을 run_meeting 호출로 교체
+  - 가은: RPT-006 점수 설명 카드·RPT-004 비교 리포트 React 화면
+  - RPT-004/006은 로직 완료, 화면·DB 연결만 남음
+
 ## 2026-07-14
 
 - 한 일:
