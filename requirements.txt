@@ -3,6 +3,7 @@
 langgraph
 jsonschema
 pytest
+openai
 
 # Backend (윤한)
 fastapi
