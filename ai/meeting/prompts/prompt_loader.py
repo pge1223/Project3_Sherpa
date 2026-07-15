@@ -1,0 +1,177 @@
+# 작성자: 경이
+# 목적: LangGraph 위원/위원장 노드에서 쓸 실행 프롬프트를 조립한다.
+#       공통 프롬프트(reviewer_prompt.txt / chair_prompt.txt)에 persona_cards.json 기반
+#       페르소나 블록과 실행 컨텍스트(rubric/submission/evidence 등)를 <<...>> 토큰 치환으로 주입한다.
+# import: 표준 라이브러리 json, pathlib. (외부 의존성 없음)
+# 참고: 페르소나 프롬프트 prose(docs/prompts/persona_prompts.md)는 중복 저장하지 않고
+#       구조화 카드(ai/meeting/personas/persona_cards.json)에서 render_persona_block()으로 생성한다.
+
+from __future__ import annotations
+
+import json
+from functools import lru_cache
+from pathlib import Path
+from typing import Any
+
+PROMPTS_DIR = Path(__file__).resolve().parent
+PERSONAS_DIR = PROMPTS_DIR.parent / "personas"
+PERSONA_CARDS_PATH = PERSONAS_DIR / "persona_cards.json"
+
+REVIEWER_TEMPLATE = "reviewer_prompt.txt"
+CHAIR_TEMPLATE = "chair_prompt.txt"
+
+
+def _read_text(name: str) -> str:
+    return (PROMPTS_DIR / name).read_text(encoding="utf-8")
+
+
+def _json(obj: Any) -> str:
+    return json.dumps(obj, ensure_ascii=False, indent=2)
+
+
+def _as_text(obj: Any) -> str:
+    """dict/list 는 JSON 문자열로, 이미 str 이면 그대로 사용."""
+    return obj if isinstance(obj, str) else _json(obj)
+
+
+@lru_cache(maxsize=1)
+def load_persona_cards() -> dict[str, dict]:
+    """persona_id -> persona card 매핑."""
+    data = json.loads(PERSONA_CARDS_PATH.read_text(encoding="utf-8"))
+    return {card["persona_id"]: card for card in data.get("personas", [])}
+
+
+def get_persona_card(persona_id: str) -> dict:
+    cards = load_persona_cards()
+    if persona_id not in cards:
+        raise KeyError(f"알 수 없는 persona_id: {persona_id!r}. 가능한 값: {sorted(cards)}")
+    return cards[persona_id]
+
+
+def reviewer_personas_for_domain(domain: str | None = None) -> list[str]:
+    """도메인 태그로 위원(위원장 제외) persona_id 목록을 반환한다.
+    실제 회의 참석자 선발·발언 순서는 LangGraph 빌더가 도메인 구성 파일에서 확정한다."""
+    cards = load_persona_cards()
+    result = []
+    for pid, card in cards.items():
+        if card.get("is_chair"):
+            continue
+        if domain is None or domain in card.get("domain_tags", []):
+            result.append(pid)
+    return result
+
+
+def render_persona_block(card: dict) -> str:
+    """persona card(구조화)를 프롬프트용 텍스트 블록으로 렌더링한다."""
+    lines: list[str] = []
+    lines.append(f"당신은 AI Review Board의 {card['display_name']}입니다. ({card.get('role', '')})")
+    if card.get("mission"):
+        lines.append(f"[미션] {card['mission']}")
+
+    perspectives = card.get("evaluation_perspectives", [])
+    if perspectives:
+        lines.append("")
+        lines.append("[평가 관점]")
+        for p in perspectives:
+            lines.append(f"- {p['name']}: {p['description']}")
+
+    tone = card.get("tone", {})
+    if tone:
+        lines.append("")
+        lines.append("[말투]")
+        if tone.get("keywords"):
+            lines.append(f"- 키워드: {', '.join(tone['keywords'])}")
+        if tone.get("speaking_style"):
+            lines.append(f"- {tone['speaking_style']}")
+        if tone.get("preferred_structure"):
+            lines.append(f"- 작성 순서: {' → '.join(tone['preferred_structure'])}")
+        if tone.get("avoid_expressions"):
+            avoid = ", ".join(f'"{e}"' for e in tone["avoid_expressions"])
+            lines.append(f"- 피해야 할 표현: {avoid}")
+
+    scope = card.get("scope", {})
+    if scope.get("include"):
+        lines.append("")
+        lines.append("[포함 범위]")
+        lines.extend(f"- {item}" for item in scope["include"])
+    if scope.get("exclude"):
+        lines.append("")
+        lines.append("[제외 범위]")
+        lines.extend(f"- {item}" for item in scope["exclude"])
+    if scope.get("handoff_to"):
+        lines.append("")
+        lines.append("[전문 범위를 벗어난 판단 핸드오프]")
+        for h in scope["handoff_to"]:
+            lines.append(f"- {h['persona_id']}: {h['when']}")
+
+    return "\n".join(lines)
+
+
+def build_reviewer_prompt(
+    persona_id: str,
+    rubric: Any,
+    submission: Any,
+    retrieved_evidence: Any,
+    previous_reviews: Any | None = None,
+) -> str:
+    """1~8번 위원용 실행 프롬프트를 조립한다. previous_reviews 기본값은 빈 배열(1회차)."""
+    card = get_persona_card(persona_id)
+    if card.get("is_chair"):
+        raise ValueError(f"{persona_id!r} 는 위원장입니다. build_chair_prompt()를 사용하세요.")
+    template = _read_text(REVIEWER_TEMPLATE)
+    replacements = {
+        "<<PERSONA_BLOCK>>": render_persona_block(card),
+        "<<RUBRIC_JSON>>": _as_text(rubric),
+        "<<SUBMISSION_JSON>>": _as_text(submission),
+        "<<RETRIEVED_EVIDENCE_JSON>>": _as_text(retrieved_evidence),
+        "<<PREVIOUS_REVIEWS_JSON>>": _as_text(previous_reviews if previous_reviews is not None else []),
+    }
+    for token, value in replacements.items():
+        template = template.replace(token, value)
+    return template
+
+
+def build_chair_prompt(
+    reviewer_results: Any,
+    rubric: Any,
+    evidence: Any | None = None,
+    chair_persona_id: str = "review_chair",
+) -> str:
+    """위원장용 실행 프롬프트를 조립한다."""
+    card = get_persona_card(chair_persona_id)
+    template = _read_text(CHAIR_TEMPLATE)
+    replacements = {
+        "<<CHAIR_BLOCK>>": render_persona_block(card),
+        "<<RUBRIC_JSON>>": _as_text(rubric),
+        "<<REVIEWER_RESULTS_JSON>>": _as_text(reviewer_results),
+        "<<EVIDENCE_JSON>>": _as_text(evidence if evidence is not None else []),
+    }
+    for token, value in replacements.items():
+        template = template.replace(token, value)
+    return template
+
+
+if __name__ == "__main__":
+    # 스모크 테스트: 실제 LLM 호출 없이 프롬프트 조립만 확인한다.
+    demo_rubric = {
+        "rubric_id": "RUBRIC-DEMO",
+        "total_max_score": 30,
+        "criteria": [
+            {"criterion_id": "marketability", "criterion_name": "시장성", "max_score": 30, "required": True},
+        ],
+    }
+    demo_submission = {"document_name": "데모.pdf", "text": "타깃 고객은 소규모 오프라인 매장이다."}
+    demo_evidence = [{"source_id": "DOC-DEMO", "chunk_id": "CHUNK-1", "page": 1, "text": "..."}]
+
+    reviewers = reviewer_personas_for_domain("startup")
+    print("startup 위원 후보:", reviewers)
+
+    rp = build_reviewer_prompt("business_strategy", demo_rubric, demo_submission, demo_evidence)
+    cp = build_chair_prompt([], demo_rubric, demo_evidence)
+
+    assert "<<" not in rp, "reviewer 프롬프트에 치환되지 않은 토큰이 있습니다"
+    assert "<<" not in cp, "chair 프롬프트에 치환되지 않은 토큰이 있습니다"
+    assert "사업전략 전문가" in rp
+    assert "위원장" in cp
+    print(f"reviewer_prompt 길이: {len(rp)}  / chair_prompt 길이: {len(cp)}")
+    print("OK: 프롬프트 조립 및 토큰 치환 정상")
