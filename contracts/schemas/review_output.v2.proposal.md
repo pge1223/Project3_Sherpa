@@ -3,10 +3,9 @@
 # 회의 결과 계약 v2.0.0 개정 제안 (DRAFT · 팀 동의 전)
 
 - 제안자: 경이 (contracts/schemas 오너)
-- 상태: **제안 단계** — 팀 동의 전까지 확정 아님. v1은 그대로 유지 중.
+- 상태: **승인·적용 완료** — 팀 동의(가은·윤한·재인) 후 `review_output.schema.json`을 v2.0.0으로 교체하고 드래프트 파일을 제거했다. (본 문서는 변경 이력 기록용으로 유지)
 - 관련 파일
-  - 현 계약(v1): `contracts/schemas/review_output.schema.json` (`schema_version: "1.0"`)
-  - 제안 드래프트: `contracts/schemas/review_output.v2.draft.schema.json` (`"2.0.0"`)
+  - 적용된 계약: `contracts/schemas/review_output.schema.json` (`schema_version: "2.0.0"`) — 기존 드래프트를 정식 승격
   - 검증 통과 예시: `ai/meeting/tests/fixtures/final_meeting_result.v2.json`
   - 촉발 계기: 가은 제공 `final_meeting_result.json` (`sample_review_result 1.0.0`)
 
@@ -66,11 +65,11 @@
 
 - [x] 변경 제안 작성 (본 문서)
 - [x] JSON 예시 공유 (`final_meeting_result.v2.json`, 검증 통과)
-- [ ] 영향 담당자 확인 (재인·윤한·가은)
-- [ ] 팀 동의
-- [ ] `schema_version` 갱신 및 v1 → v2 교체 (`review_output.schema.json`)
-- [ ] Mock(`contracts/mocks/`)·테스트·문서 갱신
-- [ ] 코드 반영 (M2 점수 엔진은 v2 기준으로 착수)
+- [x] 영향 담당자 확인 (재인·윤한·가은)
+- [x] 팀 동의
+- [x] `schema_version` 갱신 및 v1 → v2 교체 (`review_output.schema.json`), 드래프트 파일 제거
+- [ ] Mock(`contracts/mocks/`) 갱신 — 가은이 v2로 업데이트 예정(`final_meeting_resault.json` → `final_meeting_result.json`, media_script 복구)
+- [x] 코드 반영 (M2 점수 엔진 v2 기준, PR #21 머지)
 
 ## 7. 미해결 질문 (팀 논의)
 
