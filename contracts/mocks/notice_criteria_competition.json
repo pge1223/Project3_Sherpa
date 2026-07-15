@@ -1,0 +1,55 @@
+{
+  "meta": {
+    "project_name": "AI Review Board",
+    "schema_name": "notice_criteria",
+    "schema_version": "1.0.0",
+    "mock": true,
+    "owner": "용준 (RAG 파이프라인)",
+    "note": "용준의 실제 공고문 평가기준 추출 기능이 완료되기 전까지, 가은이 PER-001(공모전 rubric_mapping 초안) 개발을 진행하기 위해 notice_criteria_government_support.json과 같은 합의된 포맷으로 직접 작성한 샘플 데이터.",
+    "_comment": "criterion_id/name/description/source_text는 실제 공모전 모집요강 원문(출처 아래 source 필드 참고)에서 그대로 가져왔다. 단, 원문 자체가 '채점표 등의 심사관련 자료는 공개하지 않음'이라고 명시해 배점(숫자)은 어느 항목도 공개되어 있지 않다 — 그래서 criteria[].weight는 전부 null이며, 이는 실제로도 흔한 상황(정부지원사업 mock의 execution_plan과 동일한 패턴)이다. 원문은 응모 부문이 [설계 및 기술 부문]과 [정책 및 아이디어 부문] 2택1 구조로 나뉘어 각각 다른 심사기준 목록을 갖지만, 이 프로젝트의 competition.json 위원회는 부문 구분 없는 단일 committee 구조라 두 부문의 심사기준을 우리 4인 위원(creativity_originality·technical_feasibility·business_strategy·presentation_completeness) 관점에 맞춰 4개 항목으로 통합·재구성했다 — 원문을 부문별로 그대로 복제한 것이 아니라 우리 시스템 구조에 맞춘 편집임을 유의할 것.",
+    "source": {
+      "org": "한국태양에너지학회 (KSES)",
+      "document_title": "2026 제4회 에너지최적화 디자인 공모전 모집요강",
+      "document_url": "https://www.kses.re.kr/boards/notice/40351/detail/community/notice/",
+      "fetched_via": "https://contestkorea.tistory.com/rss 목록에서 발견, 모집요강 PDF 첨부파일에서 직접 확인 (2026-07-15)"
+    },
+    "created_at": "2026-07-15"
+  },
+  "domain": "competition",
+  "notice_document_id": "NOTICE-MOCK-COMP-001",
+  "notice_title": "2026 제4회 에너지최적화 디자인 공모전 모집요강",
+  "criteria": [
+    {
+      "criterion_id": "creativity_appropriateness",
+      "name": "창의성 및 적정성",
+      "description": "설계 및 제안 기술(또는 정책·아이디어)의 참신성과 적절성",
+      "weight": null,
+      "source_text": "[설계 및 기술 부문] 설계 및 제안 기술의 창의성 및 적정성 / [정책 및 아이디어 부문] 녹색건축 정책, 아이디어의 창의성 및 공익성",
+      "page": 2
+    },
+    {
+      "criterion_id": "feasibility",
+      "name": "실현 가능성",
+      "description": "제안 내용의 실제 구현·적용 가능성",
+      "weight": null,
+      "source_text": "[설계 및 기술 부문] 실현 가능성 / [정책 및 아이디어 부문] 실효성",
+      "page": 2
+    },
+    {
+      "criterion_id": "contribution",
+      "name": "기여도",
+      "description": "제안이 공모전 목적(에너지 최적화·녹색건축 발전)에 실질적으로 기여하는 정도",
+      "weight": null,
+      "source_text": "[설계 및 기술 부문] 에너지최적화 기여도",
+      "page": 2
+    },
+    {
+      "criterion_id": "content_overall",
+      "name": "콘텐츠 종합평가",
+      "description": "제출물 전체 구성과 완성도에 대한 종합 평가",
+      "weight": null,
+      "source_text": "[정책 및 아이디어 부문] 콘텐츠 종합평가",
+      "page": 2
+    }
+  ]
+}
