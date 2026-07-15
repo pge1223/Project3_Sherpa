@@ -33,3 +33,7 @@ class DocumentRepository:
         collection = self.get_collection()
         result = await collection.delete_one({"_id": ObjectId(document_id)})
         return result.deleted_count > 0
+
+    async def update_status(self, document_id: str, status: str) -> None:
+        collection = self.get_collection()
+        await collection.update_one({"_id": ObjectId(document_id)}, {"$set": {"status": status}})

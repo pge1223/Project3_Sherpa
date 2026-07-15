@@ -65,6 +65,10 @@ export default function LoginPage() {
               {loading ? '로그인 중...' : '로그인'}
             </button>
           </form>
+
+          <button type="button" style={styles.guestButton} onClick={() => navigate('/projects')}>
+            비회원 로그인
+          </button>
         </div>
       </div>
     </div>
@@ -138,6 +142,18 @@ const styles = {
     color: '#fff',
     background: '#2f7fd1',
     border: 'none',
+    borderRadius: 8,
+    cursor: 'pointer',
+  },
+  guestButton: {
+    marginTop: 10,
+    width: '100%',
+    padding: '12px',
+    fontSize: 14,
+    fontWeight: 600,
+    color: '#3d5a75',
+    background: 'transparent',
+    border: '1px solid #cfe0f0',
     borderRadius: 8,
     cursor: 'pointer',
   },
