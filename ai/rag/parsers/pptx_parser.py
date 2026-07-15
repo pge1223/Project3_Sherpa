@@ -12,6 +12,7 @@ from ai.rag.parsers.schemas import (
     LocationType,
     BlockType,
     DocumentBlock,
+    DocumentExtractionResult,
 )
 from ai.rag.parsers.exceptions import CorruptedDocumentError, EmptyDocumentError
 
