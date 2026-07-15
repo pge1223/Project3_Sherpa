@@ -1,6 +1,8 @@
-from pydantic import BaseModel
 from datetime import datetime
 from typing import Optional
+
+from pydantic import BaseModel, field_validator
+
 
 class DocumentResponse(BaseModel):
     id: str
@@ -15,3 +17,14 @@ class DocumentResponse(BaseModel):
     status: str
     created_at: datetime
     updated_at: datetime
+
+
+class FetchUrlRequest(BaseModel):
+    url: str
+
+    @field_validator("url")
+    @classmethod
+    def _url_must_not_be_blank(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("url은 빈 문자열일 수 없습니다")
+        return v

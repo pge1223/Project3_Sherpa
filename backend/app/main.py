@@ -1,3 +1,13 @@
+import sys
+from pathlib import Path
+
+# backend/는 보통 이 디렉터리를 cwd로 uvicorn이 실행되어 레포 루트가 sys.path에 없다.
+# ai.rag.documents 라우터가 ai.rag.* 를 import하므로 여기서 레포 루트를 추가해준다
+# (ai/rag/tests/conftest.py의 동일 패턴 참고).
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.db.mongodb import connect_db, close_db

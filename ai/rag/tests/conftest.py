@@ -22,6 +22,9 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers", "slow: 실행 시간이 오래 걸리는 테스트"
     )
+    config.addinivalue_line(
+        "markers", "embedding_integration: 실제 KURE-v1 모델을 로딩하는 통합 테스트 (RUN_KURE_INTEGRATION=1로만 실행)"
+    )
 
 
 @pytest.fixture
@@ -76,6 +79,16 @@ def txt_file(fixtures_dir: Path) -> Path:
 def scanned_pdf(fixtures_dir: Path) -> Path:
     """스캔 PDF 파일 (테스트용)"""
     return fixtures_dir / "test2.pdf"
+
+
+@pytest.fixture
+def fake_kure_embedder(monkeypatch):
+    """실제 KURE-v1을 로딩하지 않고 결정적 가짜 벡터를 반환하는 KUREEmbedder"""
+    from ai.rag.tests.embedding_fixtures import FakeSentenceTransformer
+    monkeypatch.setattr("ai.rag.embedding.kure_embedder.SentenceTransformer", FakeSentenceTransformer)
+
+    from ai.rag.embedding import KUREEmbedder, EmbeddingConfig
+    return KUREEmbedder(EmbeddingConfig(model_name="fake-model-for-tests"))
 
 
 @pytest.fixture
