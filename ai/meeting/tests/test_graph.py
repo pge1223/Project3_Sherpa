@@ -362,8 +362,8 @@ _RAW_CHAIR_FOR_RUN = {
 }
 
 
-def test_run_meeting_with_real_competition_mapping_produces_v2_document():
-    mapping = json.loads(COMPETITION_MAPPING_PATH.read_text(encoding="utf-8"))
+def _competition_raw_by_marker(mapping: dict) -> dict:
+    """공모전 4인 매핑 기준으로 위원별/위원장 raw 응답을 프롬프트 마커별로 구성한다."""
     routing = build_routing(mapping)
     criteria_by_id = {c["criterion_id"]: c for c in mapping["rubric"]}
 
@@ -381,6 +381,12 @@ def test_run_meeting_with_real_competition_mapping_produces_v2_document():
         persona_name = _COMPETITION_PERSONA_NAMES[persona_id]
         raw_by_marker[f"{persona_name}입니다"] = _make_raw_reviewer(persona_id, persona_name, owned)
     raw_by_marker["위원장(review_chair)입니다"] = _RAW_CHAIR_FOR_RUN
+    return raw_by_marker
+
+
+def test_run_meeting_with_real_competition_mapping_produces_v2_document():
+    mapping = json.loads(COMPETITION_MAPPING_PATH.read_text(encoding="utf-8"))
+    raw_by_marker = _competition_raw_by_marker(mapping)
 
     document = run_meeting(
         meeting_id="MTG-RUN-TEST-001",
@@ -431,3 +437,88 @@ def test_make_openai_llm_call_sends_given_model_and_returns_content():
 
     assert text == '{"ok": true}'
     assert fake_client.chat.completions.last_kwargs["model"] == "gpt-test-model"
+
+
+# ---------------------------------------------------------------------------
+# MTG-006: 진행 상태 통지 + 실패 노드부터 재시도
+# ---------------------------------------------------------------------------
+
+
+def test_run_meeting_reports_progress_until_completed():
+    """on_progress가 단계마다 호출되고, 위원 완료 수가 단조 증가하며, 마지막에 완료된다."""
+    mapping = json.loads(COMPETITION_MAPPING_PATH.read_text(encoding="utf-8"))
+    raw_by_marker = _competition_raw_by_marker(mapping)
+
+    events: list[dict] = []
+    run_meeting(
+        meeting_id="MTG-PROGRESS-001",
+        project_id="PRJ-PROGRESS-001",
+        document_id="DOC-PROGRESS-001",
+        title="진행률 테스트",
+        rubric_mapping=mapping,
+        submission={"document_name": "test.pdf", "text": "..."},
+        retrieved_evidence=[],
+        llm_call=_make_stub_llm(raw_by_marker),
+        on_progress=events.append,
+    )
+
+    assert events, "진행 콜백이 한 번도 호출되지 않았다"
+    dones = [e["reviews_done"] for e in events]
+    assert dones == sorted(dones), "위원 완료 수는 단조 증가해야 한다"
+
+    last = events[-1]
+    assert last["stage"] == "완료"
+    assert last["reviews_done"] == last["reviews_total"] == len(mapping["committee"])
+    assert last["score_done"] is True
+    assert last["chair_done"] is True
+
+
+def test_meeting_graph_resumes_from_failed_chair_without_rerunning_reviewers():
+    """chair 노드가 처음 한 번 실패해도, 같은 thread_id로 재개하면 성공한 위원 노드는
+    다시 돌지 않고 chair 부터 이어서 완료된다(MTG-006 실패 노드 재시도)."""
+    import pytest
+    from langgraph.checkpoint.memory import MemorySaver
+
+    committee = ["business_strategy", "technical_feasibility"]
+    base_stub = _make_stub_llm(
+        {
+            "사업전략 전문가입니다": _RAW_REVIEWER,
+            "기술·실현가능성 전문가입니다": _TECHNICAL_RAW,
+            "위원장(review_chair)입니다": _RAW_CHAIR,
+        }
+    )
+
+    reviewer_calls = {"count": 0}
+    chair_should_fail = {"fail": True}
+
+    def flaky_llm(prompt: str) -> str:
+        if "위원장(review_chair)입니다" in prompt:
+            if chair_should_fail["fail"]:
+                chair_should_fail["fail"] = False
+                raise RuntimeError("chair 첫 실행 실패(테스트)")
+        else:
+            reviewer_calls["count"] += 1
+        return base_stub(prompt)
+
+    saver = MemorySaver()
+    graph = assemble_meeting_graph(committee, flaky_llm, checkpointer=saver)
+    state = initial_state(
+        meeting_id="MTG-RESUME-001",
+        domain="startup",
+        rubric=_RUBRIC,
+        submission={"document_name": "test.pdf", "text": "..."},
+        committee=committee,
+        retrieved_evidence=_RETRIEVED_EVIDENCE,
+    )
+    config = {"configurable": {"thread_id": "MTG-RESUME-001"}}
+
+    with pytest.raises(RuntimeError):
+        graph.invoke(state, config)
+    assert reviewer_calls["count"] == 2, "1차 실행에서 위원 2명이 각각 한 번씩 돌아야 한다"
+
+    # 재개: 입력 None + 같은 thread_id → 실패 지점(chair)부터 이어서 실행
+    final = graph.invoke(None, config)
+
+    assert final["stage"] == "완료"
+    assert final["chair_summary"]["chair_id"] == "review_chair"
+    assert reviewer_calls["count"] == 2, "재개 시 위원 노드는 다시 실행되지 않아야 한다"
