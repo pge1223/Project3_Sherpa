@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { getProjects } from '../api/projectApi'
 import StatusBadge from '../components/common/StatusBadge'
+import SpaceBackground from '../components/landing/SpaceBackground'
 
 function FolderIcon() {
   return (
@@ -23,18 +24,25 @@ export default function ProjectListPage() {
   const navigate = useNavigate()
   const [projects, setProjects] = useState([])
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
 
   useEffect(() => {
-    getProjects().then((data) => {
-      setProjects(data)
-      setLoading(false)
-    })
+    getProjects()
+      .then((data) => {
+        setProjects(data)
+        setLoading(false)
+      })
+      .catch((err) => {
+        setError(err.message)
+        setLoading(false)
+      })
   }, [])
 
   return (
     <div style={styles.page}>
+      <SpaceBackground />
       <div style={styles.pageInner}>
-        <img src="/images/logo1.png" alt="AI Review Board" style={styles.logo} />
+        <img src="/images/logo4.png" alt="AI Review Board" style={styles.logo} />
 
         <div style={styles.card}>
         <div style={styles.header}>
@@ -47,22 +55,23 @@ export default function ProjectListPage() {
         <div style={styles.divider} />
 
         {loading && <p style={styles.empty}>불러오는 중...</p>}
-        {!loading && projects.length === 0 && <p style={styles.empty}>아직 프로젝트가 없습니다.</p>}
+        {!loading && error && <p style={styles.empty}>{error}</p>}
+        {!loading && !error && projects.length === 0 && <p style={styles.empty}>아직 프로젝트가 없습니다.</p>}
 
-        {projects.map((project, i) => (
+        {!error && projects.map((project, i) => (
           <div
-            key={project.project_id}
+            key={project.id}
             style={{
               ...styles.row,
               borderBottom: i === projects.length - 1 ? 'none' : '1px solid #e2edf7',
             }}
-            onClick={() => navigate(`/projects/${project.project_id}`)}
+            onClick={() => navigate(`/projects/${project.id}`)}
           >
             <div style={styles.rowLeft}>
               <FolderIcon />
               <div>
                 <div style={styles.rowTitle}>{project.title}</div>
-                <div style={styles.rowDate}>{project.created_at} 생성</div>
+                <div style={styles.rowDate}>{String(project.created_at).slice(0, 10)} 생성</div>
               </div>
             </div>
             <div style={styles.rowRight}>
@@ -79,13 +88,16 @@ export default function ProjectListPage() {
 
 const styles = {
   page: {
+    position: 'relative',
+    zIndex: 1,
     minHeight: '100vh',
-    background: 'linear-gradient(180deg, #dceefc 0%, #eaf3fb 100%)',
     padding: '48px 24px',
     display: 'flex',
     justifyContent: 'center',
   },
   pageInner: {
+    position: 'relative',
+    zIndex: 2,
     width: '100%',
     maxWidth: 720,
   },

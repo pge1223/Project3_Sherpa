@@ -2,14 +2,15 @@ import { useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import DocumentRow from '../components/upload/DocumentRow'
 import { isAcceptedDocument, formatFileSize, ACCEPTED_DOCUMENT_EXTENSIONS } from '../utils/file'
+import SpaceBackground from '../components/landing/SpaceBackground'
+import { createProject, analyzeProject } from '../api/projectApi'
+import { uploadDocument, fetchUrl } from '../api/documentApi'
 
-const initialDocuments = [
-  { id: 'mock-1', type: 'file', name: '사업계획서.pdf', meta: '2.4MB', status: 'embedding', progress: 45 },
-  { id: 'mock-2', type: 'url', name: '2026 예비창업패키지 공고문 (URL)', meta: 'k-startup.go.kr', status: 'done' },
+const DOC_TYPE_OPTIONS = [
+  { value: 'competition', label: '공모전' },
+  { value: 'government_support', label: '정부지원사업' },
+  { value: 'startup', label: '사업계획서(스타트업)' },
 ]
-
-const EMBEDDING_STEP_MS = 250
-const EMBEDDING_STEP_SIZE = 20
 
 function UploadIcon() {
   return (
@@ -24,25 +25,46 @@ export default function DocumentUploadPage() {
   const navigate = useNavigate()
   const [criteriaTab, setCriteriaTab] = useState('url')
   const [criteriaUrl, setCriteriaUrl] = useState('')
-  const [documents, setDocuments] = useState(initialDocuments)
+  const [documents, setDocuments] = useState([])
   const [isDragging, setIsDragging] = useState(false)
   const [isCriteriaDragging, setIsCriteriaDragging] = useState(false)
   const [fileError, setFileError] = useState('')
+  const [title, setTitle] = useState('새 프로젝트')
+  const [docType, setDocType] = useState(DOC_TYPE_OPTIONS[0].value)
+  const [projectId, setProjectId] = useState(null)
+  const [criteriaLoading, setCriteriaLoading] = useState(false)
+  const [criteriaError, setCriteriaError] = useState('')
+  const [analyzing, setAnalyzing] = useState(false)
+  const [analyzeError, setAnalyzeError] = useState('')
 
   const targetFileInputRef = useRef(null)
   const criteriaFileInputRef = useRef(null)
 
-  function simulateEmbedding(id) {
-    const interval = setInterval(() => {
-      setDocuments((prev) =>
-        prev.map((doc) => (doc.id === id ? { ...doc, progress: Math.min(doc.progress + EMBEDDING_STEP_SIZE, 100) } : doc)),
-      )
-    }, EMBEDDING_STEP_MS)
+  async function ensureProject() {
+    if (projectId) return projectId
+    const project = await createProject({ title, doc_type: docType })
+    setProjectId(project.id)
+    return project.id
+  }
 
-    setTimeout(() => {
-      clearInterval(interval)
-      setDocuments((prev) => prev.map((doc) => (doc.id === id ? { ...doc, status: 'done', progress: 100 } : doc)))
-    }, EMBEDDING_STEP_MS * (100 / EMBEDDING_STEP_SIZE) + 100)
+  function updateDoc(id, patch) {
+    setDocuments((prev) => prev.map((doc) => (doc.id === id ? { ...doc, ...patch } : doc)))
+  }
+
+  async function uploadOne(file) {
+    const id = `${file.name}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
+    setDocuments((prev) => [
+      ...prev,
+      { id, type: 'file', name: file.name, meta: formatFileSize(file.size), status: 'embedding', progress: 50 },
+    ])
+
+    try {
+      const pid = await ensureProject()
+      await uploadDocument(pid, file)
+      updateDoc(id, { status: 'done', progress: 100 })
+    } catch (err) {
+      updateDoc(id, { status: 'error', progress: 100, meta: err.message })
+    }
   }
 
   function addFiles(fileList) {
@@ -53,22 +75,34 @@ export default function DocumentUploadPage() {
     setFileError(rejected > 0 ? `PDF, DOCX, PPTX 파일만 업로드할 수 있습니다.` : '')
     if (accepted.length === 0) return
 
-    const newDocs = accepted.map((file) => ({
-      id: `${file.name}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-      type: 'file',
-      name: file.name,
-      meta: formatFileSize(file.size),
-      status: 'embedding',
-      progress: 0,
-    }))
-
-    setDocuments((prev) => [...prev, ...newDocs])
-    newDocs.forEach((doc) => simulateEmbedding(doc.id))
+    accepted.forEach((file) => uploadOne(file))
   }
 
   function handleFileInputChange(e) {
     addFiles(e.target.files)
     e.target.value = ''
+  }
+
+  async function handleFetchCriteriaUrl() {
+    if (!criteriaUrl.trim()) {
+      setCriteriaError('URL을 입력해주세요.')
+      return
+    }
+    setCriteriaError('')
+    setCriteriaLoading(true)
+    try {
+      const result = await fetchUrl(criteriaUrl.trim())
+      const id = `url-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
+      const title = result.page_content?.title || criteriaUrl.trim()
+      const attachmentCount = result.attachments?.length || 0
+      const meta = attachmentCount > 0 ? `첨부파일 ${attachmentCount}개 수집` : new URL(result.origin_url).hostname
+      setDocuments((prev) => [...prev, { id, type: 'url', name: title, meta, status: 'done' }])
+      setCriteriaUrl('')
+    } catch (err) {
+      setCriteriaError(err.message)
+    } finally {
+      setCriteriaLoading(false)
+    }
   }
 
   function makeDropHandlers(setDragging) {
@@ -92,10 +126,26 @@ export default function DocumentUploadPage() {
   const targetDropHandlers = makeDropHandlers(setIsDragging)
   const criteriaDropHandlers = makeDropHandlers(setIsCriteriaDragging)
 
+  async function handleAnalyze() {
+    setAnalyzeError('')
+    setAnalyzing(true)
+    try {
+      const pid = await ensureProject()
+      const result = await analyzeProject(pid)
+      sessionStorage.setItem(`analysis:${pid}`, JSON.stringify(result))
+      navigate(`/projects/${pid}`)
+    } catch (err) {
+      setAnalyzeError(err.message)
+    } finally {
+      setAnalyzing(false)
+    }
+  }
+
   return (
     <div style={styles.page}>
+      <SpaceBackground />
       <div style={styles.pageInner}>
-        <img src="/images/logo1.png" alt="AI Review Board" style={styles.logo} />
+        <img src="/images/logo4.png" alt="AI Review Board" style={styles.logo} />
 
         <button style={styles.backButton} onClick={() => navigate('/projects')}>
           ← 뒤로
@@ -103,9 +153,30 @@ export default function DocumentUploadPage() {
 
         <div style={styles.card}>
         <div style={styles.header}>
-          <div>
+          <div style={{ flex: 1 }}>
             <h1 style={styles.title}>문서 업로드</h1>
-            <p style={styles.subtitle}>2026 예비창업패키지 사업계획서</p>
+            <div style={styles.titleRow}>
+              <input
+                type="text"
+                value={title}
+                onChange={(e) => setTitle(e.target.value)}
+                disabled={!!projectId}
+                style={styles.titleInput}
+                placeholder="프로젝트 제목"
+              />
+              <select
+                value={docType}
+                onChange={(e) => setDocType(e.target.value)}
+                disabled={!!projectId}
+                style={styles.docTypeSelect}
+              >
+                {DOC_TYPE_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+            </div>
           </div>
           <button style={styles.menuButton}>⋯</button>
         </div>
@@ -159,11 +230,16 @@ export default function DocumentUploadPage() {
                     type="text"
                     value={criteriaUrl}
                     onChange={(e) => setCriteriaUrl(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && handleFetchCriteriaUrl()}
                     placeholder="https://example.com/공고문"
                     style={styles.urlInput}
+                    disabled={criteriaLoading}
                   />
-                  <button style={styles.fetchButton}>가져오기</button>
+                  <button style={styles.fetchButton} onClick={handleFetchCriteriaUrl} disabled={criteriaLoading}>
+                    {criteriaLoading ? '가져오는 중...' : '가져오기'}
+                  </button>
                 </div>
+                {criteriaError && <p style={styles.fileError}>{criteriaError}</p>}
                 <p style={styles.helperText}>공모전·정부지원사업 공고 페이지 링크를 붙여넣으세요</p>
               </>
             ) : (
@@ -215,8 +291,11 @@ export default function DocumentUploadPage() {
           ))}
         </div>
 
+        {analyzeError && <p style={styles.fileError}>{analyzeError}</p>}
         <div style={styles.analyzeRow}>
-          <button style={styles.analyzeButton}>분석 시작</button>
+          <button style={styles.analyzeButton} onClick={handleAnalyze} disabled={analyzing}>
+            {analyzing ? '분석 중...' : '분석 시작'}
+          </button>
         </div>
         </div>
       </div>
@@ -226,13 +305,16 @@ export default function DocumentUploadPage() {
 
 const styles = {
   page: {
+    position: 'relative',
+    zIndex: 1,
     minHeight: '100vh',
-    background: 'linear-gradient(180deg, #dceefc 0%, #eaf3fb 100%)',
     padding: '48px 24px',
     display: 'flex',
     justifyContent: 'center',
   },
   pageInner: {
+    position: 'relative',
+    zIndex: 2,
     width: '100%',
     maxWidth: 760,
   },
@@ -250,7 +332,7 @@ const styles = {
     marginBottom: 12,
     border: 'none',
     background: 'transparent',
-    color: '#3d5a75',
+    color: '#cdd9f7',
     fontSize: 14,
     fontWeight: 600,
     cursor: 'pointer',
@@ -279,6 +361,30 @@ const styles = {
     margin: '4px 0 0',
     fontSize: 13,
     color: '#7994ac',
+  },
+  titleRow: {
+    display: 'flex',
+    gap: 8,
+    marginTop: 8,
+  },
+  titleInput: {
+    flex: 1,
+    padding: '8px 10px',
+    fontSize: 13,
+    border: '1px solid #cfe0f0',
+    borderRadius: 8,
+    outline: 'none',
+    background: '#f8fbfe',
+    color: '#17324a',
+  },
+  docTypeSelect: {
+    padding: '8px 10px',
+    fontSize: 13,
+    border: '1px solid #cfe0f0',
+    borderRadius: 8,
+    outline: 'none',
+    background: '#f8fbfe',
+    color: '#17324a',
   },
   menuButton: {
     width: 32,

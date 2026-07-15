@@ -38,6 +38,7 @@ export default function DocumentRow({ document }) {
       )}
 
       {document.status === 'done' && <span style={styles.doneBadge}>✓ 완료</span>}
+      {document.status === 'error' && <span style={styles.errorBadge}>업로드 실패</span>}
     </div>
   )
 }
@@ -90,6 +91,14 @@ const styles = {
     fontWeight: 600,
     color: '#1f8a4c',
     background: '#dcf3e6',
+    padding: '4px 10px',
+    borderRadius: 999,
+  },
+  errorBadge: {
+    fontSize: 12,
+    fontWeight: 600,
+    color: '#d64545',
+    background: '#fbe2e2',
     padding: '4px 10px',
     borderRadius: 999,
   },

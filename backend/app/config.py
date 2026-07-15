@@ -23,6 +23,10 @@ class Settings(BaseSettings):
     NCP_ACCESS_KEY: str = ""
     NCP_SECRET_KEY: str = ""
     NCP_BUCKET_NAME: str = ""
+
+    # RAG (Chroma)
+    CHROMA_PERSIST_DIR: str = "./chroma_db"
+
     # JWT
     JWT_SECRET_KEY: str = "sherpa-secret-key-change-in-production"
     JWT_ALGORITHM: str = "HS256"
