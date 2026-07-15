@@ -1,4 +1,9 @@
+from pathlib import Path
 from pydantic_settings import BaseSettings
+
+# backend/.env 를 uvicorn 실행 위치(CWD)와 무관하게 항상 찾도록 절대경로 사용
+# __file__ = backend/app/config.py  →  .parent.parent = backend/
+_ENV_FILE = Path(__file__).parent.parent / ".env"
 
 
 class Settings(BaseSettings):
@@ -8,7 +13,7 @@ class Settings(BaseSettings):
     DEBUG: bool = False
 
     # MongoDB
-    MONGODB_URL: str = "mongodb://sherpa_admin:sherpa2026!@localhost:27017"
+    MONGODB_URL: str = "mongodb://reviewboard_admin:reviewboard2026!@localhost:27017/?authSource=admin"
     MONGODB_DB: str = "ai_review_board"
 
     # OpenAI
@@ -24,8 +29,9 @@ class Settings(BaseSettings):
     JWT_EXPIRE_MINUTES: int = 60
 
     class Config:
-        env_file = ".env"
+        env_file = str(_ENV_FILE)
         env_file_encoding = "utf-8"
+        extra = "ignore"
 
 
 settings = Settings()
