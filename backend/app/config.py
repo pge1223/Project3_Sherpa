@@ -8,7 +8,7 @@ class Settings(BaseSettings):
     DEBUG: bool = False
 
     # MongoDB
-    MONGODB_URL: str = "mongodb://localhost:27017"
+    MONGODB_URL: str = "mongodb://sherpa_admin:sherpa2026!@localhost:27017"
     MONGODB_DB: str = "ai_review_board"
 
     # OpenAI
@@ -18,6 +18,10 @@ class Settings(BaseSettings):
     NCP_ACCESS_KEY: str = ""
     NCP_SECRET_KEY: str = ""
     NCP_BUCKET_NAME: str = ""
+    # JWT
+    JWT_SECRET_KEY: str = "sherpa-secret-key-change-in-production"
+    JWT_ALGORITHM: str = "HS256"
+    JWT_EXPIRE_MINUTES: int = 60
 
     class Config:
         env_file = ".env"
