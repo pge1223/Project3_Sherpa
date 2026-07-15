@@ -14,6 +14,7 @@ from app.db.mongodb import connect_db, close_db
 from app.api.routes.auth import router as auth_router
 from app.api.routes.projects import router as project_router
 from app.api.routes.documents import router as document_router
+from app.api.routes.meetings import router as meeting_router
 app = FastAPI(
     title="AI Review Board API",
     description="RAG 기반 AI 심사위원회 시스템",
@@ -30,6 +31,7 @@ app.add_middleware(
 app.include_router(auth_router)
 app.include_router(project_router)
 app.include_router(document_router)
+app.include_router(meeting_router)
 
 @app.on_event("startup")
 async def startup():
