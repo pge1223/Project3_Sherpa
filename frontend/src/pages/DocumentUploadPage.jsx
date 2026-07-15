@@ -51,7 +51,10 @@ export default function DocumentUploadPage() {
     setDocuments((prev) => prev.map((doc) => (doc.id === id ? { ...doc, ...patch } : doc)))
   }
 
-  async function uploadOne(file) {
+  // documentRole: 'target'(왼쪽, 평가 대상 문서/기획서) | 'criteria'(오른쪽, 기준 문서·공고문)
+  // — analyze_project()가 어떤 문서를 review 대상으로 쓰고 어떤 걸 RAG 근거로만 쓸지
+  // 구분해야 해서 업로드 시점에 같이 넘긴다.
+  async function uploadOne(file, documentRole) {
     const id = `${file.name}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
     setDocuments((prev) => [
       ...prev,
@@ -60,14 +63,14 @@ export default function DocumentUploadPage() {
 
     try {
       const pid = await ensureProject()
-      await uploadDocument(pid, file)
+      await uploadDocument(pid, file, 'pdf', documentRole)
       updateDoc(id, { status: 'done', progress: 100 })
     } catch (err) {
       updateDoc(id, { status: 'error', progress: 100, meta: err.message })
     }
   }
 
-  function addFiles(fileList) {
+  function addFiles(fileList, documentRole) {
     const files = Array.from(fileList)
     const accepted = files.filter(isAcceptedDocument)
     const rejected = files.length - accepted.length
@@ -75,11 +78,11 @@ export default function DocumentUploadPage() {
     setFileError(rejected > 0 ? `PDF, DOCX, PPTX 파일만 업로드할 수 있습니다.` : '')
     if (accepted.length === 0) return
 
-    accepted.forEach((file) => uploadOne(file))
+    accepted.forEach((file) => uploadOne(file, documentRole))
   }
 
-  function handleFileInputChange(e) {
-    addFiles(e.target.files)
+  function handleFileInputChange(e, documentRole) {
+    addFiles(e.target.files, documentRole)
     e.target.value = ''
   }
 
@@ -91,7 +94,8 @@ export default function DocumentUploadPage() {
     setCriteriaError('')
     setCriteriaLoading(true)
     try {
-      const result = await fetchUrl(criteriaUrl.trim())
+      const pid = await ensureProject()
+      const result = await fetchUrl(criteriaUrl.trim(), pid)
       const id = `url-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
       const title = result.page_content?.title || criteriaUrl.trim()
       const attachmentCount = result.attachments?.length || 0
@@ -105,7 +109,7 @@ export default function DocumentUploadPage() {
     }
   }
 
-  function makeDropHandlers(setDragging) {
+  function makeDropHandlers(setDragging, documentRole) {
     return {
       onDragOver: (e) => {
         e.preventDefault()
@@ -118,13 +122,13 @@ export default function DocumentUploadPage() {
       onDrop: (e) => {
         e.preventDefault()
         setDragging(false)
-        addFiles(e.dataTransfer.files)
+        addFiles(e.dataTransfer.files, documentRole)
       },
     }
   }
 
-  const targetDropHandlers = makeDropHandlers(setIsDragging)
-  const criteriaDropHandlers = makeDropHandlers(setIsCriteriaDragging)
+  const targetDropHandlers = makeDropHandlers(setIsDragging, 'target')
+  const criteriaDropHandlers = makeDropHandlers(setIsCriteriaDragging, 'criteria')
 
   async function handleAnalyze() {
     setAnalyzeError('')
@@ -198,7 +202,7 @@ export default function DocumentUploadPage() {
               accept={ACCEPTED_DOCUMENT_EXTENSIONS.join(',')}
               multiple
               style={styles.hiddenInput}
-              onChange={handleFileInputChange}
+              onChange={(e) => handleFileInputChange(e, 'target')}
             />
           </div>
 
@@ -272,7 +276,7 @@ export default function DocumentUploadPage() {
                   accept={ACCEPTED_DOCUMENT_EXTENSIONS.join(',')}
                   multiple
                   style={styles.hiddenInput}
-                  onChange={handleFileInputChange}
+                  onChange={(e) => handleFileInputChange(e, 'criteria')}
                 />
               </div>
             )}

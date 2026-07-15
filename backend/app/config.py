@@ -19,6 +19,16 @@ class Settings(BaseSettings):
     # OpenAI
     OPENAI_API_KEY: str = ""
 
+    # LLM 프로필 (가은/Claude, 2026-07-15, "다 이어버리자" — 윤한 확인 필요):
+    # analyze_project()/reevaluate_reviewer()가 실제 OpenAI를 부르게 되면서 호출마다 비용이
+    # 발생한다. LLM_PROFILE=dev(기본값, 저렴한 모델)로 두면 실수로 눌러도 싸게 끝나고,
+    # 진짜 품질 확인이 필요할 때만 quality로 바꾸도록 두 세트를 분리했다.
+    LLM_PROFILE: str = "dev"
+    DEV_LLM_REVIEWER_MODEL: str = "gpt-5-nano"
+    DEV_LLM_CHAIR_MODEL: str = "gpt-5-nano"
+    QUALITY_LLM_REVIEWER_MODEL: str = "gpt-5-mini"
+    QUALITY_LLM_CHAIR_MODEL: str = "gpt-5-mini"
+
     # NCP
     NCP_ACCESS_KEY: str = ""
     NCP_SECRET_KEY: str = ""
