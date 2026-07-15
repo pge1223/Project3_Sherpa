@@ -1,6 +1,7 @@
 import logging
 import os
 import uuid
+from typing import Optional
 
 from fastapi import APIRouter, File, Form, Header, HTTPException, UploadFile, status
 from starlette.concurrency import run_in_threadpool
@@ -16,6 +17,7 @@ from ai.rag.loaders.exceptions import (
     DownloadSizeLimitExceededError,
 )
 from ai.rag.preprocessing.html_cleaner import clean_page_content
+from ai.rag.preprocessing.schemas import CleanedWebContent
 from ai.rag.parsers import extract_document
 from ai.rag.chunking.chunker import chunk_document
 from ai.rag.chunking.schemas import ChunkSourceContext, SourceType
@@ -64,9 +66,13 @@ def _get_indexing_service() -> RAGIndexingService:
     return _indexing_service
 
 
-def _parse_chunk_and_index(document_id: str, project_id: str, file_path: str, filename: str) -> int:
+def _parse_chunk_and_index(document_id: str, project_id: str, file_path: str, filename: str) -> tuple[int, str]:
     """RAG-001~003: 파싱 -> 청킹 -> 임베딩 -> Chroma 저장까지 동기적으로 실행하고
-    색인된 청크 수를 반환한다. CPU-bound라 호출부에서 threadpool로 감싸 실행해야 한다."""
+    (색인된 청크 수, 원문 전체 텍스트)를 반환한다. CPU-bound라 호출부에서 threadpool로
+    감싸 실행해야 한다.
+    가은/Claude(2026-07-15): 원문 텍스트도 같이 반환하도록 확장 — analyze_project()가
+    submission.text로 쓸 "문서 전체 원문"이 이전엔 어디에도 저장되지 않았다(Chroma는
+    벡터/청크 단위라 전체 원문 조회에는 안 맞음)."""
     extraction = extract_document(file_path)
     chunk_context = ChunkSourceContext(
         document_id=document_id,
@@ -81,10 +87,42 @@ def _parse_chunk_and_index(document_id: str, project_id: str, file_path: str, fi
         document_title=filename,
     )
     summary = _get_indexing_service().index_chunking_result_with_summary(chunking_result, indexing_context)
+    parsed_text = "\n\n".join(block.content for block in extraction.blocks)
+    return summary.stored_count, parsed_text
+
+
+def _chunk_and_index_webpage(
+    document_id: str, project_id: str, url: str, title: str, cleaned: CleanedWebContent
+) -> int:
+    """가은/Claude(2026-07-15, "다 이어버리자" — 용준 확인 필요): fetch-url이 정제까지만
+    하고 멈추던 걸 파일 업로드와 똑같이 청킹/색인까지 잇는다. chunk_document()가 원래부터
+    CleanedWebContent를 받도록 설계돼 있어서(ai/rag/chunking/chunker.py) 새 파서/청커를
+    만들 필요는 없었다 — SourceType만 URL_WEBPAGE로 바꿔서 그대로 재사용."""
+    chunk_context = ChunkSourceContext(
+        document_id=document_id,
+        source_type=SourceType.URL_WEBPAGE,
+        source_url=url,
+        document_title=title,
+    )
+    chunking_result = chunk_document(cleaned, chunk_context)
+
+    indexing_context = IndexingContext(
+        project_id=project_id,
+        document_id=document_id,
+        document_title=title,
+    )
+    summary = _get_indexing_service().index_chunking_result_with_summary(chunking_result, indexing_context)
     return summary.stored_count
 
 
-def get_current_user(authorization: str) -> str:
+# 가은/Claude (2026-07-15): 비회원 로그인은 Authorization 헤더 없이 그대로 들어온다 —
+# 헤더가 없으면 401 대신 고정 게스트 사용자로 통과시킨다 (projects.py와 동일 컨벤션).
+GUEST_USER_EMAIL = "guest@local"
+
+
+def get_current_user(authorization: Optional[str]) -> str:
+    if not authorization:
+        return GUEST_USER_EMAIL
     try:
         token = authorization.replace("Bearer ", "")
         payload = jwt.decode(token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
@@ -93,27 +131,30 @@ def get_current_user(authorization: str) -> str:
         raise HTTPException(status_code=401, detail="유효하지 않은 토큰입니다")
 
 
-def _apply_cleaning(page_content: WebPageContent) -> WebPageContent:
+def _apply_cleaning(page_content: WebPageContent) -> tuple[WebPageContent, CleanedWebContent]:
     """clean_page_content()는 CleanedWebContent(title/fetched_at/encoding 없음)를 반환하므로,
     원본 WebPageContent의 title/fetched_at/encoding/is_js_rendered_suspected는 그대로 두고
     blocks/text/text_length만 정제 결과로 교체한 새 WebPageContent를 만든다
-    (기존 UrlExtractionResult.page_content 응답 계약 유지)."""
+    (기존 UrlExtractionResult.page_content 응답 계약 유지).
+    가은/Claude(2026-07-15): 원본 CleanedWebContent도 같이 반환하도록 확장 — chunk_document()가
+    바로 이 타입을 받도록 설계돼 있어서(merge된 WebPageContent가 아니라) 색인하려면 필요하다."""
     cleaned = clean_page_content(page_content)
     cleaned_text = "\n\n".join(block.content for block in cleaned.cleaned_blocks)
-    return page_content.model_copy(update={
+    merged = page_content.model_copy(update={
         "blocks": cleaned.cleaned_blocks,
         "text": cleaned_text,
         "text_length": len(cleaned_text),
     })
+    return merged, cleaned
 
 
 # DOC-004: URL 문서 수집
 @router.post("/fetch-url", response_model=UrlExtractionResult)
 async def fetch_url(
     request: FetchUrlRequest,
-    authorization: str = Header(..., alias="authorization"),
+    authorization: Optional[str] = Header(None, alias="authorization"),
 ) -> UrlExtractionResult:
-    get_current_user(authorization)
+    user_email = get_current_user(authorization)
 
     try:
         result = await run_in_threadpool(load_from_url, request.url)
@@ -127,11 +168,43 @@ async def fetch_url(
 
     if result.page_content is not None:
         try:
-            cleaned_page_content = await run_in_threadpool(_apply_cleaning, result.page_content)
+            merged_page_content, cleaned = await run_in_threadpool(_apply_cleaning, result.page_content)
         except Exception:
             logger.exception("HTML 정제 중 예상하지 못한 오류가 발생했습니다: url=%s", request.url)
             raise InternalServerException(detail=_GENERIC_ERROR_MESSAGE)
-        result = result.model_copy(update={"page_content": cleaned_page_content})
+        result = result.model_copy(update={"page_content": merged_page_content})
+
+        # 가은/Claude(2026-07-15, "다 이어버리자"): project_id가 있으면 공고문도 기획서
+        # 업로드와 동일하게 색인 + documents 컬렉션 저장까지 잇는다. 없으면(과거 호출
+        # 호환) 조회만 하고 끝낸다 — 프론트가 project_id를 꼭 보내도록 같이 바꿨다.
+        if request.project_id:
+            document = DocumentModel(
+                project_id=request.project_id,
+                user_email=user_email,
+                original_filename=merged_page_content.title or request.url,
+                stored_filename=request.url,
+                file_path=request.url,
+                file_size=merged_page_content.text_length,
+                mime_type="text/html",
+                source_type="url",
+                document_role="criteria",
+                parsed_text=merged_page_content.text,
+            )
+            document_id = await document_repo.create(document)
+            try:
+                stored_count = await run_in_threadpool(
+                    _chunk_and_index_webpage,
+                    document_id,
+                    request.project_id,
+                    request.url,
+                    merged_page_content.title or request.url,
+                    cleaned,
+                )
+                status_value = "indexed" if stored_count > 0 else "indexed_empty"
+            except Exception:
+                logger.exception("공고문 색인 중 오류가 발생했습니다: document_id=%s", document_id)
+                status_value = "indexing_failed"
+            await document_repo.update_fields(document_id, {"status": status_value})
 
     return result
 
@@ -142,7 +215,10 @@ async def upload_document(
     project_id: str,
     file: UploadFile = File(...),
     source_type: str = Form("pdf"),
-    authorization: str = Header(..., alias="authorization"),
+    # 가은/Claude(2026-07-15): "target"(평가 대상 문서/기획서, 기본값 — 기존 호출 호환) |
+    # "criteria"(공고문 파일 업로드 탭). DocumentUploadPage.jsx의 두 드롭존과 대응된다.
+    document_role: str = Form("target"),
+    authorization: Optional[str] = Header(None, alias="authorization"),
 ):
     user_email = get_current_user(authorization)
 
@@ -163,20 +239,23 @@ async def upload_document(
         file_size=len(content),
         mime_type=file.content_type or "application/octet-stream",
         source_type=source_type,
+        document_role=document_role,
     )
 
     result = await document_repo.create(document)
 
     # RAG-001~003: 파싱 -> 청킹 -> 임베딩 -> Chroma 색인 (실패해도 업로드 자체는 성공으로 유지)
     try:
-        stored_count = await run_in_threadpool(
+        stored_count, parsed_text = await run_in_threadpool(
             _parse_chunk_and_index, result, project_id, file_path, file.filename
         )
         document.status = "indexed" if stored_count > 0 else "indexed_empty"
+        document.parsed_text = parsed_text
+        await document_repo.update_fields(result, {"status": document.status, "parsed_text": parsed_text})
     except Exception:
         logger.exception("문서 색인 중 오류가 발생했습니다: document_id=%s", result)
         document.status = "indexing_failed"
-    await document_repo.update_status(result, document.status)
+        await document_repo.update_status(result, document.status)
 
     return DocumentResponse(
         id=result,
@@ -191,6 +270,7 @@ async def upload_document(
         status=document.status,
         created_at=document.created_at,
         updated_at=document.updated_at,
+        document_role=document.document_role,
     )
 
 
@@ -198,7 +278,7 @@ async def upload_document(
 @router.get("/{project_id}", response_model=list[DocumentResponse])
 async def get_documents(
     project_id: str,
-    authorization: str = Header(..., alias="authorization"),
+    authorization: Optional[str] = Header(None, alias="authorization"),
 ):
     user_email = get_current_user(authorization)
     documents = await document_repo.find_by_project_id(project_id)
@@ -217,6 +297,7 @@ async def get_documents(
             status=d["status"],
             created_at=d["created_at"],
             updated_at=d["updated_at"],
+            document_role=d.get("document_role", "target"),
         )
         for d in documents
     ]
