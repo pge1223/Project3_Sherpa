@@ -16,8 +16,12 @@
       "하나의 평가항목에는 주 담당 위원 한 명을 지정한다.",
       "필요한 경우에만 보조 위원 한 명까지 추가로 지정한다.",
       "공고문에서 대응 항목을 찾지 못한 위원의 기본 평가 관점은 공식 채점 항목으로 만들지 않고 source: default 보조 논의 관점으로만 유지한다.",
-      "공고문에 실제로 있던 평가항목(source: notice)은 모두 required: true로 표시한다."
-    ]
+      "공고문에 실제로 있던 평가항목(source: notice)은 모두 required: true로 표시한다.",
+      "공고문의 평가항목이 이 4범주(창의성/실현가능성/기여도/완성도)로 자연스럽게 매핑되면 criterion_id를 새로 만들지 않고 그대로 재사용한다.",
+      "공고문이 이 4범주에 없는 고유 평가축(예: 팀 구성, 지속가능성, 파급효과)을 명시하면 그때만 새 criterion_id를 추가하고, 가장 전문성이 맞는 위원에게 primary_persona_id를 배정한다."
+    ],
+    "reusable_as_default_template": true,
+    "default_template_note": "criterion_id 4종(creativity_appropriateness/feasibility/contribution/content_overall)과 persona 매핑은 이 파일이 예시로 삼은 특정 공모전(2026 에너지최적화 디자인 공모전)에 종속된 값이 아니라, competition 도메인 공고문 전반에 재사용 가능한 기본 골격이다. weight_origin: equal_distribution_remaining(배점 미공개 시 균등 분배)도 이 도메인에서 흔히 재사용되는 기본값으로 삼는다 — 공고문이 배점을 공개하면 그 값을 그대로 쓰고, 이 4범주와 다른 고유 평가축이 있을 때만 assignment_rules에 따라 항목을 추가한다."
   },
   "committee": ["creativity_originality", "technical_feasibility", "business_strategy", "presentation_completeness"],
   "total_max_score": 100,

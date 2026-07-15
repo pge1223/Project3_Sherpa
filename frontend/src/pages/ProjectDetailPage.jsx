@@ -1,6 +1,17 @@
 import { useEffect, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { analyzeProject } from '../api/projectApi'
+import MeetingChat from '../components/meeting/MeetingChat'
+
+function downloadResultJson(result, projectId) {
+  const blob = new Blob([JSON.stringify(result, null, 2)], { type: 'application/json' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `${result.meeting_id || `analysis-${projectId}`}.json`
+  a.click()
+  URL.revokeObjectURL(url)
+}
 
 export default function ProjectDetailPage() {
   const { projectId } = useParams()
@@ -38,19 +49,18 @@ export default function ProjectDetailPage() {
       {result && (
         <>
           <p style={styles.mockNotice}>
-            ※ 현재 위원회 그래프(M4)가 아직 준비되지 않아, 계약(schema_version {result.schema_version}) 형태의
-            mock 결과를 보여주고 있습니다.
+            ※ RAG 검색 + LangGraph + 실제 OpenAI 호출로 생성된 결과입니다(schema_version{' '}
+            {result.schema_version}). 평가 대상 문서가 여러 개면 첫 번째 문서만 사용하며,
+            분석/재평가마다 실제 API 비용이 발생합니다.
           </p>
-          {result.chair_summary && (
-            <div style={styles.card}>
-              <h2 style={styles.sectionTitle}>위원장 종합</h2>
-              <p>{result.chair_summary.summary_text || JSON.stringify(result.chair_summary)}</p>
-            </div>
-          )}
-          <div style={styles.card}>
-            <h2 style={styles.sectionTitle}>원본 JSON</h2>
+          <MeetingChat result={result} />
+          <details style={styles.card}>
+            <summary style={styles.sectionTitle}>원본 JSON</summary>
+            <button style={styles.downloadButton} onClick={() => downloadResultJson(result, projectId)}>
+              .json 다운로드
+            </button>
             <pre style={styles.pre}>{JSON.stringify(result, null, 2)}</pre>
-          </div>
+          </details>
         </>
       )}
     </div>
@@ -83,6 +93,18 @@ const styles = {
     marginTop: 16,
   },
   sectionTitle: { margin: '0 0 10px', fontSize: 16, color: '#1a3a5c' },
+  downloadButton: {
+    display: 'block',
+    marginTop: 10,
+    marginBottom: 10,
+    padding: '6px 14px',
+    fontSize: 13,
+    color: '#2f7fd1',
+    background: '#eaf3fb',
+    border: '1px solid #cfe2f3',
+    borderRadius: 8,
+    cursor: 'pointer',
+  },
   pre: {
     whiteSpace: 'pre-wrap',
     wordBreak: 'break-word',

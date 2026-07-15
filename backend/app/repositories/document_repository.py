@@ -37,3 +37,7 @@ class DocumentRepository:
     async def update_status(self, document_id: str, status: str) -> None:
         collection = self.get_collection()
         await collection.update_one({"_id": ObjectId(document_id)}, {"$set": {"status": status}})
+
+    async def update_fields(self, document_id: str, fields: dict) -> None:
+        collection = self.get_collection()
+        await collection.update_one({"_id": ObjectId(document_id)}, {"$set": fields})

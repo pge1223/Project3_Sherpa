@@ -17,10 +17,14 @@ class DocumentResponse(BaseModel):
     status: str
     created_at: datetime
     updated_at: datetime
+    document_role: str = "target"
 
 
 class FetchUrlRequest(BaseModel):
     url: str
+    # 가은/Claude (2026-07-15): project_id가 있으면 RAG 색인까지 하고 documents 컬렉션에
+    # document_role="criteria"로 저장한다. 없으면(과거 호출 호환) 조회만 하고 저장하지 않는다.
+    project_id: Optional[str] = None
 
     @field_validator("url")
     @classmethod
