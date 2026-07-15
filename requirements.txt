@@ -20,3 +20,22 @@ email-validator
 sshtunnel
 paramiko
 pymongo
+
+# ai/rag (용준) - 문서 파싱/청킹 (RAG-001)
+langchain-text-splitters
+pymupdf
+python-docx
+python-pptx
+beautifulsoup4
+lxml
+
+# ai/rag (용준) - 임베딩/Chroma 벡터 저장 (RAG-002)
+numpy
+torch
+sentence-transformers
+chromadb
+langchain-huggingface
+langchain-chroma
+
+# ai/rag 테스트
+requests-mock
