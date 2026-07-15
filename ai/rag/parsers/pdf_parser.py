@@ -13,6 +13,7 @@ from ai.rag.parsers.schemas import (
     LocationType,
     BlockType,
     DocumentBlock,
+    DocumentExtractionResult,
 )
 from ai.rag.parsers.exceptions import CorruptedDocumentError, EmptyDocumentError
 from ai.rag.parsers.config import MIN_TEXT_LENGTH_PER_PAGE, SCAN_PAGE_RATIO_THRESHOLD
