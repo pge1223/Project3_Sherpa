@@ -2,14 +2,13 @@
   "meta": {
     "project_name": "AI Review Board",
     "schema_name": "persona_rubric_mapping",
-    "schema_version": "1.1.0",
+    "schema_version": "1.0.0",
     "domain": "government_support",
     "mock": true,
     "based_on": "contracts/mocks/notice_criteria_government_support.json",
-    "committee_source": "ai/meeting/personas/government_support.json",
+    "committee_source": "ai/meeting/personas/persona_cards.json",
     "created_at": "2026-07-14",
-    "updated_at": "2026-07-15",
-    "_comment": "이 파일은 PER-002(공고 기반 평가축 보정)의 산출물, 즉 공고문 평가기준을 위원별 rubric으로 배정한 결과다. rubric[] 각 항목의 source는 'notice'(공고문에 실제로 있던 기준)만 쓰고, default_supplementary_perspectives[]는 위원의 기본 페르소나 평가관점 중 공고문에 대응 항목이 없는 것들을 모아둔 것으로 source가 항상 'default'다 — 이 둘을 절대 같은 배열에 섞지 않는다(공고문에 없는 걸 공식 채점 항목처럼 보이게 하지 않기 위함). weight_origin은 'explicit'(공고문에 배점 명시)과 'equal_distribution_remaining'(공고문에 배점이 없어 남은 배점을 배정) 두 값만 쓴다. committee는 ai/meeting/personas/government_support.json의 4인 채점 위원과 동일하다 — HAI-001 영상화 대상(business_strategy·technical_feasibility 2인)과는 별개 개념이니 혼동하지 말 것: 영상은 4인 중 2명만 하되, 채점은 4인 전원이 한다.",
+    "_comment": "이 파일은 PER-002(공고 기반 평가축 보정)의 산출물, 즉 공고문 평가기준을 위원별 rubric으로 배정한 결과다. rubric[] 각 항목의 source는 'notice'(공고문에 실제로 있던 기준)만 쓰고, default_supplementary_perspectives[]는 위원의 기본 페르소나 평가관점 중 공고문에 대응 항목이 없는 것들을 모아둔 것으로 source가 항상 'default'다 — 이 둘을 절대 같은 배열에 섞지 않는다(공고문에 없는 걸 공식 채점 항목처럼 보이게 하지 않기 위함). weight_origin은 'explicit'(공고문에 배점 명시)과 'equal_distribution_remaining'(공고문에 배점이 없어 남은 배점을 배정) 두 값만 쓴다. 위원이 2명을 초과하는 도메인으로 확장될 경우, mapping_note가 달린 항목(현재 policy_alignment)부터 재배정을 검토하면 된다. 다른 도메인용 매핑을 만들 때는 이 파일을 복제해 committee와 rubric[]만 해당 도메인 기준으로 교체한다.",
     "assignment_rules": [
       "공고문에 명시된 평가항목을 최우선으로 사용한다.",
       "공고문에 가중치가 있으면 그대로 유지한다.",
@@ -17,12 +16,9 @@
       "하나의 평가항목에는 주 담당 위원 한 명을 지정한다.",
       "필요한 경우에만 보조 위원 한 명까지 추가로 지정한다.",
       "공고문에서 대응 항목을 찾지 못한 위원의 기본 평가 관점은 공식 채점 항목으로 만들지 않고 source: default 보조 논의 관점으로만 유지한다."
-    ],
-    "changelog": [
-      "1.1.0: committee를 2인(영상 MVP 공통 위원)에서 government_support.json의 4인(policy_fit, business_strategy, technical_feasibility, budget_execution) 채점 위원으로 확장. policy_alignment를 business_strategy → policy_fit으로 재배정, execution_plan을 technical_feasibility → budget_execution으로 재배정(technical_feasibility는 보조로 유지). policy_fit·budget_execution의 미사용 평가관점을 default_supplementary_perspectives에 추가."
     ]
   },
-  "committee": ["policy_fit", "business_strategy", "technical_feasibility", "budget_execution"],
+  "committee": ["business_strategy", "technical_feasibility"],
   "total_max_score": 100,
   "rubric": [
     {
@@ -62,10 +58,9 @@
       "source": "notice",
       "weight_origin": "equal_distribution_remaining",
       "weight_origin_note": "공고문에 배점이 없어(weight: null) 전체 100점에서 명시된 배점 합(80점)을 제외한 잔여 20점을 그대로 배정함. 잔여 배점 대상이 여러 개면 동일하게 나눈다.",
-      "primary_persona_id": "budget_execution",
-      "primary_perspective_id": "budget_allocation",
-      "secondary_persona_id": "technical_feasibility",
-      "mapping_note": "4인 구성으로 확장하며 주담당을 technical_feasibility → budget_execution으로 재배정(예산·집행일정이 budget_execution의 핵심 관점과 더 직접 맞음). technical_feasibility는 구현 범위 현실성 관점에서 보조로 유지."
+      "primary_persona_id": "technical_feasibility",
+      "primary_perspective_id": "scope_feasibility",
+      "secondary_persona_id": "business_strategy"
     },
     {
       "criterion_id": "policy_alignment",
@@ -73,22 +68,16 @@
       "max_score": 10,
       "source": "notice",
       "weight_origin": "explicit",
-      "primary_persona_id": "policy_fit",
-      "primary_perspective_id": "policy_goal_alignment",
+      "primary_persona_id": "business_strategy",
+      "primary_perspective_id": "problem_definition",
       "secondary_persona_id": null,
-      "mapping_note": "4인 구성으로 확장하며 전용 위원인 policy_fit으로 재배정(기존 2인 버전에서는 business_strategy가 임시로 담당)."
+      "mapping_note": "정책 전용 위원이 없어 기존 2인 중 전략 관점에 가장 가까운 business_strategy에 배정함. 위원 구성이 3인 이상으로 확장되면 재검토 필요."
     }
   ],
   "default_supplementary_perspectives": [
     {
       "persona_id": "business_strategy",
       "perspective_id": "target_customer",
-      "source": "default",
-      "note": "공고문에 대응하는 평가항목 없음. 공식 채점 항목으로 만들지 않고 위원 발언 중 보조 논의 관점으로만 사용."
-    },
-    {
-      "persona_id": "business_strategy",
-      "perspective_id": "business_model",
       "source": "default",
       "note": "공고문에 대응하는 평가항목 없음. 공식 채점 항목으로 만들지 않고 위원 발언 중 보조 논의 관점으로만 사용."
     },
@@ -106,18 +95,6 @@
     },
     {
       "persona_id": "technical_feasibility",
-      "perspective_id": "implementation_feasibility",
-      "source": "default",
-      "note": "공고문에 대응하는 평가항목 없음. 공식 채점 항목으로 만들지 않고 위원 발언 중 보조 논의 관점으로만 사용."
-    },
-    {
-      "persona_id": "technical_feasibility",
-      "perspective_id": "scope_feasibility",
-      "source": "default",
-      "note": "1.0.0에서는 execution_plan의 주담당 관점이었으나, 4인 구성 확장으로 execution_plan 주담당이 budget_execution으로 이동하면서 default로 전환됨."
-    },
-    {
-      "persona_id": "technical_feasibility",
       "perspective_id": "data_readiness",
       "source": "default",
       "note": "공고문에 대응하는 평가항목 없음. 공식 채점 항목으로 만들지 않고 위원 발언 중 보조 논의 관점으로만 사용."
@@ -131,66 +108,6 @@
     {
       "persona_id": "technical_feasibility",
       "perspective_id": "technical_risk",
-      "source": "default",
-      "note": "공고문에 대응하는 평가항목 없음. 공식 채점 항목으로 만들지 않고 위원 발언 중 보조 논의 관점으로만 사용."
-    },
-    {
-      "persona_id": "policy_fit",
-      "perspective_id": "public_value",
-      "source": "default",
-      "note": "공고문에 대응하는 평가항목 없음. 공식 채점 항목으로 만들지 않고 위원 발언 중 보조 논의 관점으로만 사용."
-    },
-    {
-      "persona_id": "policy_fit",
-      "perspective_id": "regional_or_sector_relevance",
-      "source": "default",
-      "note": "공고문에 대응하는 평가항목 없음. 공식 채점 항목으로 만들지 않고 위원 발언 중 보조 논의 관점으로만 사용."
-    },
-    {
-      "persona_id": "policy_fit",
-      "perspective_id": "compliance_requirements",
-      "source": "default",
-      "note": "공고문에 대응하는 평가항목 없음. 공식 채점 항목으로 만들지 않고 위원 발언 중 보조 논의 관점으로만 사용."
-    },
-    {
-      "persona_id": "policy_fit",
-      "perspective_id": "sustainability_after_support",
-      "source": "default",
-      "note": "공고문에 대응하는 평가항목 없음. 공식 채점 항목으로 만들지 않고 위원 발언 중 보조 논의 관점으로만 사용."
-    },
-    {
-      "persona_id": "policy_fit",
-      "perspective_id": "social_impact_measurement",
-      "source": "default",
-      "note": "공고문에 대응하는 평가항목 없음. 공식 채점 항목으로 만들지 않고 위원 발언 중 보조 논의 관점으로만 사용."
-    },
-    {
-      "persona_id": "budget_execution",
-      "perspective_id": "execution_schedule",
-      "source": "default",
-      "note": "공고문에 대응하는 평가항목 없음. 공식 채점 항목으로 만들지 않고 위원 발언 중 보조 논의 관점으로만 사용."
-    },
-    {
-      "persona_id": "budget_execution",
-      "perspective_id": "cost_basis",
-      "source": "default",
-      "note": "공고문에 대응하는 평가항목 없음. 공식 채점 항목으로 만들지 않고 위원 발언 중 보조 논의 관점으로만 사용."
-    },
-    {
-      "persona_id": "budget_execution",
-      "perspective_id": "milestone_alignment",
-      "source": "default",
-      "note": "공고문에 대응하는 평가항목 없음. 공식 채점 항목으로 만들지 않고 위원 발언 중 보조 논의 관점으로만 사용."
-    },
-    {
-      "persona_id": "budget_execution",
-      "perspective_id": "risk_contingency",
-      "source": "default",
-      "note": "공고문에 대응하는 평가항목 없음. 공식 채점 항목으로 만들지 않고 위원 발언 중 보조 논의 관점으로만 사용."
-    },
-    {
-      "persona_id": "budget_execution",
-      "perspective_id": "reporting_compliance",
       "source": "default",
       "note": "공고문에 대응하는 평가항목 없음. 공식 채점 항목으로 만들지 않고 위원 발언 중 보조 논의 관점으로만 사용."
     }
