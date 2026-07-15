@@ -15,7 +15,14 @@ MEETING_DIR = Path(__file__).resolve().parents[1]  # ai/meeting
 REPO_ROOT = MEETING_DIR.parents[1]
 sys.path.insert(0, str(MEETING_DIR))
 
-from graph import assemble_meeting_graph, build_routing, build_rubric, initial_state  # noqa: E402
+from graph import (  # noqa: E402
+    assemble_meeting_graph,
+    build_routing,
+    build_rubric,
+    initial_state,
+    make_openai_llm_call,
+    run_meeting,
+)
 from graph.transform import raw_chair_to_v2, raw_reviewer_to_v2  # noqa: E402
 from graph.evidence import EvidencePool  # noqa: E402
 
@@ -289,3 +296,138 @@ def test_full_meeting_graph_produces_v2_compliant_result():
         "media_script": [],
     }
     jsonschema.Draft202012Validator(_load_schema()).validate(document)
+
+
+# ---------------------------------------------------------------------------
+# run.py — 실제 rubric_mapping(가은 PER-001)으로 엔트리포인트 전체 실행
+# ---------------------------------------------------------------------------
+
+_COMPETITION_PERSONA_NAMES = {
+    "creativity_originality": "창의성·독창성 전문가",
+    "technical_feasibility": "기술·실현가능성 전문가",
+    "business_strategy": "사업전략 전문가",
+    "presentation_completeness": "완성도·전달력 전문가",
+}
+
+
+def _make_raw_reviewer(persona_id: str, persona_name: str, owned_criteria: list[dict]) -> dict:
+    return {
+        "review_id": f"REV-{persona_id}",
+        "meeting_id": "MTG-RUN-TEST-001",
+        "persona_id": persona_id,
+        "persona_name": persona_name,
+        "review_round": 1,
+        "review_summary": f"{persona_name} 검토 요약",
+        "review_items": [
+            {
+                "criterion_id": c["criterion_id"],
+                "criterion_name": c["criterion_name"],
+                "max_score": c["max_score"],
+                "score_recommendation": c["max_score"] - 5,
+                "judgment": "strong",
+                "confidence": "high",
+                "strengths": ["근거가 충분하다."],
+                "weaknesses": [],
+                "evidence_refs": [],
+                "improvement_actions": [],
+            }
+            for c in owned_criteria
+        ],
+        "cross_reviews": [],
+        "priority_actions": [],
+        "out_of_scope": [],
+    }
+
+
+_RAW_CHAIR_FOR_RUN = {
+    "chair_id": "review_chair",
+    "overall_assessment": "전반적으로 양호하다.",
+    "consensus": ["아이디어가 참신하다."],
+    "disagreements": [],
+    "top_strengths": ["아이디어가 참신하다."],
+    "top_risks": ["실현 가능성 검증이 더 필요하다."],
+    "final_priority_actions": [
+        {
+            "priority": 1,
+            "title": "실현 가능성 보강",
+            "target": "실현 가능성 섹션",
+            "reason": "구체적 실행 계획이 부족하다.",
+            "action": "단계별 실행 계획을 추가한다.",
+            "related_criteria": ["feasibility"],
+            "evidence_ids": [],
+        }
+    ],
+    "final_decision": None,
+    "decision_note": None,
+}
+
+
+def test_run_meeting_with_real_competition_mapping_produces_v2_document():
+    mapping = json.loads(COMPETITION_MAPPING_PATH.read_text(encoding="utf-8"))
+    routing = build_routing(mapping)
+    criteria_by_id = {c["criterion_id"]: c for c in mapping["rubric"]}
+
+    raw_by_marker = {}
+    for persona_id in mapping["committee"]:
+        owned = [
+            {
+                "criterion_id": cid,
+                "criterion_name": criteria_by_id[cid]["criterion_name"],
+                "max_score": criteria_by_id[cid]["max_score"],
+            }
+            for cid, r in routing.items()
+            if r["primary"] == persona_id
+        ]
+        persona_name = _COMPETITION_PERSONA_NAMES[persona_id]
+        raw_by_marker[f"{persona_name}입니다"] = _make_raw_reviewer(persona_id, persona_name, owned)
+    raw_by_marker["위원장(review_chair)입니다"] = _RAW_CHAIR_FOR_RUN
+
+    document = run_meeting(
+        meeting_id="MTG-RUN-TEST-001",
+        project_id="PRJ-RUN-TEST-001",
+        document_id="DOC-RUN-TEST-001",
+        title="공모전 테스트 회의",
+        rubric_mapping=mapping,
+        submission={"document_name": "test.pdf", "text": "..."},
+        retrieved_evidence=[],
+        llm_call=_make_stub_llm(raw_by_marker),
+    )
+
+    jsonschema.Draft202012Validator(_load_schema()).validate(document)
+    assert document["domain"] == "competition"
+    assert len(document["reviewer_results"]) == len(mapping["committee"])
+    assert document["score_result"]["total_score"] == document["score_result"]["max_score"] - 5 * len(
+        mapping["committee"]
+    )
+
+
+# ---------------------------------------------------------------------------
+# llm.py — make_openai_llm_call (실제 API 호출 없이 가짜 client로 검증)
+# ---------------------------------------------------------------------------
+
+
+class _FakeCompletions:
+    def __init__(self, content: str):
+        self._content = content
+        self.last_kwargs: dict | None = None
+
+    def create(self, **kwargs):
+        self.last_kwargs = kwargs
+        message = type("_Message", (), {"content": self._content})()
+        choice = type("_Choice", (), {"message": message})()
+        return type("_Response", (), {"choices": [choice]})()
+
+
+class _FakeOpenAIClient:
+    def __init__(self, content: str):
+        self.chat = type("_Chat", (), {"completions": _FakeCompletions(content)})()
+
+
+def test_make_openai_llm_call_sends_given_model_and_returns_content():
+    fake_client = _FakeOpenAIClient('{"ok": true}')
+    llm_call = make_openai_llm_call(model="gpt-test-model", client=fake_client)
+
+    text = llm_call("아무 프롬프트")
+
+    assert text == '{"ok": true}'
+    assert fake_client.chat.completions.last_kwargs["model"] == "gpt-test-model"
