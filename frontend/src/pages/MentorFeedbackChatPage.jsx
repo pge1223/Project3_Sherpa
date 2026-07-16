@@ -13,8 +13,11 @@ import StepSidebar from '../components/wizard/StepSidebar'
 // 미뤄뒀던 부분(사용자 확정). 채팅 상단은 방금 끝난 회의 결과(reviewer_results +
 // chair_summary)를 MeetingChat/MeetingSimulationPage와 같은 buildTranscript()로 그대로
 // 재사용해 "위원들이 이미 한 말"로 보여주고, 그 아래 입력창으로 후속 질문을 하면
-// POST /projects/:id/ask(위원장이 저장된 결과 안에서만 답함, 새 채점 없음)를 부른다.
-// 대화 기록은 서버에 저장하지 않는 stateless 호출이라 history를 매번 그대로 다시 보낸다.
+// POST /projects/:id/ask를 부른다. 어느 위원에게 물어볼지 사용자가 고르지 않아도, 서버가
+// 질문 내용을 보고 관련 위원 1~3명(또는 위원장)을 자동으로 골라 답하므로(백엔드
+// _build_routing_prompt) 응답이 배열(data.answers)로 온다 — 그대로 순서대로 버블 여러 개로
+// 렌더링한다. 새 채점/저장은 없다. 대화 기록은 서버에 저장하지 않는 stateless 호출이라
+// history를 매번 그대로 다시 보낸다.
 //
 // 가은/Claude(2026-07-17): 별도 페이지였던 영상 시뮬레이션(/simulation,
 // MeetingSimulationPage — 이번에 삭제)의 CommitteeVideoStage(재인님 파일, 안 건드림)를
@@ -99,10 +102,14 @@ export default function MentorFeedbackChatPage() {
     setAsking(true)
     try {
       const data = await askCommittee(projectId, question, historyRef.current)
-      historyRef.current = [...historyRef.current, { question, answer: data.answer }]
+      const answers = data.answers || []
+      // 여러 위원이 한 질문에 같이 답할 수 있어서(_build_routing_prompt), 다음 요청에
+      // 넘길 history는 화자별 답변을 한데 묶어 하나의 answer 문자열로 만든다.
+      const combinedAnswer = answers.map((a) => `${a.display_name}: ${a.answer}`).join('\n')
+      historyRef.current = [...historyRef.current, { question, answer: combinedAnswer }]
       setMessages((prev) => [
         ...prev,
-        { isUser: false, personaId: data.persona_id, speakerName: data.display_name, text: data.answer },
+        ...answers.map((a) => ({ isUser: false, personaId: a.persona_id, speakerName: a.display_name, text: a.answer })),
       ])
     } catch (err) {
       setError(err.message)
@@ -152,9 +159,11 @@ export default function MentorFeedbackChatPage() {
           ))}
           {asking && (
             <div style={styles.bubbleRow}>
-              <Avatar name="위원장" personaId="review_chair" />
+              {/* 가은/Claude(2026-07-17): 어느 위원이 답할지는 서버 라우팅(_build_routing_prompt)
+                  결과가 와야 알 수 있어서, 로딩 중엔 특정 위원 아바타 대신 중립 아이콘을 쓴다. */}
+              <div style={styles.loadingAvatar}>⋯</div>
               <div style={styles.bubbleBody}>
-                <div style={styles.bubble}>답변을 준비하고 있어요...</div>
+                <div style={styles.bubble}>위원들이 답변을 준비하고 있어요...</div>
               </div>
             </div>
           )}
@@ -290,6 +299,20 @@ const styles = {
     justifyContent: 'center',
     fontWeight: 700,
     fontSize: 14,
+  },
+  loadingAvatar: {
+    flexShrink: 0,
+    width: 36,
+    height: 36,
+    borderRadius: '50%',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    fontWeight: 700,
+    fontSize: 14,
+    background: `${ACCENT}22`,
+    color: ACCENT,
+    border: `1.5px solid ${ACCENT}55`,
   },
   bubbleBody: { flex: 1, minWidth: 0, maxWidth: '78%' },
   bubbleBodyUser: { display: 'flex', flexDirection: 'column', alignItems: 'flex-end', marginLeft: 'auto' },
