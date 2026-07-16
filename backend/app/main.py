@@ -15,6 +15,7 @@ from app.api.routes.auth import router as auth_router
 from app.api.routes.projects import router as project_router
 from app.api.routes.documents import router as document_router
 from app.api.routes.meetings import router as meeting_router
+from app.api.routes.media import router as media_router  # 재인/Claude (2026-07-16): 위원 발언 영상 스트리밍 중계 (app/api/routes/media.py)
 app = FastAPI(
     title="AI Review Board API",
     description="RAG 기반 AI 심사위원회 시스템",
@@ -32,6 +33,7 @@ app.include_router(auth_router)
 app.include_router(project_router)
 app.include_router(document_router)
 app.include_router(meeting_router)
+app.include_router(media_router)  # 재인/Claude (2026-07-16): /media/available-speakers, /media/stream
 
 @app.on_event("startup")
 async def startup():

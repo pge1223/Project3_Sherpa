@@ -1,5 +1,12 @@
 pge_doc/
 
+# 재인: 스트리밍 버퍼링 구조 검증 후 더 이상 안 쓰는 스크래치 테스트 페이지
+# (web_test_chat.html은 CommitteeVideoStage.jsx 로직의 원형 참고 파일이라 계속 추적)
+ai/media/musetalk/web_test_stream_mse.html
+
+# 재인: 팀 작업분해표(WBS) - 별도 공유 문서로 관리, 레포에는 안 올림
+AI_Review_Board_HAI_직접구축_작업분해.xlsx
+
 # 환경변수
 .env
 .env.*

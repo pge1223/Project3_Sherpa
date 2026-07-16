@@ -1,0 +1,25 @@
+{
+  "schema_version": "2.0.0",
+  "engine": "openai-tts",
+  "model": "gpt-4o-mini-tts",
+  "voices": {
+    "business_strategy": {
+      "persona_slot": "persona_a",
+      "voice_id": "nova",
+      "gender": "female",
+      "voice_character": "밝고 친근한 여성",
+      "tone": "차분함",
+      "instructions": "천천히 자연스럽게, 아나운서처럼 발표하듯이, 여성스러우면서 자연스러운 톤으로 말하세요.",
+      "note": "HAI-003: 위원 A. gpt-4o-mini-tts는 steerable이라 instructions로 톤 보정 가능"
+    },
+    "technical_feasibility": {
+      "persona_slot": "persona_b",
+      "voice_id": "cedar",
+      "gender": "male",
+      "voice_character": "안정적이고 신뢰감있는",
+      "tone": "분석적",
+      "instructions": "분석적이고 또렷한 톤으로, 논리적으로 말하세요.",
+      "note": "HAI-003: 위원 B, A와 구분되는 남성 보이스. 페르소나 B 영상(남성 외형)이 이 보이스와 맞춰져야 함"
+    }
+  }
+}

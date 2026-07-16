@@ -38,6 +38,12 @@ class Settings(BaseSettings):
     NCP_SECRET_KEY: str = ""
     NCP_BUCKET_NAME: str = ""
 
+    # 재인/Claude (2026-07-16): 위원 발언 영상(TTS+MuseTalk 립싱크) 생성 서버 주소.
+    # 실제 생성은 별도 MuseTalk 서버(현재 Colab, Cloudflare Quick Tunnel로 노출)가 하고,
+    # backend/app/api/routes/media.py가 이 값으로 그 서버에 연결해 중계한다.
+    # 세션마다 Cloudflare Quick Tunnel 주소가 바뀌므로 Colab 재기동할 때마다 갱신 필요.
+    MEDIA_SERVICE_WS_URL: str = ""
+
     # RAG (Chroma)
     CHROMA_PERSIST_DIR: str = "./chroma_db"
 
