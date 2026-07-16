@@ -11,6 +11,7 @@ class ProjectUpdateRequest(BaseModel):
     title: Optional[str] = None
     doc_type: Optional[str] = None
     description: Optional[str] = None
+    domain: Optional[str] = None
 
 class ProjectResponse(BaseModel):
     id: str
