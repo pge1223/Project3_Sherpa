@@ -28,6 +28,10 @@ class DocumentModel:
         # 벡터/청크 단위라 "이 문서 전체 원문"을 그대로 돌려주는 용도로는 안 맞아서,
         # analyze_project()가 submission.text로 바로 쓸 수 있게 문서 레코드에 같이 저장한다.
         parsed_text: Optional[str] = None,
+        # 가은/Claude(2026-07-16): HWP/HWPX -> PDF 변환 통합(용준, ai/rag/converters/
+        # INTEGRATION.md). build_conversion_metadata()가 만드는 DocumentConversionMetadata를
+        # dict로 그대로 저장 — 새 컬럼 여러 개 대신 dict 하나로 묶음(가이드 3번 권장 사항).
+        conversion_metadata: Optional[dict] = None,
         _id: Optional[ObjectId] = None,
 
     ):
@@ -45,6 +49,7 @@ class DocumentModel:
         self.source_type = source_type
         self.document_role = document_role
         self.parsed_text = parsed_text
+        self.conversion_metadata = conversion_metadata
 
     def to_dict(self) -> dict:
         return {
@@ -61,4 +66,5 @@ class DocumentModel:
             "source_type": self.source_type,
             "document_role": self.document_role,
             "parsed_text": self.parsed_text,
+            "conversion_metadata": self.conversion_metadata,
         }

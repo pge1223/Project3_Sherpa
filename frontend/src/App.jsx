@@ -4,6 +4,9 @@ import LoginPage from './pages/LoginPage'
 import ProjectListPage from './pages/ProjectListPage'
 import ProjectDetailPage from './pages/ProjectDetailPage'
 import DocumentUploadPage from './pages/DocumentUploadPage'
+import MentorSelectionPage from './pages/MentorSelectionPage'
+import FeedbackProgressPage from './pages/FeedbackProgressPage'
+import MentorFeedbackChatPage from './pages/MentorFeedbackChatPage'
 
 function App() {
   return (
@@ -13,6 +16,9 @@ function App() {
       <Route path="/projects" element={<ProjectListPage />} />
       <Route path="/projects/new" element={<DocumentUploadPage />} />
       <Route path="/projects/:projectId" element={<ProjectDetailPage />} />
+      <Route path="/projects/:projectId/analysis" element={<MentorSelectionPage />} />
+      <Route path="/projects/:projectId/progress" element={<FeedbackProgressPage />} />
+      <Route path="/projects/:projectId/feedback-chat" element={<MentorFeedbackChatPage />} />
     </Routes>
   )
 }

@@ -1,4 +1,4 @@
-export const ACCEPTED_DOCUMENT_EXTENSIONS = ['.pdf', '.docx', '.pptx']
+export const ACCEPTED_DOCUMENT_EXTENSIONS = ['.pdf', '.docx', '.pptx', '.hwp', '.hwpx']
 
 export function isAcceptedDocument(file) {
   const name = file.name.toLowerCase()
