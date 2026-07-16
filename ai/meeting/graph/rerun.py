@@ -75,6 +75,8 @@ def rerun_reviewer(
         title=previous_document.get("title", ""),
         domain=domain,
         final_state=final_state,
+        # RAG-006 참고자료(v2.1.0)는 재평가로 바뀌지 않으니 이전 문서 값을 그대로 유지한다.
+        similar_success_cases=previous_document.get("similar_success_cases"),
     )
 
 

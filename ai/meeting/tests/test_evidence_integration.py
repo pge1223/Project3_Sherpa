@@ -21,6 +21,7 @@ from prompts import build_reviewer_prompt  # noqa: E402
 
 SCHEMA_PATH = REPO_ROOT / "contracts" / "schemas" / "review_output.schema.json"
 COMPETITION_MAPPING_PATH = MEETING_DIR / "personas" / "rubric_mapping_competition.json"
+RAG_SAMPLES_PATH = MEETING_DIR / "tests" / "fixtures" / "rag_adapter_samples.json"
 
 _PERSONA_NAMES = {
     "creativity_originality": "창의성·독창성 전문가",
@@ -278,3 +279,178 @@ def test_run_meeting_with_evidence_context_gates_and_uses_linked_evidence():
     # 근거는 RAG-004 linked ref에서 발급된 EV-*(persona별) 3건
     assert len(document["evidence"]) == 3
     assert all(e["evidence_id"].startswith("EV-") for e in document["evidence"])
+
+
+# ---------------------------------------------------------------------------
+# v2.1.0: similar_success_cases (RAG-006) pass-through
+# ---------------------------------------------------------------------------
+
+
+def _simple_competition_stub(mapping: dict):
+    routing = build_routing(mapping)
+    criteria_by_id = {c["criterion_id"]: c for c in mapping["rubric"]}
+    owned = {r["primary"]: cid for cid, r in routing.items()}
+    raw_by_marker = {
+        f"{_PERSONA_NAMES[pid]}입니다": _make_raw_reviewer(
+            pid, cid, criteria_by_id[cid]["criterion_name"], 20
+        )
+        for pid, cid in owned.items()
+    }
+    raw_by_marker["위원장(review_chair)입니다"] = _RAW_CHAIR
+
+    def stub(prompt: str) -> str:
+        for marker, raw in raw_by_marker.items():
+            if marker in prompt:
+                return json.dumps(raw, ensure_ascii=False)
+        raise AssertionError("마커 못 찾음")
+
+    return stub
+
+
+def _run_simple(mapping, **kwargs):
+    return run_meeting(
+        meeting_id="MTG-SC-001",
+        project_id="PRJ-SC-001",
+        document_id="DOC-SC-001",
+        title="유사사례 테스트",
+        rubric_mapping=mapping,
+        submission={"document_name": "t.pdf", "text": "..."},
+        retrieved_evidence=[],
+        llm_call=_simple_competition_stub(mapping),
+        **kwargs,
+    )
+
+
+def test_run_meeting_emits_v2_1_0_and_passes_similar_success_cases():
+    mapping = json.loads(COMPETITION_MAPPING_PATH.read_text(encoding="utf-8"))
+    validator = jsonschema.Draft202012Validator(json.loads(SCHEMA_PATH.read_text(encoding="utf-8")))
+
+    cases = {
+        "results": [
+            {
+                "case_id": "C1",
+                "title": "수상작 예시",
+                "case_type": "award_winner",
+                "similarity_score": 0.83,
+                "reference_only": True,
+            }
+        ],
+        "total_results": 1,
+        "comparison_mode": "selected_case_gap",
+        "reference_only": True,
+    }
+
+    # RAG-006 결과가 있을 때: 그대로 pass-through
+    doc = _run_simple(mapping, similar_success_cases=cases)
+    validator.validate(doc)
+    assert doc["schema_version"] == "2.1.0"
+    assert doc["similar_success_cases"] == cases
+    # 평가 결과엔 영향 없음(4항목 전부 채점되어 총점 80)
+    assert doc["score_result"]["total_score"] == 80
+
+    # RAG-006 미실행: null 이어도 v2.1.0 스키마 유효
+    doc_none = _run_simple(mapping)
+    validator.validate(doc_none)
+    assert doc_none["similar_success_cases"] is None
+
+
+# ---------------------------------------------------------------------------
+# 용준 실제 어댑터 출력 샘플로 통합 검증 (rag_adapter_samples.json)
+# ---------------------------------------------------------------------------
+
+
+def _rag_samples() -> dict:
+    return json.loads(RAG_SAMPLES_PATH.read_text(encoding="utf-8"))
+
+
+def test_real_linked_ref_sample_maps_to_v2_evidence():
+    """용준 to_linked_evidence_refs() 실제 출력 1건이 v2 evidence[]로 정확히 매핑되는지.
+    linked ref엔 text가 없어 retrieved_evidence 샘플에서 원문을 보강한다."""
+    samples = _rag_samples()
+    retrieved = samples["retrieved_evidence"]
+    linked = samples["linked_evidence_refs"][0]
+
+    pool = EvidencePool("business_strategy", retrieved)
+    eid = pool.register_linked(linked)
+    item = pool.as_list()[0]
+
+    assert eid == "EV-business_strategy-001"
+    assert item["chunk_id"] == "CHUNK-014"
+    assert item["document_name"] == "사업계획서.pdf"
+    assert item["page"] == 6
+    assert item["section"] == "시장 분석"
+    assert item["quote"] == linked["quote"]
+    # text는 retrieved 샘플에서 보강(linked엔 없음)
+    assert item["text"] == retrieved[0]["text"]
+    # score는 linked.final_score
+    assert item["score"] == 0.86
+
+
+def test_real_retrieved_sample_flows_through_run_meeting():
+    """용준 build_meeting_retrieved_evidence() 실제 shape로 evidence_context를 구성해
+    run_meeting을 돌리면, business_strategy 근거가 실제 샘플의 원문/출처로 조립된다."""
+    samples = _rag_samples()
+    retrieved_sample = samples["retrieved_evidence"]
+    linked_sample = samples["linked_evidence_refs"]
+
+    mapping = json.loads(COMPETITION_MAPPING_PATH.read_text(encoding="utf-8"))
+    routing = build_routing(mapping)
+    criteria_by_id = {c["criterion_id"]: c for c in mapping["rubric"]}
+    owned = {r["primary"]: cid for cid, r in routing.items()}
+    bs_criterion = owned["business_strategy"]
+
+    raw_by_marker = {
+        f"{_PERSONA_NAMES[pid]}입니다": _make_raw_reviewer(
+            pid, cid, criteria_by_id[cid]["criterion_name"], 20
+        )
+        for pid, cid in owned.items()
+    }
+    raw_by_marker["위원장(review_chair)입니다"] = _RAW_CHAIR
+
+    def stub(prompt: str) -> str:
+        for marker, raw in raw_by_marker.items():
+            if marker in prompt:
+                return json.dumps(raw, ensure_ascii=False)
+        raise AssertionError("마커 못 찾음")
+
+    # evidence_context: business_strategy는 실제 샘플 근거, 나머지는 근거 없음
+    evidence_context = []
+    for pid, cid in owned.items():
+        evidence_context.append(
+            {
+                "persona_id": pid,
+                "criterion_id": cid,
+                "retrieved_evidence": retrieved_sample if pid == "business_strategy" else [],
+                "sufficiency": {"prompt_guard": "근거 충분", "allow_numeric_score": True, "allow_definitive_judgment": True},
+            }
+        )
+
+    def evidence_callback(persona_id, criterion_id, review_item):
+        refs = linked_sample if persona_id == "business_strategy" else []
+        return {"linked_evidence_refs": refs, "sufficiency": {"allow_numeric_score": True, "allow_definitive_judgment": True}}
+
+    document = run_meeting(
+        meeting_id="MTG-RAGE2E-001",
+        project_id="PRJ-RAGE2E-001",
+        document_id="DOC-001",
+        title="RAG 실제 샘플 통합",
+        rubric_mapping=mapping,
+        submission={"document_name": "사업계획서.pdf", "text": "..."},
+        retrieved_evidence=[],
+        llm_call=stub,
+        evidence_context=evidence_context,
+        evidence_callback=evidence_callback,
+    )
+
+    jsonschema.Draft202012Validator(json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))).validate(document)
+
+    # 전원 채점(20 x 4 = 80)
+    assert document["score_result"]["total_score"] == 80
+    # business_strategy 근거가 실제 샘플에서 조립됨
+    bs = next(r for r in document["reviewer_results"] if r["persona_id"] == "business_strategy")
+    ev_ids = bs["rubric_scores"][0]["evidence_ids"]
+    assert ev_ids == ["EV-business_strategy-001"]
+    ev = next(e for e in document["evidence"] if e["evidence_id"] == ev_ids[0])
+    assert ev["chunk_id"] == "CHUNK-014"
+    assert ev["text"] == retrieved_sample[0]["text"]
+    assert ev["score"] == 0.86
