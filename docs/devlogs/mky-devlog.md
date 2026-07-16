@@ -1,5 +1,28 @@
 # mky Devlog
 
+## 2026-07-16
+
+- 한 일:
+  - **RAG-003/004/005 회의 연동**(용준 어댑터): `run_meeting`/state/build에 `evidence_context`(persona·criterion별 근거+사전 sufficiency) + `evidence_callback`(backend 주입) optional 추가. reviewer 노드가 ①사전 prompt_guard 삽입 → ②의견 생성 → ③criterion별 콜백(RAG-004 링크+RAG-005 최종판정) → ④A안(근거를 RAG-004로 교체) + `allow_numeric_score=False` 게이팅. EvidencePool에 `(document_id, chunk_id)→evidence_id` 역조회(`register_linked`) 추가. `<<EVIDENCE_GUARD>>` 토큰 신설. **전부 backward-compatible**(인자 없으면 기존 flat 경로 그대로)
+  - 용준 실제 어댑터 출력 샘플(`rag_adapter_samples.json`)로 통합 테스트 — `MeetingLinkedEvidenceRef`가 v2 evidence로 정확 매핑(text 없는 건 retrieved에서 보강) + run_meeting E2E 검증
+  - **review_output v2.1.0 계약 개정**(팀 동의 후): 선택 필드 `similar_success_cases`(RAG-006 유사사례, reference_only) 추가, `schema_version` const→enum `["2.0.0","2.1.0"]`(하위호환). `run_meeting`/`assemble_document` pass-through, 신규 문서 "2.1.0"
+  - **TST-002 위원 일관성 하네스**(`ai/meeting/quality/consistency.py`): 반복 평가 편차(총점/항목 점수/judgment 일치율/핵심 지적 Jaccard) 측정 + 허용범위(`ConsistencyTolerance`) 위반 판정. v2 문서만 읽어 실행 방식 비의존(DI)
+  - 테스트 40개 통과(scoring 5 + explanation 4 + comparison 3 + graph 9 + rerun 2 + reevaluate 2 + evidence_integration 8 + consistency 7). **내 담당 요구사항(MTG-001~004/006/007, RPT-004/006, TST-002) 코드 전부 완료**
+- 결정/이유:
+  - **회의 파이프라인 ↔ RAG decoupling 유지**: 그래프가 `ai.rag`를 직접 import하지 않고, backend가 판정 결과·근거를 plain data(evidence_context) + Callable(evidence_callback)로 주입. RAG 스키마가 바뀌어도 회의 코드가 안 깨짐
+  - **RAG-004 A안(위원 자기보고 근거 폐기, RAG-004 링크만 사용)** + 게이팅은 `(persona, criterion)` 단위 — 용준과 계약 확정
+  - **similar_success_cases는 permissive(내부 재검증 안 함) + 최상위 + schema_version enum**: RAG-006이 진행 중이라 계약을 용준 스키마에 안 묶고, 기존 "2.0.0" 문서도 유효하게 유지
+  - **일관성은 '완전 일치'가 아니라 '허용 편차 정의+측정'**(생성 모델 특성상 완전 동일 요구 금지). 실제 모델 붙기 전엔 stub으로 파이프라인 결정론(편차 0) baseline 확인
+  - 공용 계약 변경(v2.1.0)은 팀 절차대로: 제안서(`review_output.v2.1.proposal.md`) → 재인/윤한/가은/용준 동의 → 적용
+- 막힌 점:
+  - 가은이 실제 OpenAI 호출로 `assemble_document`의 persona_id 버그를 잡아줌(LLM이 지어낸 persona_id를 못 믿어 딕셔너리 키로 덮어쓰게 수정) — 내 stub 테스트로는 안 잡혔던 것. 회귀 가드 테스트 추가 예정
+  - 용준 어댑터 출력은 **persona별 flat**인데 내 `evidence_context`는 `(persona,criterion)별+sufficiency` 묶음이라, 그 사이 조립 헬퍼(`build_evidence_context`)가 필요 → RAG-005 사전 sufficiency granularity 확인 후 추가 예정
+  - dev가 하루에 #46~#57까지 빠르게 머지돼(로깅·HWP·RAG-006·backend 실연결 등) push 전마다 재싱크 반복
+- 다음 할 일:
+  - `build_evidence_context` 헬퍼(용준 회신 대기) / 가은 모델명 확정 후 실제 LLM E2E / 실제 모델로 일관성 편차 실측
+  - `assemble_document` persona_id 회귀 가드 테스트
+  - RPT-004/006 화면(가은)·evidence_context 조립·API(윤한) 연동 지원
+
 ## 2026-07-15
 
 - 한 일:
