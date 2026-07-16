@@ -35,7 +35,7 @@ class MeetingModel:
         top_revisions: Optional[list] = None,
         evidence: Optional[list] = None,
         media_script: Optional[list] = None,
-        schema_version: str = "2.0.0",
+        schema_version: str = "2.1.0",
         created_at: Optional[datetime] = None,
         updated_at: Optional[datetime] = None,
         _id: Optional[ObjectId] = None,
