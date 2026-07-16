@@ -20,6 +20,8 @@ app = FastAPI(
     title="AI Review Board API",
     description="RAG 기반 AI 심사위원회 시스템",
     version="0.1.0",
+    docs_url=None,
+    redoc_url=None,
 )
 
 app.add_middleware(
