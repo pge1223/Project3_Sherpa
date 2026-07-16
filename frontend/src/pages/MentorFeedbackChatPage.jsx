@@ -38,7 +38,43 @@ function Avatar({ name, personaId }) {
   )
 }
 
-function ChatBubble({ speakerName, role, text, personaId, isUser }) {
+// 가은/Claude(2026-07-17): "/ask 답변이 몇십 초 기다렸다가 문단 전체가 한번에 뜨니까
+// 너무 오래 걸리는 것처럼 느껴진다" — 실제 대기시간(라우팅+병렬 LLM 호출)을 줄이는 건
+// 이미 했으니(asyncio.gather), 여기선 응답이 도착한 뒤 한 번에 뜨지 않고 타이핑치듯
+// 글자가 점점 드러나게 해서 체감을 개선한다. 진짜 토큰 스트리밍(SSE)이 아니라 이미 다
+// 받은 텍스트를 클라이언트에서만 애니메이션하는 것 — 답변 길이와 무관하게 총 애니메이션
+// 시간이 비슷하도록 한 틱에 여러 글자씩 드러낸다. 마운트 시 한 번만 실행되면 되므로(같은
+// 메시지가 리렌더된다고 다시 타이핑되지 않아야 함) key가 고정된 각 ChatBubble 인스턴스
+// 안에서만 상태를 갖는다.
+const TYPING_TICK_MS = 20
+const TYPING_TARGET_MS = 900
+
+function TypingText({ text, onTick }) {
+  const [shown, setShown] = useState('')
+
+  useEffect(() => {
+    if (!text) {
+      setShown('')
+      return undefined
+    }
+    const totalTicks = Math.max(1, Math.round(TYPING_TARGET_MS / TYPING_TICK_MS))
+    const chunkSize = Math.max(1, Math.ceil(text.length / totalTicks))
+    let revealed = 0
+    setShown('')
+    const timer = setInterval(() => {
+      revealed += chunkSize
+      setShown(text.slice(0, revealed))
+      onTick?.()
+      if (revealed >= text.length) clearInterval(timer)
+    }, TYPING_TICK_MS)
+    return () => clearInterval(timer)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [text])
+
+  return shown
+}
+
+function ChatBubble({ speakerName, role, text, personaId, isUser, animate, onTick }) {
   const color = isUser ? '#7c4dff' : personaColor(personaId)
   return (
     <div style={{ ...styles.bubbleRow, ...(isUser ? styles.bubbleRowUser : {}) }}>
@@ -56,7 +92,7 @@ function ChatBubble({ speakerName, role, text, personaId, isUser }) {
             ...(isUser ? styles.bubbleUser : { borderColor: `${color}33` }),
           }}
         >
-          {text}
+          {animate ? <TypingText text={text} onTick={onTick} /> : text}
         </div>
       </div>
     </div>
@@ -109,7 +145,13 @@ export default function MentorFeedbackChatPage() {
       historyRef.current = [...historyRef.current, { question, answer: combinedAnswer }]
       setMessages((prev) => [
         ...prev,
-        ...answers.map((a) => ({ isUser: false, personaId: a.persona_id, speakerName: a.display_name, text: a.answer })),
+        ...answers.map((a) => ({
+          isUser: false,
+          personaId: a.persona_id,
+          speakerName: a.display_name,
+          text: a.answer,
+          animate: true,
+        })),
       ])
     } catch (err) {
       setError(err.message)
@@ -155,7 +197,11 @@ export default function MentorFeedbackChatPage() {
 
         <div style={styles.chatArea}>
           {messages.map((m, i) => (
-            <ChatBubble key={i} {...m} />
+            <ChatBubble
+              key={i}
+              {...m}
+              onTick={() => bottomRef.current?.scrollIntoView({ block: 'end' })}
+            />
           ))}
           {asking && (
             <div style={styles.bubbleRow}>
