@@ -51,18 +51,42 @@ def _overall_confidence(review_items: list[dict]) -> str:
     return min(confidences, key=lambda c: _CONFIDENCE_ORDER.get(c, 1))
 
 
-def raw_reviewer_to_v2(raw: dict[str, Any], evidence_pool: EvidencePool) -> dict[str, Any]:
-    """reviewer_prompt.txt 출력(raw) 한 건을 review_output.schema.json v2의 reviewerResult로 변환한다."""
+def raw_reviewer_to_v2(
+    raw: dict[str, Any],
+    evidence_pool: EvidencePool,
+    criterion_evidence: dict[str, dict] | None = None,
+) -> dict[str, Any]:
+    """reviewer_prompt.txt 출력(raw) 한 건을 review_output.schema.json v2의 reviewerResult로 변환한다.
+
+    criterion_evidence가 주어지면(A안, RAG-004/005 경로) criterion_id -> {linked_evidence_refs,
+    sufficiency}로: ①최종 sufficiency.allow_numeric_score=False인 항목은 미채점 처리하고(누락
+    경로로 흘려보냄), ②근거(evidence_ids)는 위원 자기보고 대신 linked_evidence_refs로 발급한다.
+    None이면(레거시) 위원 자기보고 evidence_refs를 그대로 등록한다.
+    """
     review_items = raw.get("review_items", [])
     rubric_scores = []
     for item in review_items:
+        cid = item["criterion_id"]
         judgment = item["judgment"]
         if judgment in _UNSCORABLE_JUDGMENTS:
             continue
-        evidence_refs = item.get("evidence_refs", [])
+
+        if criterion_evidence is not None:
+            ce = criterion_evidence.get(cid)
+            # 게이팅: 최종 근거충족도가 숫자 점수를 허용하지 않으면 미채점(그 (persona,criterion)만 제외)
+            if ce is None or not ce.get("sufficiency", {}).get("allow_numeric_score", False):
+                continue
+            linked_refs = ce.get("linked_evidence_refs", [])
+            evidence_ids = [evidence_pool.register_linked(r) for r in linked_refs]
+            evidence_status = "sufficient"
+        else:
+            evidence_refs = item.get("evidence_refs", [])
+            evidence_ids = [evidence_pool.register(ref) for ref in evidence_refs]
+            evidence_status = _evidence_status(evidence_refs, item.get("confidence", "medium"))
+
         rubric_scores.append(
             {
-                "criterion_id": item["criterion_id"],
+                "criterion_id": cid,
                 "criterion_name": item["criterion_name"],
                 "score": item["score_recommendation"],
                 "max_score": item["max_score"],
@@ -70,8 +94,8 @@ def raw_reviewer_to_v2(raw: dict[str, Any], evidence_pool: EvidencePool) -> dict
                 "strengths": item.get("strengths", []),
                 "issues": item.get("weaknesses", []),
                 "suggestions": item.get("improvement_actions", []),
-                "evidence_ids": [evidence_pool.register(ref) for ref in evidence_refs],
-                "evidence_status": _evidence_status(evidence_refs, item.get("confidence", "medium")),
+                "evidence_ids": evidence_ids,
+                "evidence_status": evidence_status,
             }
         )
 

@@ -32,6 +32,7 @@ class EvidencePool:
             item["chunk_id"]: item for item in (retrieved_evidence or []) if item.get("chunk_id")
         }
         self._by_key: dict[str, str] = {}
+        self._linked_by_key: dict[tuple, str] = {}
         self._evidence: dict[str, dict] = {}
 
     def register(self, ref: dict[str, Any]) -> str:
@@ -61,6 +62,37 @@ class EvidencePool:
             "score": base.get("score", 0.5),
         }
         self._by_key[key] = evidence_id
+        return evidence_id
+
+    def register_linked(self, ref: dict[str, Any]) -> str:
+        """RAG-004 linked evidence(MeetingLinkedEvidenceRef) 1건을 등록하고 evidence_id를
+        반환한다(A안). (document_id, chunk_id)로 역조회해, 같은 근거를 이 위원이 여러 번
+        인용하면 동일 evidence_id를 재사용한다. linked ref엔 text가 없어(quote만 있음)
+        retrieved_evidence 풀에서 chunk_id로 원문을 보강한다."""
+        chunk_id = ref.get("chunk_id")
+        key = (ref.get("document_id"), chunk_id)
+        if key in self._linked_by_key:
+            return self._linked_by_key[key]
+
+        base = self._pool_by_chunk.get(chunk_id, {}) if chunk_id else {}
+        evidence_id = f"EV-{self._persona_id}-{len(self._evidence) + 1:03d}"
+        score = ref.get("final_score")
+        if score is None:
+            score = base.get("score", 0.5)
+        score = min(max(float(score), 0.0), 1.0)
+        self._evidence[evidence_id] = {
+            "evidence_id": evidence_id,
+            "chunk_id": chunk_id or "unknown",
+            "document_name": ref.get("document_name") or base.get("document_name") or ref.get("document_id") or "unknown",
+            "source_type": None,
+            "page": ref.get("page") if ref.get("page") is not None else base.get("page"),
+            "section": ref.get("section") or base.get("section"),
+            "text": base.get("text") or ref.get("quote") or "",
+            "quote": ref.get("quote"),
+            "relevance": None,
+            "score": score,
+        }
+        self._linked_by_key[key] = evidence_id
         return evidence_id
 
     def as_list(self) -> list[dict]:

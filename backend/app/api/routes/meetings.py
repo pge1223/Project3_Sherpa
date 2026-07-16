@@ -96,6 +96,15 @@ from jose import jwt, JWTError
 from openai import OpenAI
 from starlette.concurrency import run_in_threadpool
 
+import chromadb
+
+from ai.rag.embedding.kure_embedder import KUREEmbedder
+from ai.rag.similar_cases import (
+    SimilarCaseConfig,
+    SimilarCaseRepository,
+    SimilarCaseSearchService,
+    SimilarCaseSearchRequest,
+)
 from app.config import settings
 from app.models.meeting import MeetingModel
 from app.repositories.document_repository import DocumentRepository
@@ -145,6 +154,20 @@ _MAX_LLM_CALLS_PER_MEETING = 10
 # 폭주하는 건 _MAX_LLM_CALLS_PER_MEETING이 llm_call 쪽에서 여전히 막아주지만, 필요하면
 # run_meeting()/rerun_reviewer()에 config를 받는 파라미터를 추가하는 걸 경이와 논의 필요.
 _RECURSION_LIMIT = 12
+
+# RAG-006: similar_success_cases 검색 서비스 (앱 시작 시 1회 초기화)
+_similar_case_config = SimilarCaseConfig()
+_chroma_client = chromadb.PersistentClient(path=str(Path(settings.CHROMA_PERSIST_DIR)))
+_kure_embedder = KUREEmbedder()
+_similar_case_repo = SimilarCaseRepository(
+    client=_chroma_client,
+    collection_name=_similar_case_config.collection_name,
+    embedding_model=_kure_embedder.model_name,
+    embedding_dimension=_kure_embedder.embedding_dimension,
+    embedding_version="embedding_v1",
+)
+_similar_case_service = SimilarCaseSearchService(_similar_case_repo, _kure_embedder, config=_similar_case_config)
+
 _CHAIR_MARKER = "위원장(review_chair)입니다"
 
 
@@ -284,6 +307,21 @@ async def analyze_project(project_id: str, authorization: Optional[str] = Header
     meeting_id = f"MTG-{project_id}-{uuid.uuid4().hex[:8]}"
     llm_call = _build_real_llm_call(meeting_id)
 
+    # RAG-006: 유사 성공 사례 검색
+    try:
+        _similar_request = SimilarCaseSearchRequest(
+            document_summary=submission["text"][:3000],
+            domain=domain,
+            evaluation_criteria=[c["criterion_name"] for c in rubric["criteria"]],
+            top_k=5,
+            trace_id=meeting_id,
+        )
+        _similar_response = await run_in_threadpool(_similar_case_service.search, _similar_request)
+        similar_success_cases = _similar_response.model_dump(mode="json")
+    except Exception as e:
+        logger.warning(f"RAG-006 similar_success_cases 검색 실패, None으로 진행: {e}")
+        similar_success_cases = None
+
     # 가은/Claude(2026-07-16): 경이의 run_meeting()(ai/meeting/graph/run.py)으로 교체한
     # 자리 — 원래 여기 있던 우리 임시 구현(그래프 직접 조립 + document dict 수동 조립)은
     # 참고용으로 주석 처리해 남겨둔다.
@@ -332,6 +370,7 @@ async def analyze_project(project_id: str, authorization: Optional[str] = Header
         submission=submission,
         retrieved_evidence=retrieved_evidence,
         llm_call=llm_call,
+        similar_success_cases=similar_success_cases,
     )
 
     # MTG-005: 회의 결과 저장. committee/submission/retrieved_evidence도 이제 진짜 값이라
@@ -358,7 +397,7 @@ async def analyze_project(project_id: str, authorization: Optional[str] = Header
         # 있었다(캐시된 회의를 다시 불러오면 영상 대본이 사라지는 문제) - document(=
         # run_meeting()의 반환값)에 이미 채워진 값을 그대로 쓰도록 수정.
         media_script=document["media_script"],
-        schema_version="2.0.0",
+        schema_version="2.1.0",
     )
     await meeting_repo.create(meeting)
 
@@ -455,3 +494,69 @@ async def reevaluate_reviewer(
     await meeting_repo.update_result_by_id(stored["_id"], patch)
 
     return {**stored, **patch, "project_id": project_id}
+
+
+# MTG-005: 프로젝트 회의 목록 조회
+@router.get("/{project_id}/meetings")
+async def get_meetings(
+    project_id: str,
+    authorization: Optional[str] = Header(None, alias="authorization"),
+):
+    get_current_user(authorization)
+
+    project = await project_repo.find_by_id(project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없습니다.")
+
+    meetings = await meeting_repo.find_by_project_id(project_id)
+    return meetings
+
+
+# MTG-005: 프로젝트 최신 회의 결과 조회
+@router.get("/{project_id}/meetings/latest")
+async def get_latest_meeting(
+    project_id: str,
+    authorization: Optional[str] = Header(None, alias="authorization"),
+):
+    get_current_user(authorization)
+
+    project = await project_repo.find_by_id(project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없습니다.")
+
+    meeting = await meeting_repo.find_latest_by_project_id(project_id)
+    if meeting is None:
+        raise HTTPException(status_code=404, detail="회의 결과가 없습니다. 먼저 분석을 시작하세요.")
+
+    return meeting
+
+
+# RPT-001: 종합 결과 표시
+@router.get("/{project_id}/report")
+async def get_project_report(
+    project_id: str,
+    authorization: Optional[str] = Header(None, alias="authorization"),
+):
+    get_current_user(authorization)
+
+    project = await project_repo.find_by_id(project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없습니다.")
+
+    meeting = await meeting_repo.find_latest_by_project_id(project_id)
+    if meeting is None:
+        raise HTTPException(status_code=404, detail="회의 결과가 없습니다. 먼저 분석을 시작하세요.")
+
+    return {
+        "project_id": project_id,
+        "project_title": project.get("title"),
+        "domain": meeting.get("domain"),
+        "meeting_id": meeting.get("meeting_id"),
+        "status": meeting.get("status"),
+        "score_result": meeting.get("score_result"),
+        "chair_summary": meeting.get("chair_summary"),
+        "top_revisions": meeting.get("top_revisions"),
+        "reviewer_results": meeting.get("reviewer_results"),
+        "evidence": meeting.get("evidence"),
+        "created_at": meeting.get("created_at"),
+    }

@@ -103,3 +103,36 @@ class TestIndexChunkingResult:
         result2 = service.index_chunking_result(smaller_result, context)
         assert result2.deleted_stale_count == 1
         assert result2.stored_record_count == 0
+
+
+class TestDeleteProject:
+    def test_deletes_project_and_search_becomes_empty(self, fake_kure_embedder, tmp_path):
+        """PRJ-004: RAGIndexingService.delete_project()를 실제 ChromaVectorStore로 통합 실행."""
+        service = _make_service(fake_kure_embedder, tmp_path)
+        context = IndexingContext(project_id="p1", document_id="doc-1")
+        service.index_chunking_result(_make_chunking_result(), context)
+
+        deleted = service.delete_project("p1")
+
+        assert deleted == 1  # chk_2는 indexable=False라 애초에 저장되지 않음(chk_1만 색인됨)
+        assert service.search("접수기간이 언제인가요?", project_id="p1", top_k=3) == []
+
+    def test_delegates_to_vector_store_and_returns_its_value(self, fake_kure_embedder):
+        """vector_store.delete_project()에 project_id를 그대로 전달하고 반환값을 그대로 돌려주는지
+        (실제 Chroma 없이) fake vector_store로 위임 자체만 검증한다."""
+
+        class _FakeVectorStore:
+            def __init__(self):
+                self.calls: list[str] = []
+
+            def delete_project(self, project_id: str) -> int:
+                self.calls.append(project_id)
+                return 42
+
+        fake_store = _FakeVectorStore()
+        service = RAGIndexingService(fake_kure_embedder, fake_store)
+
+        result = service.delete_project("PRJ-004")
+
+        assert fake_store.calls == ["PRJ-004"]
+        assert result == 42

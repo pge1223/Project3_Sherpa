@@ -41,6 +41,7 @@ class MeetingState(TypedDict):
     rubric: dict
     submission: dict
     retrieved_evidence: list[dict]
+    evidence_context: list[dict]
     committee: list[str]
     reviewer_results: Annotated[dict[str, dict], _merge_reviewer_results]
     evidence: Annotated[list[dict], operator.add]
@@ -57,10 +58,14 @@ def initial_state(
     submission: dict,
     committee: list[str],
     retrieved_evidence: list[dict] | None = None,
+    evidence_context: list[dict] | None = None,
 ) -> MeetingState:
     """준비(stage="준비") 단계의 초기 State를 만든다.
 
     위원별 결과·점수·위원장 종합은 아직 생성 전이라 비워 둔다.
+    evidence_context는 RAG(용준) 어댑터가 (persona_id, criterion_id)별로 넘겨주는
+    retrieved_evidence + 사전 근거충족도(prompt_guard/allow 플래그)다. 없으면(레거시
+    경로) 빈 리스트이고, reviewer 노드는 flat retrieved_evidence만 쓴다.
     """
     return MeetingState(
         meeting_id=meeting_id,
@@ -69,6 +74,7 @@ def initial_state(
         rubric=rubric,
         submission=submission,
         retrieved_evidence=retrieved_evidence or [],
+        evidence_context=evidence_context or [],
         committee=committee,
         reviewer_results={},
         evidence=[],

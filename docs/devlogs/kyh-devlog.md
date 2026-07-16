@@ -1,3 +1,29 @@
+[2026-07-16] AI Review Board 개발 일지
+
+한 일:
+- 스토리지 10GB → 50GB 확장 (NCP 콘솔 + resize2fs)
+- mongo-tunnel.service 자동화 (서버 재시작 시 MongoDB SSH 터널 자동 연결)
+- schema_version 2.1.0 업데이트 (PR #57)
+- RAG-006 similar_success_cases 연동 (PR #59)
+- meetings.py 머지 충돌 해결 (======= / >>>>>>> 마커 제거)
+- dev 브랜치 최신화 후 누락 패키지 전체 설치 및 서비스 복구
+  (langchain-text-splitters, sentence-transformers, torch CPU, accelerate 등)
+- NCP 배포 완료
+- 서버 로그 점검 (이상 없음)
+
+결정/이유:
+- mongo-tunnel.service systemd 등록 → 수동 터널 연결 실수 방지 및 서버 재시작 시 자동 복구
+- torch CPU 버전 설치 → GPU 패키지 용량 이슈로 디스크 절약
+
+막힌 점:
+- dev 브랜치 머지 후 누락 패키지로 서비스 실행 안 됨 → 패키지 순차 설치로 해결
+- pip cache 용량 문제 → pip cache purge 반복 적용
+
+다음 할 일:
+- DOC-006: 문서 원문/추출문 미리보기
+- RPT-005: 평가 결과 PDF 내보내기
+- PRJ-004: 프로젝트 삭제 (용준님 Chroma 삭제 코드 확인 후 진행)
+
 ## 2026-07-15
 
 - 한 일:

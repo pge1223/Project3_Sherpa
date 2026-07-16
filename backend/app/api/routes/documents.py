@@ -30,6 +30,7 @@ from ai.rag.embedding.config import EMBEDDING_VERSION
 import chromadb
 
 from app.common.exceptions import BadRequestException, InternalServerException
+from app.repositories.project_repository import ProjectRepository
 from app.config import settings
 from app.models.document import DocumentModel
 from app.repositories.document_repository import DocumentRepository
@@ -39,6 +40,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 document_repo = DocumentRepository()
+project_repo = ProjectRepository()
 
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -131,6 +133,13 @@ def get_current_user(authorization: Optional[str]) -> str:
         raise HTTPException(status_code=401, detail="유효하지 않은 토큰입니다")
 
 
+async def verify_project_owner(project_id: str, user_email: str):
+    project = await project_repo.find_by_id_and_user(project_id, user_email)
+    if not project:
+        raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없습니다")
+    return project
+
+
 def _apply_cleaning(page_content: WebPageContent) -> tuple[WebPageContent, CleanedWebContent]:
     """clean_page_content()는 CleanedWebContent(title/fetched_at/encoding 없음)를 반환하므로,
     원본 WebPageContent의 title/fetched_at/encoding/is_js_rendered_suspected는 그대로 두고
@@ -221,11 +230,33 @@ async def upload_document(
     authorization: Optional[str] = Header(None, alias="authorization"),
 ):
     user_email = get_current_user(authorization)
+    await verify_project_owner(project_id, user_email)
+
+    # DOC-005: 업로드 파일 검증
+    ALLOWED_EXTENSIONS = {".pdf", ".docx", ".pptx"}
+    ALLOWED_MIME_TYPES = {
+        "application/pdf",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    }
+    MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
+
+    file_ext = os.path.splitext(file.filename or "")[1].lower()
+    if file_ext not in ALLOWED_EXTENSIONS:
+        raise BadRequestException(detail=f"지원하지 않는 파일 형식입니다. 허용: PDF, DOCX, PPTX")
+
+    if file.content_type and file.content_type not in ALLOWED_MIME_TYPES:
+        raise BadRequestException(detail=f"지원하지 않는 MIME 타입입니다: {file.content_type}")
+
+    content = await file.read()
+    if len(content) == 0:
+        raise BadRequestException(detail="빈 파일은 업로드할 수 없습니다")
+    if len(content) > MAX_FILE_SIZE:
+        raise BadRequestException(detail=f"파일 크기가 너무 큽니다. 최대 50MB까지 허용됩니다")
 
     stored_filename = f"{uuid.uuid4()}_{file.filename}"
     file_path = os.path.join(UPLOAD_DIR, stored_filename)
 
-    content = await file.read()
     with open(file_path, "wb") as f:
         f.write(content)
 
@@ -281,6 +312,7 @@ async def get_documents(
     authorization: Optional[str] = Header(None, alias="authorization"),
 ):
     user_email = get_current_user(authorization)
+    await verify_project_owner(project_id, user_email)
     documents = await document_repo.find_by_project_id(project_id)
 
     return [
@@ -301,3 +333,26 @@ async def get_documents(
         )
         for d in documents
     ]
+
+
+# DOC-004: 문서 처리 상태 조회
+@router.get("/{project_id}/{document_id}/status")
+async def get_document_status(
+    project_id: str,
+    document_id: str,
+    authorization: Optional[str] = Header(None, alias="authorization"),
+):
+    user_email = get_current_user(authorization)
+    await verify_project_owner(project_id, user_email)
+
+    document = await document_repo.find_by_id(document_id)
+    if not document:
+        raise HTTPException(status_code=404, detail="문서를 찾을 수 없습니다")
+
+    return {
+        "document_id": str(document["_id"]),
+        "project_id": document["project_id"],
+        "original_filename": document["original_filename"],
+        "status": document["status"],
+        "updated_at": document["updated_at"],
+    }
