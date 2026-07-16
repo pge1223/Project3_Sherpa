@@ -39,3 +39,4 @@ langchain-chroma
 
 # ai/rag 테스트
 requests-mock
+openai

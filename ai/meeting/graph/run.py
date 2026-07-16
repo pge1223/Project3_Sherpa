@@ -44,6 +44,20 @@ def assemble_document(
 
     media_script는 비워 둔다 — 영상 대본 생성(재인)은 이 함수의 책임이 아니다.
     """
+    # 가은/Claude(2026-07-16): reviewer_results 조립 시 딕셔너리 "값"의 persona_id 필드가
+    # 아니라 "키"를 신뢰해서 덮어쓰도록 수정. final_state["reviewer_results"]는
+    # {실제 committee persona_id: v2_result} 딕셔너리인데, v2_result 내부의 "persona_id"는
+    # LLM이 raw JSON으로 반환한 값을 거의 그대로 옮긴 거라 신뢰할 수 없다 — 실제 OpenAI
+    # 호출로 확인(예: "business_strategy" 대신 "P-STRATEGY-01" 같은 걸 지어냄).
+    # rerun_reviewer()(rerun.py)가 이 값의 persona_id로 재평가 대상을 걸러내는데
+    # (kept_results = {r["persona_id"]: r ... if r["persona_id"] != persona_id}), 수정 전
+    # 코드로는 그 필터가 항상 실패해서(지어낸 값이 실제 committee id와 절대 안 같음)
+    # reevaluate를 부를 때마다 위원이 교체되지 않고 계속 추가되기만 하는 걸 실제로
+    # 재현해서 확인했다(committee 4명인데 reevaluate 1번에 reviewer_results가 5개로 늘어남).
+    reviewer_results = [
+        {**v2_result, "persona_id": persona_id}
+        for persona_id, v2_result in final_state["reviewer_results"].items()
+    ]
     return {
         "schema_version": "2.0.0",
         "meeting_id": meeting_id,
@@ -53,7 +67,7 @@ def assemble_document(
         "status": "completed",
         "domain": domain,
         "rubric": final_state["rubric"],
-        "reviewer_results": list(final_state["reviewer_results"].values()),
+        "reviewer_results": reviewer_results,
         "score_result": final_state["score_result"],
         "chair_summary": final_state["chair_summary"],
         "top_revisions": final_state["top_revisions"],

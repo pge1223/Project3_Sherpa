@@ -1,4 +1,6 @@
 from pathlib import Path
+
+from pydantic import Field
 from pydantic_settings import BaseSettings
 
 # backend/.env 를 uvicorn 실행 위치(CWD)와 무관하게 항상 찾도록 절대경로 사용
@@ -10,14 +12,26 @@ class Settings(BaseSettings):
     # 앱 기본 설정
     APP_NAME: str = "AI Review Board"
     APP_VERSION: str = "0.1.0"
-    DEBUG: bool = False
+    # VS Code/셸이 주입하는 범용 DEBUG 환경변수와 충돌하지 않도록
+    # 백엔드 디버그 설정은 APP_DEBUG만 읽는다.
+    DEBUG: bool = Field(default=False, validation_alias="APP_DEBUG")
 
     # MongoDB
-    MONGODB_URL: str = "mongodb://reviewboard_admin:reviewboard2026!@localhost:27017/?authSource=admin"
+    MONGODB_URL: str = "mongodb://localhost:27017"
     MONGODB_DB: str = "ai_review_board"
 
     # OpenAI
     OPENAI_API_KEY: str = ""
+
+    # LLM 프로필 (가은/Claude, 2026-07-15, "다 이어버리자" — 윤한 확인 필요):
+    # analyze_project()/reevaluate_reviewer()가 실제 OpenAI를 부르게 되면서 호출마다 비용이
+    # 발생한다. LLM_PROFILE=dev(기본값, 저렴한 모델)로 두면 실수로 눌러도 싸게 끝나고,
+    # 진짜 품질 확인이 필요할 때만 quality로 바꾸도록 두 세트를 분리했다.
+    LLM_PROFILE: str = "dev"
+    DEV_LLM_REVIEWER_MODEL: str = "gpt-5-nano"
+    DEV_LLM_CHAIR_MODEL: str = "gpt-5-nano"
+    QUALITY_LLM_REVIEWER_MODEL: str = "gpt-5-mini"
+    QUALITY_LLM_CHAIR_MODEL: str = "gpt-5-mini"
 
     # NCP
     NCP_ACCESS_KEY: str = ""

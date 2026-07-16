@@ -1,3 +1,4 @@
+from typing import Optional
 from fastapi import APIRouter, HTTPException, Header
 from datetime import datetime
 from jose import jwt, JWTError
@@ -9,8 +10,15 @@ from app.config import settings
 router = APIRouter(prefix="/projects", tags=["projects"])
 project_repo = ProjectRepository()
 
-# JWT에서 현재 유저 이메일 추출
-def get_current_user(authorization: str) -> str:
+# 가은/Claude (2026-07-15): 비회원 로그인은 별도 인증 호출 없이 그냥 Authorization
+# 헤더를 안 보낸다 — 헤더가 없으면 401 대신 고정 게스트 사용자로 통과시킨다.
+GUEST_USER_EMAIL = "guest@local"
+
+
+# JWT에서 현재 유저 이메일 추출 (없으면 게스트)
+def get_current_user(authorization: Optional[str]) -> str:
+    if not authorization:
+        return GUEST_USER_EMAIL
     try:
         token = authorization.replace("Bearer ", "")
         payload = jwt.decode(token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
@@ -20,7 +28,7 @@ def get_current_user(authorization: str) -> str:
 
 # PRJ-001 프로젝트 생성
 @router.post("/", response_model=ProjectResponse)
-async def create_project(request: ProjectCreateRequest, authorization: str = Header(..., alias="authorization")):
+async def create_project(request: ProjectCreateRequest, authorization: Optional[str] = Header(None, alias="authorization")):
     user_email = get_current_user(authorization)
 
     project = ProjectModel(
@@ -44,7 +52,7 @@ async def create_project(request: ProjectCreateRequest, authorization: str = Hea
 
 # PRJ-002 프로젝트 목록 조회
 @router.get("/", response_model=list[ProjectResponse])
-async def get_projects(authorization: str = Header(..., alias="authorization")):
+async def get_projects(authorization: Optional[str] = Header(None, alias="authorization")):
     user_email = get_current_user(authorization)
     projects = await project_repo.find_by_user(user_email)
 
@@ -64,7 +72,7 @@ async def get_projects(authorization: str = Header(..., alias="authorization")):
 
 # PRJ-003 프로젝트 상세 조회
 @router.get("/{project_id}", response_model=ProjectResponse)
-async def get_project(project_id: str, authorization: str = Header(..., alias="authorization")):
+async def get_project(project_id: str, authorization: Optional[str] = Header(None, alias="authorization")):
     user_email = get_current_user(authorization)
     project = await project_repo.find_by_id_and_user(project_id, user_email)
 
@@ -84,7 +92,7 @@ async def get_project(project_id: str, authorization: str = Header(..., alias="a
 
 # PRJ-004 프로젝트 삭제
 @router.delete("/{project_id}")
-async def delete_project(project_id: str, authorization: str = Header(..., alias="authorization")):
+async def delete_project(project_id: str, authorization: Optional[str] = Header(None, alias="authorization")):
     user_email = get_current_user(authorization)
     project = await project_repo.find_by_id_and_user(project_id, user_email)
 
