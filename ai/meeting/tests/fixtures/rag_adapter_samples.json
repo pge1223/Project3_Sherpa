@@ -1,0 +1,43 @@
+{
+  "_meta": {
+    "author": "용준(제공) / 경이(fixture 저장)",
+    "created": "2026-07-16",
+    "source": "rag_meeting_adapter_handoff.md (용준 전달)",
+    "note": "RAG-003/004 어댑터(build_meeting_retrieved_evidence / to_linked_evidence_refs) 실제 출력 샘플. 회의 통합 테스트용. 실제 프로젝트/Chroma 데이터가 아니라 더미 RoleSearchResponse/LinkedEvaluation을 어댑터에 넣어 뽑은 결과다. 실제 데이터 E2E는 backend 연동 후 별도 진행.",
+    "references": [
+      "ai/rag/integration/meeting_evidence_adapter.py",
+      "ai/rag/integration/schemas.py (MeetingRetrievedEvidence / MeetingLinkedEvidenceRef)"
+    ]
+  },
+  "retrieved_evidence": [
+    {
+      "chunk_id": "CHUNK-014",
+      "document_id": "DOC-001",
+      "persona_id": "business_strategy",
+      "role_id": "business_strategy",
+      "document_name": "사업계획서.pdf",
+      "section": "시장 분석",
+      "page": 6,
+      "location_number": 6,
+      "location_type": "page",
+      "text": "초기 목표 고객은 재고관리 전담 인력이 없는 소규모 오프라인 매장이다.",
+      "semantic_score": 0.82,
+      "role_score": 0.91,
+      "final_score": 0.86,
+      "score": 0.86
+    }
+  ],
+  "linked_evidence_refs": [
+    {
+      "document_id": "DOC-001",
+      "chunk_id": "CHUNK-014",
+      "quote": "초기 목표 고객은 재고관리 전담 인력이 없는 소규모 오프라인 매장이다.",
+      "document_name": "사업계획서.pdf",
+      "section": "시장 분석",
+      "page": 6,
+      "semantic_score": 0.82,
+      "role_score": 0.91,
+      "final_score": 0.86
+    }
+  ]
+}
