@@ -198,6 +198,56 @@ class TestDeleteAndSearch:
             store.search(query_embedding=_vec(0.1), project_id="p1", top_k=0)
 
 
+class TestDeleteProject:
+    def test_deletes_all_documents_in_project(self, store):
+        store.upsert_embedding_result(_make_embedding_result("p1", "doc-1", [
+            _make_embedded_chunk("c1", "doc-1", "p1", 0.1),
+            _make_embedded_chunk("c2", "doc-1", "p1", 0.2),
+        ]), IndexingContext(project_id="p1", document_id="doc-1"))
+        store.upsert_embedding_result(_make_embedding_result("p1", "doc-2", [
+            _make_embedded_chunk("c3", "doc-2", "p1", 0.3),
+        ]), IndexingContext(project_id="p1", document_id="doc-2"))
+
+        deleted = store.delete_project("p1")
+        assert deleted == 3
+
+    def test_other_projects_untouched(self, store):
+        store.upsert_embedding_result(_make_embedding_result("p1", "doc-1", [
+            _make_embedded_chunk("c1", "doc-1", "p1", 0.1),
+        ]), IndexingContext(project_id="p1", document_id="doc-1"))
+        store.upsert_embedding_result(_make_embedding_result("p2", "doc-1", [
+            _make_embedded_chunk("c2", "doc-1", "p2", 0.1),
+        ]), IndexingContext(project_id="p2", document_id="doc-1"))
+
+        store.delete_project("p1")
+
+        p2_results = store.search(query_embedding=_vec(0.1), project_id="p2", top_k=5)
+        assert len(p2_results) == 1
+        assert p2_results[0].metadata["project_id"] == "p2"
+
+    def test_nonexistent_project_returns_zero(self, store):
+        assert store.delete_project("no-such-project") == 0
+
+    def test_search_empty_after_delete(self, store):
+        store.upsert_embedding_result(_make_embedding_result("p1", "doc-1", [
+            _make_embedded_chunk("c1", "doc-1", "p1", 0.1),
+            _make_embedded_chunk("c2", "doc-1", "p1", 0.2),
+        ]), IndexingContext(project_id="p1", document_id="doc-1"))
+
+        store.delete_project("p1")
+
+        assert store.search(query_embedding=_vec(0.1), project_id="p1", top_k=10) == []
+
+    def test_get_returns_no_ids_after_delete(self, store):
+        store.upsert_embedding_result(_make_embedding_result("p1", "doc-1", [
+            _make_embedded_chunk("c1", "doc-1", "p1", 0.1),
+        ]), IndexingContext(project_id="p1", document_id="doc-1"))
+
+        store.delete_project("p1")
+
+        assert store._list_record_ids("p1") == []
+
+
 class TestCollectionConfigValidation:
     def test_model_mismatch_detected(self, tmp_path):
         client = create_persistent_client(path=str(tmp_path / "chroma_data"))
