@@ -278,3 +278,76 @@ def test_run_meeting_with_evidence_context_gates_and_uses_linked_evidence():
     # 근거는 RAG-004 linked ref에서 발급된 EV-*(persona별) 3건
     assert len(document["evidence"]) == 3
     assert all(e["evidence_id"].startswith("EV-") for e in document["evidence"])
+
+
+# ---------------------------------------------------------------------------
+# v2.1.0: similar_success_cases (RAG-006) pass-through
+# ---------------------------------------------------------------------------
+
+
+def _simple_competition_stub(mapping: dict):
+    routing = build_routing(mapping)
+    criteria_by_id = {c["criterion_id"]: c for c in mapping["rubric"]}
+    owned = {r["primary"]: cid for cid, r in routing.items()}
+    raw_by_marker = {
+        f"{_PERSONA_NAMES[pid]}입니다": _make_raw_reviewer(
+            pid, cid, criteria_by_id[cid]["criterion_name"], 20
+        )
+        for pid, cid in owned.items()
+    }
+    raw_by_marker["위원장(review_chair)입니다"] = _RAW_CHAIR
+
+    def stub(prompt: str) -> str:
+        for marker, raw in raw_by_marker.items():
+            if marker in prompt:
+                return json.dumps(raw, ensure_ascii=False)
+        raise AssertionError("마커 못 찾음")
+
+    return stub
+
+
+def _run_simple(mapping, **kwargs):
+    return run_meeting(
+        meeting_id="MTG-SC-001",
+        project_id="PRJ-SC-001",
+        document_id="DOC-SC-001",
+        title="유사사례 테스트",
+        rubric_mapping=mapping,
+        submission={"document_name": "t.pdf", "text": "..."},
+        retrieved_evidence=[],
+        llm_call=_simple_competition_stub(mapping),
+        **kwargs,
+    )
+
+
+def test_run_meeting_emits_v2_1_0_and_passes_similar_success_cases():
+    mapping = json.loads(COMPETITION_MAPPING_PATH.read_text(encoding="utf-8"))
+    validator = jsonschema.Draft202012Validator(json.loads(SCHEMA_PATH.read_text(encoding="utf-8")))
+
+    cases = {
+        "results": [
+            {
+                "case_id": "C1",
+                "title": "수상작 예시",
+                "case_type": "award_winner",
+                "similarity_score": 0.83,
+                "reference_only": True,
+            }
+        ],
+        "total_results": 1,
+        "comparison_mode": "selected_case_gap",
+        "reference_only": True,
+    }
+
+    # RAG-006 결과가 있을 때: 그대로 pass-through
+    doc = _run_simple(mapping, similar_success_cases=cases)
+    validator.validate(doc)
+    assert doc["schema_version"] == "2.1.0"
+    assert doc["similar_success_cases"] == cases
+    # 평가 결과엔 영향 없음(4항목 전부 채점되어 총점 80)
+    assert doc["score_result"]["total_score"] == 80
+
+    # RAG-006 미실행: null 이어도 v2.1.0 스키마 유효
+    doc_none = _run_simple(mapping)
+    validator.validate(doc_none)
+    assert doc_none["similar_success_cases"] is None

@@ -64,8 +64,12 @@ def assemble_document(
     title: str,
     domain: str,
     final_state: MeetingState,
+    similar_success_cases: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """그래프 최종 State를 review_output.schema.json v2 문서로 조립한다.
+    """그래프 최종 State를 review_output.schema.json v2.1.0 문서로 조립한다.
+
+    similar_success_cases(RAG-006 유사사례, 선택)는 평가 근거가 아니라 참고 자료라
+    그대로 pass-through 한다(reference_only). 없으면 null.
 
     media_script(위원 발언 영상 대본)는 _build_media_script()(재인/Claude, 2026-07-16
     추가, 위 참고)가 reviewer_results를 재포장해서 채운다 - 원래는 "영상 대본 생성은
@@ -87,7 +91,7 @@ def assemble_document(
         for persona_id, v2_result in final_state["reviewer_results"].items()
     ]
     return {
-        "schema_version": "2.0.0",
+        "schema_version": "2.1.0",
         "meeting_id": meeting_id,
         "project_id": project_id,
         "document_id": document_id,
@@ -101,6 +105,7 @@ def assemble_document(
         "top_revisions": final_state["top_revisions"],
         "evidence": final_state["evidence"],
         "media_script": _build_media_script(reviewer_results),  # 재인/Claude(2026-07-16) - 위 함수 정의부 참고
+        "similar_success_cases": similar_success_cases,  # RAG-006(용준) 참고자료, 없으면 null
     }
 
 
@@ -117,6 +122,7 @@ def run_meeting(
     on_progress: ProgressCallback | None = None,
     evidence_context: list[dict[str, Any]] | None = None,
     evidence_callback: Callable[[str, str, dict], dict] | None = None,
+    similar_success_cases: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """회의 1회를 처음부터 끝까지 실행하고 review_output.schema.json v2 문서를 반환한다.
 
@@ -134,6 +140,10 @@ def run_meeting(
     플래그) 목록이고, evidence_callback은 위원 의견 생성 후 (persona_id, criterion_id,
     review_item)로 불려 RAG-004 근거 연결 + RAG-005 최종 판정을 반환한다. backend(윤한)가
     두 값을 넘길 때만 게이팅·근거 교체(A안)가 활성화된다.
+
+    similar_success_cases는 RAG-006(유사 성공사례, 용준) 검색 결과를 그대로 담는 참고
+    자료다(v2.1.0 선택 필드, reference_only). 평가 점수·게이팅에 영향을 주지 않고 최종
+    문서에 pass-through 되며, 없으면 null이다.
     """
     domain = rubric_mapping["meta"]["domain"]
     rubric = build_rubric(rubric_mapping)
@@ -163,4 +173,5 @@ def run_meeting(
         title=title,
         domain=domain,
         final_state=final_state,
+        similar_success_cases=similar_success_cases,
     )
