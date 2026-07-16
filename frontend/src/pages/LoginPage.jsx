@@ -26,6 +26,14 @@ export default function LoginPage() {
     }
   }
 
+  // 비회원 로그인: 서버 인증 호출 없이 그냥 들어간다. authHeaders()가 auth_token 없으면
+  // Authorization 헤더를 안 보내고, 백엔드는 헤더가 없으면 고정 게스트 사용자로 처리한다
+  // (projects.py/documents.py/meetings.py의 get_current_user() 참고).
+  function handleGuestLogin() {
+    localStorage.removeItem('auth_token')
+    navigate('/projects')
+  }
+
   return (
     <div style={styles.page}>
       <SpaceBackground />
@@ -66,7 +74,7 @@ export default function LoginPage() {
             </button>
           </form>
 
-          <button type="button" style={styles.guestButton} onClick={() => navigate('/projects')}>
+          <button type="button" style={styles.guestButton} onClick={handleGuestLogin}>
             비회원 로그인
           </button>
         </div>

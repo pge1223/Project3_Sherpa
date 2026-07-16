@@ -186,9 +186,12 @@ class TestFetchUrlErrors:
         assert resp.json()["detail"] == "URL 문서를 처리하는 중 오류가 발생했습니다."
         assert "Traceback" not in resp.text
 
-    def test_missing_auth_header_rejected(self, client):
-        resp = client.post("/documents/fetch-url", json={"url": "https://example.com/contest/1"})
-        assert resp.status_code in (401, 422)
+    def test_missing_auth_header_treated_as_guest(self):
+        # 가은/Claude (2026-07-15): 비회원 로그인은 Authorization 헤더를 아예 안 보낸다 —
+        # 이제 401로 막지 않고 고정 게스트 사용자로 통과시키는 게 의도된 동작이다.
+        from app.api.routes.documents import GUEST_USER_EMAIL, get_current_user
+
+        assert get_current_user(None) == GUEST_USER_EMAIL
 
 
 class TestRouterRegistration:
