@@ -1,11 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
-import { useParams } from 'react-router-dom'
+import { useNavigate, useParams } from 'react-router-dom'
 import { analyzeProject } from '../api/projectApi'
 import MeetingChat from '../components/meeting/MeetingChat'
-// 재인/Claude (2026-07-16): 위원 발언 영상(TTS+MuseTalk) 컴포넌트 추가.
-// 가은의 기존 텍스트 채팅(MeetingChat)과 같은 result.media_script를 그대로
-// 넘겨받아 그 위에 아바타 영상 콜 화면을 띄운다 - 새 API 호출 없음.
-import CommitteeVideoStage from '../components/meeting/CommitteeVideoStage'
 
 function downloadResultJson(result, projectId) {
   const blob = new Blob([JSON.stringify(result, null, 2)], { type: 'application/json' })
@@ -19,6 +15,7 @@ function downloadResultJson(result, projectId) {
 
 export default function ProjectDetailPage() {
   const { projectId } = useParams()
+  const navigate = useNavigate()
   const [result, setResult] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -68,7 +65,13 @@ export default function ProjectDetailPage() {
             {result.schema_version}). 평가 대상 문서가 여러 개면 첫 번째 문서만 사용하며,
             분석/재평가마다 실제 API 비용이 발생합니다.
           </p>
-          <CommitteeVideoStage mediaLines={result.media_script} />
+          {/* 가은/Claude (2026-07-17): 위원 영상 시뮬레이션 전용 페이지(/simulation)는
+              없앴다 — CommitteeVideoStage.jsx(재인님 파일, 안 건드림)를 STEP7
+              "대화형 피드백"(/feedback-chat) 화면 상단으로 옮기고 그 아래 대화창을
+              붙였다(사용자 요청). 여기서는 그 화면으로 가는 링크만 둔다. */}
+          <button style={styles.simulationButton} onClick={() => navigate(`/projects/${projectId}/feedback-chat`)}>
+            🎬 회의 영상 · 대화형 피드백으로 보기
+          </button>
           <MeetingChat result={result} />
           <details style={styles.card}>
             <summary style={styles.sectionTitle}>원본 JSON</summary>
@@ -107,6 +110,18 @@ const styles = {
     borderRadius: 12,
     padding: 20,
     marginTop: 16,
+  },
+  simulationButton: {
+    display: 'block',
+    margin: '16px 0',
+    padding: '10px 18px',
+    fontSize: 14,
+    fontWeight: 600,
+    color: '#fff',
+    background: '#1a3a5c',
+    border: 'none',
+    borderRadius: 999,
+    cursor: 'pointer',
   },
   sectionTitle: { margin: '0 0 10px', fontSize: 16, color: '#1a3a5c' },
   downloadButton: {
