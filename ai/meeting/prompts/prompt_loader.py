@@ -107,14 +107,31 @@ def render_persona_block(card: dict) -> str:
     return "\n".join(lines)
 
 
+def _render_evidence_guards(evidence_guards: Any | None) -> str:
+    """(criterion_id, prompt_guard) 목록을 프롬프트용 텍스트로 렌더링한다(RAG-005 사전 판정).
+    판정이 없으면(레거시 경로) 통상 평가 안내만 반환한다."""
+    _default = "항목별 근거 충족도 판정이 제공되지 않았습니다. rubric에 따라 통상적으로 평가하세요."
+    if not evidence_guards:
+        return _default
+    lines: list[str] = []
+    for criterion_id, guard_text in evidence_guards:
+        guard_text = (guard_text or "").strip()
+        if guard_text:
+            lines.append(f"- [{criterion_id}] {guard_text}")
+    return "\n".join(lines) if lines else _default
+
+
 def build_reviewer_prompt(
     persona_id: str,
     rubric: Any,
     submission: Any,
     retrieved_evidence: Any,
     previous_reviews: Any | None = None,
+    evidence_guards: Any | None = None,
 ) -> str:
-    """1~8번 위원용 실행 프롬프트를 조립한다. previous_reviews 기본값은 빈 배열(1회차)."""
+    """1~8번 위원용 실행 프롬프트를 조립한다. previous_reviews 기본값은 빈 배열(1회차).
+    evidence_guards는 (criterion_id, prompt_guard) 목록(RAG-005 사전 판정)으로, 없으면
+    통상 평가 안내가 들어간다."""
     card = get_persona_card(persona_id)
     if card.get("is_chair"):
         raise ValueError(f"{persona_id!r} 는 위원장입니다. build_chair_prompt()를 사용하세요.")
@@ -124,6 +141,7 @@ def build_reviewer_prompt(
         "<<RUBRIC_JSON>>": _as_text(rubric),
         "<<SUBMISSION_JSON>>": _as_text(submission),
         "<<RETRIEVED_EVIDENCE_JSON>>": _as_text(retrieved_evidence),
+        "<<EVIDENCE_GUARD>>": _render_evidence_guards(evidence_guards),
         "<<PREVIOUS_REVIEWS_JSON>>": _as_text(previous_reviews if previous_reviews is not None else []),
     }
     for token, value in replacements.items():

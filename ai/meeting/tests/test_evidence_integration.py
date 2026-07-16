@@ -1,0 +1,280 @@
+# 작성자: 경이
+# 목적: RAG(용준) 연동 경로 검증 — evidence_context의 사전 prompt_guard 삽입, EvidencePool의
+#       (document_id, chunk_id) 역조회, 콜백 최종 sufficiency 게이팅(allow_numeric_score=False
+#       → 미채점), A안(근거를 RAG-004 linked_evidence_refs로 교체)이 v2 계약을 만족하는지 확인.
+# import: 표준 라이브러리 json/sys/pathlib, pytest, jsonschema; ai/meeting graph/prompts 패키지.
+
+import json
+import sys
+from pathlib import Path
+
+import jsonschema
+
+MEETING_DIR = Path(__file__).resolve().parents[1]  # ai/meeting
+REPO_ROOT = MEETING_DIR.parents[1]
+sys.path.insert(0, str(MEETING_DIR))
+
+from graph import build_routing, run_meeting  # noqa: E402
+from graph.evidence import EvidencePool  # noqa: E402
+from graph.transform import raw_reviewer_to_v2  # noqa: E402
+from prompts import build_reviewer_prompt  # noqa: E402
+
+SCHEMA_PATH = REPO_ROOT / "contracts" / "schemas" / "review_output.schema.json"
+COMPETITION_MAPPING_PATH = MEETING_DIR / "personas" / "rubric_mapping_competition.json"
+
+_PERSONA_NAMES = {
+    "creativity_originality": "창의성·독창성 전문가",
+    "technical_feasibility": "기술·실현가능성 전문가",
+    "business_strategy": "사업전략 전문가",
+    "presentation_completeness": "완성도·전달력 전문가",
+}
+
+
+# ---------------------------------------------------------------------------
+# prompt_guard 삽입
+# ---------------------------------------------------------------------------
+
+
+def test_build_reviewer_prompt_inserts_criterion_guards():
+    guards = [
+        ("creativity_appropriateness", "근거가 부족하니 확정적 표현과 점수를 피하세요."),
+        ("feasibility", "근거 충분: 통상 평가하세요."),
+    ]
+    prompt = build_reviewer_prompt(
+        "creativity_originality",
+        {"rubric_id": "R", "total_max_score": 100, "criteria": []},
+        {"text": "..."},
+        [],
+        evidence_guards=guards,
+    )
+    assert "[creativity_appropriateness] 근거가 부족하니" in prompt
+    assert "[feasibility] 근거 충분" in prompt
+    assert "<<" not in prompt
+
+
+def test_build_reviewer_prompt_without_guards_has_default_notice():
+    prompt = build_reviewer_prompt(
+        "creativity_originality",
+        {"rubric_id": "R", "total_max_score": 100, "criteria": []},
+        {"text": "..."},
+        [],
+    )
+    assert "판정이 제공되지 않았습니다" in prompt
+
+
+# ---------------------------------------------------------------------------
+# EvidencePool.register_linked — (document_id, chunk_id) 역조회 + 원문 보강
+# ---------------------------------------------------------------------------
+
+
+def test_register_linked_dedupes_by_doc_chunk_and_backfills_text():
+    retrieved = [
+        {"chunk_id": "c1", "document_id": "D1", "text": "청크1 원문", "score": 0.9},
+    ]
+    pool = EvidencePool("business_strategy", retrieved)
+
+    ref = {
+        "document_id": "D1",
+        "chunk_id": "c1",
+        "quote": "짧은 인용",
+        "document_name": "제출문서.pdf",
+        "section": "문제 정의",
+        "page": 3,
+        "final_score": 0.87,
+    }
+    eid1 = pool.register_linked(ref)
+    eid2 = pool.register_linked(ref)  # 같은 (D1,c1) → 같은 id
+    assert eid1 == eid2 == "EV-business_strategy-001"
+
+    item = pool.as_list()[0]
+    assert item["chunk_id"] == "c1"
+    assert item["text"] == "청크1 원문"  # retrieved 풀에서 원문 보강
+    assert item["quote"] == "짧은 인용"
+    assert item["score"] == 0.87
+    assert item["document_name"] == "제출문서.pdf"
+
+
+# ---------------------------------------------------------------------------
+# transform 게이팅 (allow_numeric_score)
+# ---------------------------------------------------------------------------
+
+_RAW = {
+    "review_id": "REV-1",
+    "persona_id": "business_strategy",
+    "persona_name": "사업전략 전문가",
+    "review_round": 1,
+    "review_summary": "요약",
+    "review_items": [
+        {
+            "criterion_id": "A",
+            "criterion_name": "항목A",
+            "max_score": 50,
+            "score_recommendation": 40,
+            "judgment": "strong",
+            "confidence": "high",
+            "strengths": [],
+            "weaknesses": [],
+            "evidence_refs": [],
+            "improvement_actions": [],
+        },
+        {
+            "criterion_id": "B",
+            "criterion_name": "항목B",
+            "max_score": 50,
+            "score_recommendation": 30,
+            "judgment": "adequate",
+            "confidence": "high",
+            "strengths": [],
+            "weaknesses": [],
+            "evidence_refs": [],
+            "improvement_actions": [],
+        },
+    ],
+    "cross_reviews": [],
+    "out_of_scope": [],
+}
+
+
+def test_transform_gates_criterion_when_numeric_score_blocked():
+    criterion_evidence = {
+        "A": {
+            "linked_evidence_refs": [
+                {"document_id": "D1", "chunk_id": "cA", "quote": "A 근거", "final_score": 0.8}
+            ],
+            "sufficiency": {"allow_numeric_score": True, "allow_definitive_judgment": True},
+        },
+        "B": {  # 최종 판정: 숫자 점수 차단 → 미채점
+            "linked_evidence_refs": [],
+            "sufficiency": {"allow_numeric_score": False, "allow_definitive_judgment": False},
+        },
+    }
+    pool = EvidencePool("business_strategy", [])
+    result = raw_reviewer_to_v2(_RAW, pool, criterion_evidence=criterion_evidence)
+
+    scored = {s["criterion_id"] for s in result["rubric_scores"]}
+    assert scored == {"A"}, "allow_numeric_score=False인 B는 미채점되어야 한다"
+    a = result["rubric_scores"][0]
+    assert a["evidence_ids"] == ["EV-business_strategy-001"]  # RAG-004 근거로 발급(A안)
+    assert a["evidence_status"] == "sufficient"
+
+
+# ---------------------------------------------------------------------------
+# 전체 run_meeting — evidence_context + callback 게이팅 + A안 근거
+# ---------------------------------------------------------------------------
+
+
+def _make_raw_reviewer(persona_id: str, cid: str, cname: str, score: int) -> dict:
+    return {
+        "review_id": f"REV-{persona_id}",
+        "persona_id": persona_id,
+        "persona_name": _PERSONA_NAMES[persona_id],
+        "review_round": 1,
+        "review_summary": f"{_PERSONA_NAMES[persona_id]} 요약",
+        "review_items": [
+            {
+                "criterion_id": cid,
+                "criterion_name": cname,
+                "max_score": 25,
+                "score_recommendation": score,
+                "judgment": "adequate",
+                "confidence": "high",
+                "strengths": ["근거 있음"],
+                "weaknesses": [],
+                "evidence_refs": [],
+                "improvement_actions": [],
+            }
+        ],
+        "cross_reviews": [],
+        "out_of_scope": [],
+    }
+
+
+_RAW_CHAIR = {
+    "chair_id": "review_chair",
+    "overall_assessment": "종합",
+    "consensus": [],
+    "disagreements": [],
+    "top_strengths": [],
+    "top_risks": [],
+    "final_priority_actions": [],
+    "final_decision": None,
+    "decision_note": None,
+}
+
+
+def test_run_meeting_with_evidence_context_gates_and_uses_linked_evidence():
+    mapping = json.loads(COMPETITION_MAPPING_PATH.read_text(encoding="utf-8"))
+    routing = build_routing(mapping)
+    criteria_by_id = {c["criterion_id"]: c for c in mapping["rubric"]}
+    owned = {r["primary"]: cid for cid, r in routing.items()}  # 1인 1항목
+
+    gated_persona = "presentation_completeness"
+    gated_criterion = owned[gated_persona]
+
+    # 위원 stub: 전원 20점
+    raw_by_marker = {
+        f"{_PERSONA_NAMES[pid]}입니다": _make_raw_reviewer(
+            pid, cid, criteria_by_id[cid]["criterion_name"], 20
+        )
+        for pid, cid in owned.items()
+    }
+    raw_by_marker["위원장(review_chair)입니다"] = _RAW_CHAIR
+
+    def stub_llm(prompt: str) -> str:
+        for marker, raw in raw_by_marker.items():
+            if marker in prompt:
+                return json.dumps(raw, ensure_ascii=False)
+        raise AssertionError("마커 못 찾음")
+
+    # evidence_context: (persona, criterion)별 근거 + 사전 판정
+    evidence_context = [
+        {
+            "persona_id": pid,
+            "criterion_id": cid,
+            "retrieved_evidence": [
+                {"chunk_id": f"chunk-{cid}", "document_id": "DOC-1", "text": f"{cid} 근거 원문", "score": 0.85}
+            ],
+            "sufficiency": {"prompt_guard": f"[{cid}] 안내", "allow_numeric_score": True, "allow_definitive_judgment": True},
+        }
+        for pid, cid in owned.items()
+    ]
+
+    # 콜백: gated_criterion만 최종 숫자 점수 차단, 나머지는 RAG-004 근거 1건 반환
+    def evidence_callback(persona_id: str, criterion_id: str, review_item: dict) -> dict:
+        allow = criterion_id != gated_criterion
+        refs = (
+            [{"document_id": "DOC-1", "chunk_id": f"chunk-{criterion_id}", "quote": "인용", "final_score": 0.85}]
+            if allow
+            else []
+        )
+        return {
+            "linked_evidence_refs": refs,
+            "sufficiency": {"allow_numeric_score": allow, "allow_definitive_judgment": allow},
+        }
+
+    document = run_meeting(
+        meeting_id="MTG-EV-001",
+        project_id="PRJ-EV-001",
+        document_id="DOC-EV-001",
+        title="근거 연동 테스트",
+        rubric_mapping=mapping,
+        submission={"document_name": "t.pdf", "text": "..."},
+        retrieved_evidence=[],
+        llm_call=stub_llm,
+        evidence_context=evidence_context,
+        evidence_callback=evidence_callback,
+    )
+
+    jsonschema.Draft202012Validator(json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))).validate(document)
+
+    # 게이팅: 3개 항목만 채점(각 20) → 총점 60, gated 항목은 raw 0
+    assert document["score_result"]["total_score"] == 60
+    breakdown = {b["criterion_id"]: b for b in document["score_result"]["breakdown"]}
+    assert breakdown[gated_criterion]["raw_score"] == 0
+    assert breakdown[gated_criterion]["source_review_ids"] == []
+    # gated 위원은 채점 결과가 비어야 한다
+    gated_result = next(r for r in document["reviewer_results"] if r["persona_id"] == gated_persona)
+    assert gated_result["rubric_scores"] == []
+    # 근거는 RAG-004 linked ref에서 발급된 EV-*(persona별) 3건
+    assert len(document["evidence"]) == 3
+    assert all(e["evidence_id"].startswith("EV-") for e in document["evidence"])
