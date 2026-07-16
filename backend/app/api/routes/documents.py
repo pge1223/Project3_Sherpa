@@ -312,3 +312,26 @@ async def get_documents(
         )
         for d in documents
     ]
+
+
+# DOC-004: 문서 처리 상태 조회
+@router.get("/{project_id}/{document_id}/status")
+async def get_document_status(
+    project_id: str,
+    document_id: str,
+    authorization: Optional[str] = Header(None, alias="authorization"),
+):
+    user_email = get_current_user(authorization)
+    await verify_project_owner(project_id, user_email)
+
+    document = await document_repo.find_by_id(document_id)
+    if not document:
+        raise HTTPException(status_code=404, detail="문서를 찾을 수 없습니다")
+
+    return {
+        "document_id": str(document["_id"]),
+        "project_id": document["project_id"],
+        "original_filename": document["original_filename"],
+        "status": document["status"],
+        "updated_at": document["updated_at"],
+    }
