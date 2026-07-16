@@ -101,3 +101,34 @@ async def delete_project(project_id: str, authorization: Optional[str] = Header(
 
     await project_repo.delete_project(project_id)
     return {"message": "프로젝트가 삭제되었습니다"}
+
+
+# DOM-002: 도메인 수동 변경
+@router.patch("/{project_id}/domain")
+async def update_project_domain(
+    project_id: str,
+    request: ProjectUpdateRequest,
+    authorization: Optional[str] = Header(None, alias="authorization"),
+):
+    user_email = get_current_user(authorization)
+    project = await project_repo.find_by_id_and_user(project_id, user_email)
+
+    if not project:
+        raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없습니다")
+
+    ALLOWED_DOMAINS = {"startup", "government", "competition"}
+    if request.domain not in ALLOWED_DOMAINS:
+        raise HTTPException(status_code=400, detail=f"허용되지 않는 도메인입니다. 허용: {ALLOWED_DOMAINS}")
+
+    updated = await project_repo.update_project(project_id, {"domain": request.domain})
+
+    return ProjectResponse(
+        id=str(updated["_id"]),
+        user_email=updated["user_email"],
+        title=updated["title"],
+        doc_type=updated["doc_type"],
+        description=updated.get("description"),
+        status=updated["status"],
+        created_at=updated["created_at"],
+        updated_at=updated["updated_at"],
+    )
