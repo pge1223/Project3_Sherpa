@@ -1,4 +1,6 @@
 from pathlib import Path
+
+from pydantic import Field
 from pydantic_settings import BaseSettings
 
 # backend/.env 를 uvicorn 실행 위치(CWD)와 무관하게 항상 찾도록 절대경로 사용
@@ -10,10 +12,12 @@ class Settings(BaseSettings):
     # 앱 기본 설정
     APP_NAME: str = "AI Review Board"
     APP_VERSION: str = "0.1.0"
-    DEBUG: bool = False
+    # VS Code/셸이 주입하는 범용 DEBUG 환경변수와 충돌하지 않도록
+    # 백엔드 디버그 설정은 APP_DEBUG만 읽는다.
+    DEBUG: bool = Field(default=False, validation_alias="APP_DEBUG")
 
     # MongoDB
-    MONGODB_URL: str = "mongodb://reviewboard_admin:reviewboard2026!@localhost:27017/?authSource=admin"
+    MONGODB_URL: str = "mongodb://localhost:27017"
     MONGODB_DB: str = "ai_review_board"
 
     # OpenAI
