@@ -455,3 +455,70 @@ async def reevaluate_reviewer(
     await meeting_repo.update_result_by_id(stored["_id"], patch)
 
     return {**stored, **patch, "project_id": project_id}
+
+
+# MTG-005: 프로젝트 회의 목록 조회
+@router.get("/{project_id}/meetings")
+async def get_meetings(
+    project_id: str,
+    authorization: Optional[str] = Header(None, alias="authorization"),
+):
+    get_current_user(authorization)
+
+    project = await project_repo.find_by_id(project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없습니다.")
+
+    meetings = await meeting_repo.find_by_project_id(project_id)
+    return meetings
+
+
+# MTG-005: 프로젝트 최신 회의 결과 조회
+@router.get("/{project_id}/meetings/latest")
+async def get_latest_meeting(
+    project_id: str,
+    authorization: Optional[str] = Header(None, alias="authorization"),
+):
+    get_current_user(authorization)
+
+    project = await project_repo.find_by_id(project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없습니다.")
+
+    meeting = await meeting_repo.find_latest_by_project_id(project_id)
+    if meeting is None:
+        raise HTTPException(status_code=404, detail="회의 결과가 없습니다. 먼저 분석을 시작하세요.")
+
+    return meeting
+<<<<<<< HEAD
+
+
+# RPT-001: 종합 결과 표시
+@router.get("/{project_id}/report")
+async def get_project_report(
+    project_id: str,
+    authorization: Optional[str] = Header(None, alias="authorization"),
+):
+    get_current_user(authorization)
+
+    project = await project_repo.find_by_id(project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없습니다.")
+
+    meeting = await meeting_repo.find_latest_by_project_id(project_id)
+    if meeting is None:
+        raise HTTPException(status_code=404, detail="회의 결과가 없습니다. 먼저 분석을 시작하세요.")
+
+    return {
+        "project_id": project_id,
+        "project_title": project.get("title"),
+        "domain": meeting.get("domain"),
+        "meeting_id": meeting.get("meeting_id"),
+        "status": meeting.get("status"),
+        "score_result": meeting.get("score_result"),
+        "chair_summary": meeting.get("chair_summary"),
+        "top_revisions": meeting.get("top_revisions"),
+        "reviewer_results": meeting.get("reviewer_results"),
+        "evidence": meeting.get("evidence"),
+        "created_at": meeting.get("created_at"),
+    }
