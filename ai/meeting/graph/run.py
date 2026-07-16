@@ -115,6 +115,8 @@ def run_meeting(
     retrieved_evidence: list[dict[str, Any]],
     llm_call: LLMCall,
     on_progress: ProgressCallback | None = None,
+    evidence_context: list[dict[str, Any]] | None = None,
+    evidence_callback: Callable[[str, str, dict], dict] | None = None,
 ) -> dict[str, Any]:
     """회의 1회를 처음부터 끝까지 실행하고 review_output.schema.json v2 문서를 반환한다.
 
@@ -125,12 +127,19 @@ def run_meeting(
     호출된다(MTG-006 "긴 작업 중 현재 단계 표시"). 실패 노드부터의 재시도(MTG-006 예외)는
     assemble_meeting_graph에 checkpointer를 넘겨 지원하며, 회의 간 상태 보존은 backend의
     몫이다.
+
+    evidence_context / evidence_callback은 RAG(용준) 연동용이다(둘 다 optional — 없으면
+    기존 flat retrieved_evidence 경로로 동일하게 동작한다). evidence_context는
+    (persona_id, criterion_id)별 retrieved_evidence + 사전 근거충족도(prompt_guard/allow
+    플래그) 목록이고, evidence_callback은 위원 의견 생성 후 (persona_id, criterion_id,
+    review_item)로 불려 RAG-004 근거 연결 + RAG-005 최종 판정을 반환한다. backend(윤한)가
+    두 값을 넘길 때만 게이팅·근거 교체(A안)가 활성화된다.
     """
     domain = rubric_mapping["meta"]["domain"]
     rubric = build_rubric(rubric_mapping)
     committee = list(rubric_mapping["committee"])
 
-    graph = assemble_meeting_graph(committee, llm_call)
+    graph = assemble_meeting_graph(committee, llm_call, evidence_callback=evidence_callback)
     state = initial_state(
         meeting_id=meeting_id,
         domain=domain,
@@ -138,6 +147,7 @@ def run_meeting(
         submission=submission,
         committee=committee,
         retrieved_evidence=retrieved_evidence,
+        evidence_context=evidence_context,
     )
 
     final_state: MeetingState = state
