@@ -353,7 +353,11 @@ async def analyze_project(project_id: str, authorization: Optional[str] = Header
         chair_summary=document["chair_summary"],
         top_revisions=document["top_revisions"],
         evidence=document["evidence"],
-        media_script=[],
+        # 재인/Claude(2026-07-16): 원래 media_script=[]로 따로 고정돼 있어서, run.py의
+        # assemble_document()가 실제로 채운 값과 무관하게 DB엔 항상 빈 배열로 저장되고
+        # 있었다(캐시된 회의를 다시 불러오면 영상 대본이 사라지는 문제) - document(=
+        # run_meeting()의 반환값)에 이미 채워진 값을 그대로 쓰도록 수정.
+        media_script=document["media_script"],
         schema_version="2.0.0",
     )
     await meeting_repo.create(meeting)

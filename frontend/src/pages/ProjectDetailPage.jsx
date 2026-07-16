@@ -1,7 +1,11 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { analyzeProject } from '../api/projectApi'
 import MeetingChat from '../components/meeting/MeetingChat'
+// 재인/Claude (2026-07-16): 위원 발언 영상(TTS+MuseTalk) 컴포넌트 추가.
+// 가은의 기존 텍스트 채팅(MeetingChat)과 같은 result.media_script를 그대로
+// 넘겨받아 그 위에 아바타 영상 콜 화면을 띄운다 - 새 API 호출 없음.
+import CommitteeVideoStage from '../components/meeting/CommitteeVideoStage'
 
 function downloadResultJson(result, projectId) {
   const blob = new Blob([JSON.stringify(result, null, 2)], { type: 'application/json' })
@@ -18,6 +22,13 @@ export default function ProjectDetailPage() {
   const [result, setResult] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  // 재인/Claude (2026-07-16): StrictMode 개발 모드는 마운트 시 이 useEffect를 두 번
+  // 실행하는데, 아래 sessionStorage 캐시 체크는 analyzeProject()가 끝나기 전에 이뤄져서
+  // 가드가 없으면 진짜 /analyze 요청(LLM 호출 포함, 실제 비용 발생)이 두 번 나간다.
+  // 그 결과 setResult가 서로 다른 응답으로 두 번 불려서 result.media_script 참조가
+  // 바뀌고, CommitteeVideoStage.jsx가 재생 중이던 위원 영상 스트림을 끊고 처음부터
+  // 다시 요청하는 문제로 실제 관측됨 - projectId당 한 번만 요청하도록 ref로 막는다.
+  const requestedProjectIdRef = useRef(null)
 
   useEffect(() => {
     const cached = sessionStorage.getItem(`analysis:${projectId}`)
@@ -26,6 +37,9 @@ export default function ProjectDetailPage() {
       setLoading(false)
       return
     }
+
+    if (requestedProjectIdRef.current === projectId) return
+    requestedProjectIdRef.current = projectId
 
     analyzeProject(projectId)
       .then((data) => {
@@ -36,6 +50,7 @@ export default function ProjectDetailPage() {
       .catch((err) => {
         setError(err.message)
         setLoading(false)
+        requestedProjectIdRef.current = null // 실패 시 재시도 가능하도록 가드 해제
       })
   }, [projectId])
 
@@ -53,6 +68,7 @@ export default function ProjectDetailPage() {
             {result.schema_version}). 평가 대상 문서가 여러 개면 첫 번째 문서만 사용하며,
             분석/재평가마다 실제 API 비용이 발생합니다.
           </p>
+          <CommitteeVideoStage mediaLines={result.media_script} />
           <MeetingChat result={result} />
           <details style={styles.card}>
             <summary style={styles.sectionTitle}>원본 JSON</summary>
