@@ -358,7 +358,7 @@ async def analyze_project(project_id: str, authorization: Optional[str] = Header
         # 있었다(캐시된 회의를 다시 불러오면 영상 대본이 사라지는 문제) - document(=
         # run_meeting()의 반환값)에 이미 채워진 값을 그대로 쓰도록 수정.
         media_script=document["media_script"],
-        schema_version="2.0.0",
+        schema_version="2.1.0",
     )
     await meeting_repo.create(meeting)
 
