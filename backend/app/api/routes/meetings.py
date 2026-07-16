@@ -490,7 +490,6 @@ async def get_latest_meeting(
         raise HTTPException(status_code=404, detail="회의 결과가 없습니다. 먼저 분석을 시작하세요.")
 
     return meeting
-<<<<<<< HEAD
 
 
 # RPT-001: 종합 결과 표시
