@@ -1,0 +1,36 @@
+{
+  "_comment": "이 파일은 SAMPLE/TEMPLATE입니다. 실제 정답 데이터가 아닙니다 — case_id, project_id, relevant_chunk_ids 등은 형식을 보여주기 위한 자리표시자(placeholder)일 뿐이며 실제 Chroma에 존재하지 않을 수 있습니다. 실제 평가셋은 반드시 사람이 실제 색인된 문서와 Chroma chunk_id를 직접 확인해 새 JSON 파일로 작성하세요 (README.md의 '평가셋을 사람이 만드는 방법' 참고).",
+  "dataset_name": "competition_retrieval_v1_EXAMPLE",
+  "version": "0.0.0-example",
+  "cases": [
+    {
+      "case_id": "example-competition-001",
+      "project_id": "EXAMPLE_PROJECT_ID",
+      "domain": "competition",
+      "persona_id": "business_strategy",
+      "role_id": "finance",
+      "criterion_id": "contribution",
+      "query": "사업성과 시장 기여도",
+      "relevant_chunk_ids": [
+        "EXAMPLE_CHUNK_ID_1",
+        "EXAMPLE_CHUNK_ID_2"
+      ],
+      "expected_sufficiency": "sufficient",
+      "notes": "SAMPLE — 정답 청크는 반드시 사람이 실제 문서/Chroma를 확인해 입력할 것. 임의 생성 금지."
+    },
+    {
+      "case_id": "example-competition-002",
+      "project_id": "EXAMPLE_PROJECT_ID",
+      "domain": "competition",
+      "persona_id": "technical_feasibility",
+      "role_id": "technology",
+      "criterion_id": null,
+      "query": "핵심 기술 구현 가능성과 보안 대책",
+      "relevant_chunk_ids": [
+        "EXAMPLE_CHUNK_ID_3"
+      ],
+      "expected_sufficiency": null,
+      "notes": "SAMPLE — criterion_id는 선택 필드이며 없으면 null"
+    }
+  ]
+}
