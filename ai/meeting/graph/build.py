@@ -17,7 +17,12 @@ from .nodes import make_chair_node, make_reviewer_node, score_node
 from .state import MeetingState
 
 
-def assemble_meeting_graph(committee: list[str], llm_call: LLMCall, checkpointer: Any | None = None):
+def assemble_meeting_graph(
+    committee: list[str],
+    llm_call: LLMCall,
+    checkpointer: Any | None = None,
+    evidence_callback=None,
+):
     """committee(참여 위원 persona_id 목록)에 맞춰 회의 그래프를 조립하고 컴파일한다.
 
     START -> reviewer__{persona_id}(병렬, MTG-001) -> score(MTG-003) -> chair(MTG-002/004) -> END
@@ -26,11 +31,15 @@ def assemble_meeting_graph(committee: list[str], llm_call: LLMCall, checkpointer
     회의 간(HTTP 요청 간) 상태를 이어가려면 langgraph.checkpoint의 Saver(MemorySaver
     또는 영속 Saver)를 넘기고 config={"configurable": {"thread_id": meeting_id}}로 실행하면
     된다.
+
+    evidence_callback이 주어지면 reviewer 노드가 의견 생성 후 (persona_id, criterion_id,
+    review_item)로 호출한다(RAG-004 근거 연결 + RAG-005 최종 판정, backend 주입). 콜백은
+    Callable이라 이 그래프는 ai/rag를 직접 import하지 않는다.
     """
     graph = StateGraph(MeetingState)
 
     for persona_id in committee:
-        graph.add_node(f"reviewer__{persona_id}", make_reviewer_node(persona_id, llm_call))
+        graph.add_node(f"reviewer__{persona_id}", make_reviewer_node(persona_id, llm_call, evidence_callback))
     graph.add_node("score", score_node)
     graph.add_node("chair", make_chair_node(llm_call))
 
