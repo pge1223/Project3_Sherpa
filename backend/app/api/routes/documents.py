@@ -1,12 +1,20 @@
 import logging
 import os
 import uuid
+from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, File, Form, Header, HTTPException, UploadFile, status
 from starlette.concurrency import run_in_threadpool
 from jose import jwt, JWTError
 
+from ai.rag.converters import (
+    ConversionStatus,
+    DocumentConversionError,
+    build_conversion_metadata,
+    cleanup_converted_file,
+    convert_if_needed,
+)
 from ai.rag.loaders.url_loader import load_from_url
 from ai.rag.loaders.schemas import UrlExtractionResult, WebPageContent
 from ai.rag.loaders.exceptions import (
@@ -68,29 +76,58 @@ def _get_indexing_service() -> RAGIndexingService:
     return _indexing_service
 
 
-def _parse_chunk_and_index(document_id: str, project_id: str, file_path: str, filename: str) -> tuple[int, str]:
+def _parse_chunk_and_index(
+    document_id: str, project_id: str, file_path: str, filename: str
+) -> tuple[int, str, dict]:
     """RAG-001~003: 파싱 -> 청킹 -> 임베딩 -> Chroma 저장까지 동기적으로 실행하고
-    (색인된 청크 수, 원문 전체 텍스트)를 반환한다. CPU-bound라 호출부에서 threadpool로
-    감싸 실행해야 한다.
+    (색인된 청크 수, 원문 전체 텍스트, 변환 metadata)를 반환한다. CPU-bound라 호출부에서
+    threadpool로 감싸 실행해야 한다.
     가은/Claude(2026-07-15): 원문 텍스트도 같이 반환하도록 확장 — analyze_project()가
     submission.text로 쓸 "문서 전체 원문"이 이전엔 어디에도 저장되지 않았다(Chroma는
-    벡터/청크 단위라 전체 원문 조회에는 안 맞음)."""
-    extraction = extract_document(file_path)
-    chunk_context = ChunkSourceContext(
-        document_id=document_id,
-        source_type=SourceType.FILE_UPLOAD,
-        source_filename=filename,
-    )
-    chunking_result = chunk_document(extraction, chunk_context)
+    벡터/청크 단위라 전체 원문 조회에는 안 맞음).
+    가은/Claude(2026-07-16): 용준의 ai/rag/converters(HWP/HWPX -> PDF) 통합
+    (ai/rag/converters/INTEGRATION.md 1번 권장 지점 그대로 따름) — HWP/HWPX만 변환해서
+    처리용 PDF 경로를 만들고, 그 외 형식은 convert_if_needed()가 None을 반환해 기존 경로를
+    그대로 탄다. chunk_context/indexing_context의 filename은 원본 그대로 써서(파라미터
+    file_path만 처리용 경로로 바뀜) 색인 메타데이터에 변환 파일명이 노출되지 않는다.
+    변환 실패(DocumentConversionError)는 청킹/임베딩 없이 그대로 전파 — 호출부가
+    conversion_status=failed 처리를 하도록."""
+    source_path = Path(file_path)
+    conversion_result = None
+    processing_path = source_path
+    conversion_metadata: dict = {
+        "original_file_type": source_path.suffix.lstrip(".").lower(),
+        "processing_file_type": source_path.suffix.lstrip(".").lower(),
+        "conversion_status": ConversionStatus.NOT_REQUIRED.value,
+        "conversion_error": None,
+        "converter_name": None,
+        "conversion_duration_ms": None,
+    }
 
-    indexing_context = IndexingContext(
-        project_id=project_id,
-        document_id=document_id,
-        document_title=filename,
-    )
-    summary = _get_indexing_service().index_chunking_result_with_summary(chunking_result, indexing_context)
-    parsed_text = "\n\n".join(block.content for block in extraction.blocks)
-    return summary.stored_count, parsed_text
+    try:
+        conversion_result = convert_if_needed(source_path)
+        if conversion_result is not None:
+            processing_path = conversion_result.converted_path
+            conversion_metadata = build_conversion_metadata(conversion_result).model_dump(mode="json")
+
+        extraction = extract_document(processing_path)
+        chunk_context = ChunkSourceContext(
+            document_id=document_id,
+            source_type=SourceType.FILE_UPLOAD,
+            source_filename=filename,
+        )
+        chunking_result = chunk_document(extraction, chunk_context)
+
+        indexing_context = IndexingContext(
+            project_id=project_id,
+            document_id=document_id,
+            document_title=filename,
+        )
+        summary = _get_indexing_service().index_chunking_result_with_summary(chunking_result, indexing_context)
+        parsed_text = "\n\n".join(block.content for block in extraction.blocks)
+        return summary.stored_count, parsed_text, conversion_metadata
+    finally:
+        cleanup_converted_file(conversion_result)
 
 
 def _chunk_and_index_webpage(
@@ -233,19 +270,28 @@ async def upload_document(
     await verify_project_owner(project_id, user_email)
 
     # DOC-005: 업로드 파일 검증
-    ALLOWED_EXTENSIONS = {".pdf", ".docx", ".pptx"}
+    # HWP/HWPX는 ai/rag/converters(#45)가 내부적으로 PDF로 변환해 처리한다
+    # (ai/rag/converters/INTEGRATION.md 5번 참고) — 화이트리스트에도 포함해야 한다.
+    ALLOWED_EXTENSIONS = {".pdf", ".docx", ".pptx", ".hwp", ".hwpx"}
     ALLOWED_MIME_TYPES = {
         "application/pdf",
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "application/x-hwp",
+        "application/haansofthwp",
+        "application/vnd.hancom.hwp",
+        "application/haansofthwpx",
+        "application/vnd.hancom.hwpx",
     }
     MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
 
     file_ext = os.path.splitext(file.filename or "")[1].lower()
     if file_ext not in ALLOWED_EXTENSIONS:
-        raise BadRequestException(detail=f"지원하지 않는 파일 형식입니다. 허용: PDF, DOCX, PPTX")
+        raise BadRequestException(detail=f"지원하지 않는 파일 형식입니다. 허용: PDF, DOCX, PPTX, HWP, HWPX")
 
-    if file.content_type and file.content_type not in ALLOWED_MIME_TYPES:
+    # HWP/HWPX는 OS/브라우저에 등록된 표준 MIME이 없어 대부분 application/octet-stream으로
+    # 전송된다 — 확장자 화이트리스트를 이미 통과했으므로 이 두 확장자는 MIME 검사를 건너뛴다.
+    if file_ext not in {".hwp", ".hwpx"} and file.content_type and file.content_type not in ALLOWED_MIME_TYPES:
         raise BadRequestException(detail=f"지원하지 않는 MIME 타입입니다: {file.content_type}")
 
     content = await file.read()
@@ -277,12 +323,34 @@ async def upload_document(
 
     # RAG-001~003: 파싱 -> 청킹 -> 임베딩 -> Chroma 색인 (실패해도 업로드 자체는 성공으로 유지)
     try:
-        stored_count, parsed_text = await run_in_threadpool(
+        stored_count, parsed_text, conversion_metadata = await run_in_threadpool(
             _parse_chunk_and_index, result, project_id, file_path, file.filename
         )
         document.status = "indexed" if stored_count > 0 else "indexed_empty"
         document.parsed_text = parsed_text
-        await document_repo.update_fields(result, {"status": document.status, "parsed_text": parsed_text})
+        document.conversion_metadata = conversion_metadata
+        await document_repo.update_fields(
+            result,
+            {"status": document.status, "parsed_text": parsed_text, "conversion_metadata": conversion_metadata},
+        )
+    # 가은/Claude(2026-07-16): HWP/HWPX 변환 실패는 일반 색인 실패와 구분한다 —
+    # DocumentConversionError.user_message는 서버 경로/명령어 없이 그대로 프론트에
+    # 보여줘도 되는 한국어 메시지라(ai/rag/converters/exceptions.py), conversion_metadata에
+    # 담아 응답에 실어 보낸다(INTEGRATION.md 6번).
+    except DocumentConversionError as exc:
+        logger.warning("문서 변환 실패: document_id=%s error=%s", result, exc)
+        document.status = "conversion_failed"
+        document.conversion_metadata = {
+            "original_file_type": os.path.splitext(file.filename)[1].lstrip(".").lower(),
+            "processing_file_type": None,
+            "conversion_status": "failed",
+            "conversion_error": exc.user_message,
+            "converter_name": None,
+            "conversion_duration_ms": None,
+        }
+        await document_repo.update_fields(
+            result, {"status": document.status, "conversion_metadata": document.conversion_metadata}
+        )
     except Exception:
         logger.exception("문서 색인 중 오류가 발생했습니다: document_id=%s", result)
         document.status = "indexing_failed"
@@ -302,6 +370,7 @@ async def upload_document(
         created_at=document.created_at,
         updated_at=document.updated_at,
         document_role=document.document_role,
+        conversion_metadata=document.conversion_metadata,
     )
 
 
@@ -330,6 +399,7 @@ async def get_documents(
             created_at=d["created_at"],
             updated_at=d["updated_at"],
             document_role=d.get("document_role", "target"),
+            conversion_metadata=d.get("conversion_metadata"),
         )
         for d in documents
     ]

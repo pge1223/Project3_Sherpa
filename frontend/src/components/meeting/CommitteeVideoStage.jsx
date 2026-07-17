@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { getAvailableSpeakers, openMediaStreamSocket } from '../../api/mediaApi'
+import { personaColor, personaInitial } from './meetingTheme'
 
 // 재인/Claude (2026-07-16): 위원 발언 영상(TTS+MuseTalk 립싱크) 재생 컴포넌트.
 // ai/media/musetalk/web_test_chat.html(단독 테스트 페이지)에서 먼저 검증한
@@ -7,23 +8,40 @@ import { getAvailableSpeakers, openMediaStreamSocket } from '../../api/mediaApi'
 // React로 이식했다. streaming_optimization.md 시도 10에서 확정된 값
 // (RESUME/PAUSE_THRESHOLD) 재사용.
 //
-// 사용하는 곳: frontend/src/pages/ProjectDetailPage.jsx가 회의 결과(result.media_script)를
-// 그대로 넘겨받아 가은의 기존 텍스트 채팅(MeetingChat.jsx) 위쪽에 렌더링한다.
+// 사용하는 곳: frontend/src/pages/MentorFeedbackChatPage.jsx(STEP7 "대화형 피드백",
+// /projects/:projectId/feedback-chat)가 회의 결과(result.media_script)를 그대로 넘겨받아
+// 가은의 대화형 Q&A 채팅창 위쪽에 렌더링한다. (2026-07-16엔 별도 페이지
+// MeetingSimulationPage에 있었다가, 2026-07-17 사용자 요청으로 이 화면으로 옮겨왔다 —
+// MeetingSimulationPage는 삭제됨.)
 // 연결하는 곳: frontend/src/api/mediaApi.js(getAvailableSpeakers, openMediaStreamSocket)
 // -> backend/app/api/routes/media.py(/media/available-speakers, /media/stream)
 // -> Colab MuseTalk 서버.
+//
+// 가은/Claude(2026-07-16): 원래 아바타 영상이 준비 안 된 위원은 그냥 건너뛰었는데
+// (텍스트는 MeetingChat이 보여준다는 전제), 별도로 만들었던 "AI 회의 시뮬레이션"
+// 목업 페이지(MeetingSimulationPage, 정적 이미지 대체 + 자막 + 진행 체크리스트)를
+// 여기로 흡수했다 — "회의를 본다"는 경험이 페이지 두 개로 나뉘어 있는 게 오히려
+// 헷갈린다고 판단해서, 영상 없는 위원은 건너뛰는 대신 이 폴백 연출로 대체하고
+// 전체 위원을 순서대로 재생한다. 자막/진행 체크리스트도 스트리밍 여부와 무관하게
+// 항상 보여주도록 추가함. 재인님 파일이라 이 변경은 별도로 공유 필요.
 const MIME_CODEC = 'video/mp4; codecs="avc1.42E01E, mp4a.40.2"'
 const RESUME_THRESHOLD = 0.8
 const PAUSE_THRESHOLD = 0.15
 // 실제 서비스 자산 위치가 정해지기 전까지 임시로 프론트 mock-videos에 둠
 const IDLE_LOOP_PATH = '/mock-videos/persona_a/avata_rf.mp4'
 
-// mediaLines(mediaLine 배열)를 순서대로, 아바타 영상이 준비된 speaker_id만
-// 자동으로 스트리밍 재생한다. 준비 안 된 위원은 건너뛴다(텍스트는 MeetingChat이
-// 이미 보여주고 있으므로 여기서 별도 폴백 UI를 만들지 않음).
+// 폴백 한 줄 재생 시간: 글자 수 기반으로 대략의 TTS 길이를 흉내낸다(실제 영상/음성이
+// 없는 위원용 - MeetingSimulationPage에서 쓰던 값 그대로 가져옴).
+function lineDurationMs(text) {
+  return Math.min(9000, Math.max(3200, (text || '').length * 90))
+}
+
+// mediaLines(mediaLine 배열)를 순서대로 전부 재생한다. 아바타 영상이 준비된
+// speaker_id는 실제 스트리밍, 준비 안 된 위원은 정적 이미지 대체 폴백 연출로 대신한다.
 export default function CommitteeVideoStage({ mediaLines }) {
   const videoRef = useRef(null)
   const monitorTimerRef = useRef(null)
+  const fallbackTimerRef = useRef(null)
   const tokenRef = useRef(0)
   // 현재 진행 중인 스트림(WebSocket)을 확실히 끊는 함수를 담아둔다. effect가
   // 다시 실행될 때(StrictMode의 이중 마운트 포함) cancelled 플래그만 세우고
@@ -33,10 +51,20 @@ export default function CommitteeVideoStage({ mediaLines }) {
   const activeCleanupRef = useRef(null)
   const [speakerLabel, setSpeakerLabel] = useState('대기 중')
   const [statusText, setStatusText] = useState('')
+  const [currentLine, setCurrentLine] = useState(null)
+  const [currentIndex, setCurrentIndex] = useState(-1)
+  const [isFallback, setIsFallback] = useState(false)
+
+  const sortedLines = useMemo(
+    () => [...(mediaLines || [])].sort((a, b) => (a.order ?? 0) - (b.order ?? 0)),
+    [mediaLines],
+  )
 
   function playIdleLoop() {
     setSpeakerLabel('대기 중')
     setStatusText('')
+    setCurrentLine(null)
+    setIsFallback(false)
     if (monitorTimerRef.current) clearInterval(monitorTimerRef.current)
     const video = videoRef.current
     if (!video) return
@@ -46,10 +74,27 @@ export default function CommitteeVideoStage({ mediaLines }) {
     video.play().catch(() => {})
   }
 
+  // 가은/Claude(2026-07-16): 아바타 영상이 없는 위원의 발언 줄. 실제 영상 대신
+  // "정적 이미지 대체" 패널을 텍스트 길이만큼 보여주고 다음 순서로 넘어간다.
+  function fallbackLine(line) {
+    return new Promise((resolve) => {
+      const token = ++tokenRef.current
+      if (monitorTimerRef.current) clearInterval(monitorTimerRef.current)
+      setIsFallback(true)
+      setSpeakerLabel(line.speaker_name || line.speaker_id)
+      setStatusText('')
+      fallbackTimerRef.current = setTimeout(() => {
+        if (token !== tokenRef.current) return
+        resolve()
+      }, lineDurationMs(line.text))
+    })
+  }
+
   function streamLine(line) {
     return new Promise((resolve) => {
       const token = ++tokenRef.current
       if (monitorTimerRef.current) clearInterval(monitorTimerRef.current)
+      setIsFallback(false)
       const video = videoRef.current
       if (!video) {
         resolve()
@@ -259,18 +304,24 @@ export default function CommitteeVideoStage({ mediaLines }) {
       try {
         availableIds = await getAvailableSpeakers()
       } catch (e) {
-        return // 목록 조회 실패하면 대기 루프만 유지
+        // 가은/Claude(2026-07-16): 목록 조회 실패 시 이전엔 대기 루프만 유지하고 끝냈는데,
+        // 이제는 폴백 연출이 있으니 전체를 폴백으로 간주하고 계속 진행한다(빈 배열이면
+        // 아래 availableIds.includes()가 항상 false라 전부 fallbackLine으로 감).
+        availableIds = []
       }
       if (cancelled) return
 
-      const lines = (mediaLines || [])
-        .filter((l) => availableIds.includes(l.speaker_id))
-        .sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
-
-      for (const line of lines) {
+      for (let i = 0; i < sortedLines.length; i++) {
         if (cancelled) return
+        const line = sortedLines[i]
+        setCurrentIndex(i)
+        setCurrentLine(line)
         // eslint-disable-next-line no-await-in-loop
-        await streamLine(line)
+        if (availableIds.includes(line.speaker_id)) {
+          await streamLine(line)
+        } else {
+          await fallbackLine(line)
+        }
       }
       if (!cancelled) playIdleLoop()
     }
@@ -278,8 +329,9 @@ export default function CommitteeVideoStage({ mediaLines }) {
 
     return () => {
       cancelled = true
-      tokenRef.current += 1 // 진행 중이던 스트림 콜백을 전부 무효화
+      tokenRef.current += 1 // 진행 중이던 스트림/폴백 콜백을 전부 무효화
       if (monitorTimerRef.current) clearInterval(monitorTimerRef.current)
+      if (fallbackTimerRef.current) clearTimeout(fallbackTimerRef.current)
       // 열려있는 WebSocket을 실제로 끊는다 - 플래그만 세우고 두면 이미 받고 있던
       // 데이터가 계속 처리되면서 video.src가 다른 곳으로 넘어간 뒤에도 이전
       // MediaSource를 계속 건드려서 에러가 반복되는 걸 겪었다.
@@ -289,30 +341,88 @@ export default function CommitteeVideoStage({ mediaLines }) {
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mediaLines])
+  }, [sortedLines])
+
+  const color = currentLine ? personaColor(currentLine.speaker_id) : null
 
   return (
-    <div style={styles.callArea}>
-      <div style={styles.videoTile}>
-        {/* muted를 JSX 속성으로 고정하면 안 된다 - switchToStream()이 오디오를 들려주려고
-            video.muted=false로 바꾼 직후 setSpeakerLabel/setStatusText가 리렌더링을
-            일으키는데, 그때 React가 JSX의 muted(true)를 다시 적용해버려서 오디오
-            디코더 초기화 도중 음소거 상태가 갑자기 또 바뀌는 문제가 실제로 있었다.
-            그래서 muted는 여기서 관리하지 않고 순수 명령형으로만(video.muted = ...)
-            제어한다 - playIdleLoop()이 마운트 직후 바로 true로 설정한다. */}
-        <video ref={videoRef} playsInline style={styles.video} />
-        <div style={styles.speakerBadge}>{speakerLabel}</div>
-        {statusText && <div style={styles.statusBadge}>{statusText}</div>}
+    <div style={styles.wrap}>
+      {sortedLines.length > 1 && currentIndex >= 0 && (
+        <div style={styles.counter}>
+          발언 {currentIndex + 1} / {sortedLines.length}
+        </div>
+      )}
+      <div style={styles.callArea}>
+        <div style={styles.videoTile}>
+          {/* muted를 JSX 속성으로 고정하면 안 된다 - switchToStream()이 오디오를 들려주려고
+              video.muted=false로 바꾼 직후 setSpeakerLabel/setStatusText가 리렌더링을
+              일으키는데, 그때 React가 JSX의 muted(true)를 다시 적용해버려서 오디오
+              디코더 초기화 도중 음소거 상태가 갑자기 또 바뀌는 문제가 실제로 있었다.
+              그래서 muted는 여기서 관리하지 않고 순수 명령형으로만(video.muted = ...)
+              제어한다 - playIdleLoop()이 마운트 직후 바로 true로 설정한다. */}
+          <video ref={videoRef} playsInline style={styles.video} />
+          {isFallback && (
+            <div style={styles.fallbackOverlay}>
+              <style>{`
+                @keyframes cvsMicPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+                .cvs-mic-pulse { animation: cvsMicPulse 1.1s ease-in-out infinite; }
+              `}</style>
+              <div style={styles.fallbackTop}>
+                <span style={styles.fallbackBadge}>🖼 정적 이미지 대체</span>
+                <span className="cvs-mic-pulse" style={{ ...styles.micIcon, color }}>🎙</span>
+              </div>
+              <div style={{ ...styles.fallbackAvatar, background: `${color}33`, color }}>
+                {personaInitial(speakerLabel)}
+              </div>
+              <div style={styles.fallbackCaption}>🔊 영상 생성 실패 · 음성으로 재생 중</div>
+            </div>
+          )}
+          <div style={styles.speakerBadge}>{speakerLabel}</div>
+          {statusText && <div style={styles.statusBadge}>{statusText}</div>}
+        </div>
       </div>
+
+      {currentLine && (
+        <div style={styles.subtitleBox}>
+          <div style={styles.subtitleLabel}>자막</div>
+          <div style={styles.subtitleText}>&ldquo;{currentLine.text}&rdquo;</div>
+        </div>
+      )}
+
+      {sortedLines.length > 1 && (
+        <div style={styles.progressRow}>
+          {sortedLines.map((line, i) => (
+            <span
+              key={i}
+              style={{
+                ...styles.progressChip,
+                ...(i < currentIndex ? styles.progressDone : {}),
+                ...(i === currentIndex ? styles.progressActive : {}),
+              }}
+            >
+              {i < currentIndex ? '✓ ' : ''}
+              {line.speaker_name}
+              {i === currentIndex ? ' · 진행 중' : i > currentIndex ? ' · 대기' : ''}
+            </span>
+          ))}
+        </div>
+      )}
     </div>
   )
 }
 
 const styles = {
+  wrap: { marginBottom: 20 },
+  counter: {
+    textAlign: 'center',
+    fontSize: 12,
+    fontWeight: 600,
+    color: '#7994ac',
+    marginBottom: 8,
+  },
   callArea: {
     display: 'flex',
     justifyContent: 'center',
-    marginBottom: 20,
   },
   videoTile: {
     position: 'relative',
@@ -328,6 +438,46 @@ const styles = {
     height: '100%',
     objectFit: 'cover',
     display: 'block',
+  },
+  fallbackOverlay: {
+    position: 'absolute',
+    inset: 0,
+    background: '#181c2c',
+    display: 'flex',
+    flexDirection: 'column',
+    padding: 12,
+  },
+  fallbackTop: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  fallbackBadge: {
+    fontSize: 10.5,
+    fontWeight: 600,
+    color: '#e0a35c',
+    background: '#332818',
+    padding: '3px 7px',
+    borderRadius: 999,
+  },
+  micIcon: { fontSize: 15 },
+  fallbackAvatar: {
+    flex: 1,
+    margin: '16px 0',
+    borderRadius: '50%',
+    width: 84,
+    height: 84,
+    alignSelf: 'center',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    fontSize: 26,
+    fontWeight: 700,
+  },
+  fallbackCaption: {
+    fontSize: 10.5,
+    color: '#8b93ab',
+    textAlign: 'center',
   },
   speakerBadge: {
     position: 'absolute',
@@ -349,5 +499,37 @@ const styles = {
     borderRadius: 999,
     background: 'rgba(0,0,0,0.55)',
     color: '#ffd479',
+  },
+  subtitleBox: {
+    maxWidth: 420,
+    margin: '14px auto 0',
+    background: '#181c2c',
+    borderRadius: 12,
+    padding: '12px 16px',
+  },
+  subtitleLabel: { fontSize: 10.5, color: '#6b7290', marginBottom: 4, fontWeight: 600 },
+  subtitleText: { fontSize: 13.5, lineHeight: 1.55, color: '#e7ecf7' },
+  progressRow: {
+    maxWidth: 420,
+    margin: '10px auto 0',
+    display: 'flex',
+    flexWrap: 'wrap',
+    justifyContent: 'center',
+    gap: 6,
+  },
+  progressChip: {
+    fontSize: 11,
+    padding: '4px 9px',
+    borderRadius: 999,
+    background: '#eef1f4',
+    color: '#94a3b8',
+    border: '1px solid #e2e8f0',
+  },
+  progressDone: { color: '#7994ac' },
+  progressActive: {
+    background: '#e7f0fb',
+    color: '#2f7fd1',
+    border: '1px solid #bcd6f2',
+    fontWeight: 700,
   },
 }

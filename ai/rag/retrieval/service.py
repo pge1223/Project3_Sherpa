@@ -68,3 +68,9 @@ class RAGIndexingService:
             document_id=document_id,
             top_k=top_k,
         )
+
+    def delete_project(self, project_id: str) -> int:
+        """project_id 기준으로 프로젝트 전체 벡터 청크를 삭제한다. ChromaVectorStore.delete_project()를
+        그대로 호출하고 삭제된 건수를 그대로 반환한다(PRJ-004 프로젝트 삭제 연동, backend는
+        run_in_threadpool로 감싸 호출한다 — 이 메서드 자체는 동기다)."""
+        return self._vector_store.delete_project(project_id)
