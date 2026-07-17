@@ -40,3 +40,15 @@ langchain-chroma
 # ai/rag 테스트
 requests-mock
 openai
+
+# ai/rag/converters (#45) - HWP/HWPX -> PDF 변환
+# pip 패키지 아님, 시스템에 아래 두 가지가 모두 필요:
+#   1. LibreOffice(soffice) 설치 - https://www.libreoffice.org/download/download/
+#      (Windows: winget install --id TheDocumentFoundation.LibreOffice)
+#      설치 후 soffice가 PATH에 없으면 HWP_CONVERTER_EXECUTABLE 환경변수로 경로 지정
+#      (ai/rag/converters/config.py 참고)
+#   2. H2Orestart 확장 - LibreOffice는 HWP/HWPX 가져오기 필터를 기본 내장하지 않는다.
+#      https://github.com/ebandal/H2Orestart/releases 최신 .oxt를 받아
+#      `unopkg add H2Orestart.oxt`로 설치 (Java 런타임 필요 - Java 기반 확장).
+#      둘 중 하나라도 없으면 업로드는 성공하되 conversion_status=failed로 남는다
+#      (ai/rag/converters/INTEGRATION.md 참고).

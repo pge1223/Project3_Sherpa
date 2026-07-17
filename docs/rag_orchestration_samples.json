@@ -1,0 +1,71 @@
+{
+  "prepare_meeting_evidence_output": [
+    {
+      "persona_id": "business_strategy",
+      "criterion_id": "contribution",
+      "retrieved_evidence": [
+        {
+          "chunk_id": "CHUNK-021",
+          "document_id": "DOC-001",
+          "persona_id": "business_strategy",
+          "role_id": "finance",
+          "document_name": "사업계획서.pdf",
+          "section": "수익 모델",
+          "page": 9,
+          "location_number": 9,
+          "location_type": "page",
+          "text": "재고 데이터를 활용한 수익 모델은 월 구독료 기반으로 설계되었다.",
+          "semantic_score": 0.71,
+          "role_score": 0.85,
+          "final_score": 0.745,
+          "score": 0.745
+        },
+        {
+          "chunk_id": "CHUNK-014",
+          "document_id": "DOC-001",
+          "persona_id": "business_strategy",
+          "role_id": "finance",
+          "document_name": "사업계획서.pdf",
+          "section": "시장 분석",
+          "page": 6,
+          "location_number": 6,
+          "location_type": "page",
+          "text": "초기 목표 고객은 재고관리 전담 인력이 없는 소규모 오프라인 매장이다. 경쟁 서비스 대비 초기 도입 비용이 낮아 시장 진입 장벽이 낮다.",
+          "semantic_score": 0.86,
+          "role_score": 0.15,
+          "final_score": 0.6825,
+          "score": 0.6825
+        }
+      ],
+      "sufficiency": {
+        "status": "sufficient",
+        "prompt_guard": "검색된 문서 근거 범위 안에서만 평가하세요. 근거에 없는 사실이나 수치를 임의로 추가하지 마세요. 사용한 근거를 명확히 표시하세요.",
+        "allow_numeric_score": true,
+        "allow_definitive_judgment": true
+      }
+    }
+  ],
+  "create_evidence_callback_output": {
+    "linked_evidence_refs": [
+      {
+        "document_id": "DOC-001",
+        "chunk_id": "CHUNK-014",
+        "quote": "초기 목표 고객은 재고관리 전담 인력이 없는 소규모 오프라인 매장이다.",
+        "document_name": "사업계획서.pdf",
+        "section": "시장 분석",
+        "page": 6,
+        "semantic_score": 0.86,
+        "role_score": 0.15,
+        "final_score": 0.6825
+      }
+    ],
+    "sufficiency": {
+      "status": "partial",
+      "allow_numeric_score": false,
+      "allow_definitive_judgment": false,
+      "reason_codes": [
+        "TOO_FEW_EVIDENCE"
+      ]
+    }
+  }
+}

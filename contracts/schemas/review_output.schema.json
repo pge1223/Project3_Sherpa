@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://review-board.local/contracts/review_output.schema.json",
   "title": "AI Review Board Output",
-  "$comment": "v2.0.0 (팀 승인·적용). v1(1.0)에서 rubric/judgment/cross_reviews/chair_summary/criterion_owner 점수모델/penalties 흡수, media_script 유지. 개정 배경: review_output.v2.proposal.md",
+  "$comment": "v2.1.0 (팀 승인·적용). v2.0.0에서 선택 필드 similar_success_cases(RAG-006 유사사례, reference_only) 추가 + schema_version enum화(하위호환). 개정 배경: review_output.v2.1.proposal.md. v2.0.0 배경: review_output.v2.proposal.md",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -20,7 +20,7 @@
     "media_script"
   ],
   "properties": {
-    "schema_version": { "type": "string", "const": "2.0.0" },
+    "schema_version": { "type": "string", "enum": ["2.0.0", "2.1.0"] },
     "meta": { "$ref": "#/$defs/meta" },
     "meeting_id": { "type": "string", "minLength": 1 },
     "project_id": { "type": "string", "minLength": 1 },
@@ -41,6 +41,10 @@
     "top_revisions": { "type": "array", "maxItems": 5, "items": { "$ref": "#/$defs/revision" } },
     "evidence": { "type": "array", "items": { "$ref": "#/$defs/evidence" } },
     "media_script": { "type": "array", "items": { "$ref": "#/$defs/mediaLine" } },
+    "similar_success_cases": {
+      "type": ["object", "null"],
+      "$comment": "v2.1.0 신설(선택). RAG-006 유사 성공사례 검색 결과(용준 SimilarCaseSearchResponse.model_dump()). 평가 점수 근거가 아니라 비교·개선용 참고 자료(reference_only). 내부 구조는 ai/rag/similar_cases가 소유하며 회의 계약은 재검증하지 않는다(pass-through). RAG-006 미실행 시 null 또는 필드 생략."
+    },
     "error": { "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/error" }] }
   },
   "$defs": {

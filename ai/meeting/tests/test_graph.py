@@ -21,6 +21,7 @@ from graph import (  # noqa: E402
     build_rubric,
     initial_state,
     make_openai_llm_call,
+    rerun_reviewer,
     run_meeting,
 )
 from graph.transform import raw_chair_to_v2, raw_reviewer_to_v2  # noqa: E402
@@ -522,3 +523,68 @@ def test_meeting_graph_resumes_from_failed_chair_without_rerunning_reviewers():
     assert final["stage"] == "완료"
     assert final["chair_summary"]["chair_id"] == "review_chair"
     assert reviewer_calls["count"] == 2, "재개 시 위원 노드는 다시 실행되지 않아야 한다"
+
+
+# ---------------------------------------------------------------------------
+# 회귀 가드: LLM이 지어낸 persona_id를 믿지 않고 committee 키로 교정
+# (가은이 실제 OpenAI 호출로 발견한 버그 — assemble_document가 딕셔너리 값의
+#  persona_id가 아니라 키를 신뢰. 이 값이 틀리면 rerun_reviewer 필터가 깨져
+#  재평가마다 위원이 교체되지 않고 계속 추가된다.)
+# ---------------------------------------------------------------------------
+
+
+def test_document_uses_committee_key_even_if_llm_fabricates_persona_id():
+    mapping = json.loads(COMPETITION_MAPPING_PATH.read_text(encoding="utf-8"))
+    routing = build_routing(mapping)
+    criteria_by_id = {c["criterion_id"]: c for c in mapping["rubric"]}
+    owned = {r["primary"]: cid for cid, r in routing.items()}
+
+    # 각 위원 raw 의 persona_id 를 실제 committee id 와 다른 값으로 지어낸다.
+    raw_by_marker = {}
+    for i, (pid, cid) in enumerate(owned.items()):
+        persona_name = _COMPETITION_PERSONA_NAMES[pid]
+        raw = _make_raw_reviewer(
+            pid,
+            persona_name,
+            [{"criterion_id": cid, "criterion_name": criteria_by_id[cid]["criterion_name"], "max_score": criteria_by_id[cid]["max_score"]}],
+        )
+        raw["persona_id"] = f"LLM-FAKE-{i:02d}"  # LLM이 지어낸(신뢰 불가) 값
+        raw_by_marker[f"{persona_name}입니다"] = raw
+    raw_by_marker["위원장(review_chair)입니다"] = _RAW_CHAIR_FOR_RUN
+
+    document = run_meeting(
+        meeting_id="MTG-PID-001",
+        project_id="PRJ-PID-001",
+        document_id="DOC-PID-001",
+        title="persona_id 회귀 가드",
+        rubric_mapping=mapping,
+        submission={"document_name": "t.pdf", "text": "..."},
+        retrieved_evidence=[],
+        llm_call=_make_stub_llm(raw_by_marker),
+    )
+
+    result_ids = {r["persona_id"] for r in document["reviewer_results"]}
+    assert result_ids == set(mapping["committee"]), "reviewer_results persona_id는 실제 committee 키여야 한다"
+    assert not any(r["persona_id"].startswith("LLM-FAKE") for r in document["reviewer_results"])
+
+    # rerun_reviewer가 교정된 persona_id로 위원을 '교체'(추가 아님)하는지 — 위원 수 유지
+    target = "creativity_originality"
+    tcid = owned[target]
+    rerun_markers = {
+        f"{_COMPETITION_PERSONA_NAMES[target]}입니다": _make_raw_reviewer(
+            target,
+            _COMPETITION_PERSONA_NAMES[target],
+            [{"criterion_id": tcid, "criterion_name": criteria_by_id[tcid]["criterion_name"], "max_score": criteria_by_id[tcid]["max_score"]}],
+        ),
+        "위원장(review_chair)입니다": _RAW_CHAIR_FOR_RUN,
+    }
+    updated = rerun_reviewer(
+        previous_document=document,
+        persona_id=target,
+        rubric_mapping=mapping,
+        submission={"document_name": "t.pdf", "text": "..."},
+        retrieved_evidence=[],
+        llm_call=_make_stub_llm(rerun_markers),
+    )
+    assert len(updated["reviewer_results"]) == len(mapping["committee"]), "재평가로 위원이 늘어나면 안 된다"
+    assert {r["persona_id"] for r in updated["reviewer_results"]} == set(mapping["committee"])

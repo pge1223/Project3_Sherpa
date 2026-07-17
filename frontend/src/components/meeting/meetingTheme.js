@@ -35,3 +35,45 @@ const FALLBACK_JUDGMENT = { label: '미정', bg: '#eef1f4', color: '#7994ac' }
 export function judgmentBadge(judgment) {
   return JUDGMENT_CONFIG[judgment] ?? FALLBACK_JUDGMENT
 }
+
+// media_script(재인님 영상용 대사)가 있으면 그대로 회의 발언 순서로 쓰고,
+// 없으면 reviewer_results + chair_summary로 즉석에서 같은 형태를 만든다.
+// MeetingChat(채팅 로그)과 MeetingSimulationPage(영상 시뮬레이션)가 같은 발언 순서를
+// 공유해야 해서 여기(공통 파일)로 뺐다.
+export function buildTranscript(result) {
+  const chairLine = result.chair_summary
+    ? {
+        personaId: 'review_chair',
+        speakerName: '위원장',
+        role: null,
+        text: result.chair_summary.overall_assessment,
+        emotion: null,
+      }
+    : null
+
+  if (Array.isArray(result.media_script) && result.media_script.length > 0) {
+    const lines = [...result.media_script]
+      .sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
+      .map((line) => ({
+        personaId: line.speaker_id,
+        speakerName: line.speaker_name,
+        role: null,
+        text: line.text,
+        emotion: line.emotion,
+      }))
+    // media_script는 위원 발언 위주(영상 대본용)라 위원장 종합이 빠져 있을 수 있다 —
+    // "회의" 형태를 완성하려면 위원장 발언이 꼭 있어야 하므로 없으면 마지막에 보강한다.
+    const hasChairLine = lines.some((l) => l.personaId === 'review_chair')
+    return hasChairLine || !chairLine ? lines : [...lines, chairLine]
+  }
+
+  const reviewerLines = (result.reviewer_results || []).map((r) => ({
+    personaId: r.persona_id,
+    speakerName: r.persona_name,
+    role: r.role,
+    text: r.summary,
+    emotion: null,
+  }))
+
+  return chairLine ? [...reviewerLines, chairLine] : reviewerLines
+}
