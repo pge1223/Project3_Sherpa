@@ -41,6 +41,7 @@ class MeetingRepository:
         await collection.update_one(
             {"_id": ObjectId(meeting_doc_id)},
             {"$set": {**patch, "updated_at": datetime.utcnow()}},
+            
         )
     async def delete_by_id(self, meeting_id: str) -> bool:
         collection = self.get_collection()
