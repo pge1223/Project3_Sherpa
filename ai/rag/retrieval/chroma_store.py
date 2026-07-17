@@ -143,6 +143,16 @@ class ChromaVectorStore:
             self._collection.delete(ids=ids)
         return len(ids)
 
+    def delete_project(self, project_id: str) -> int:
+        """project_id 기준으로 프로젝트에 속한 모든 문서·청크를 삭제하고 삭제된 건수를
+        반환한다. document_id를 넘기지 않아 project_id만 일치하면 전부 대상이 된다
+        (delete_document와 동일하게, 삭제 전 대상 ID를 조회해 건수를 계산한 뒤 삭제한다).
+        대상이 없으면 예외 없이 0을 반환한다."""
+        ids = self._list_record_ids(project_id, None)
+        if ids:
+            self._collection.delete(ids=ids)
+        return len(ids)
+
     def search(
         self,
         query_embedding: list[float],
@@ -198,7 +208,7 @@ class ChromaVectorStore:
             return {"project_id": project_id}
         return {"$and": [{"project_id": project_id}, {"document_id": document_id}]}
 
-    def _list_record_ids(self, project_id: str, document_id: str) -> list[str]:
+    def _list_record_ids(self, project_id: str, document_id: Optional[str] = None) -> list[str]:
         where = self._build_where(project_id, document_id)
         result = self._collection.get(where=where, include=[])
         return list(result.get("ids", []))

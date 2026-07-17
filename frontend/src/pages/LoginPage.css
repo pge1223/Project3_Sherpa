@@ -19,9 +19,9 @@
   background: conic-gradient(
     from var(--login-glow-angle),
     transparent 0%,
-    rgba(122, 164, 255, 0.67) 10%,
-    rgba(184, 139, 255, 0.67) 22%,
-    rgba(122, 164, 255, 0.67) 34%,
+    rgba(124, 77, 255, 0.7) 10%,
+    rgba(184, 139, 255, 0.7) 22%,
+    rgba(124, 77, 255, 0.7) 34%,
     transparent 46%,
     transparent 100%
   );
@@ -38,7 +38,7 @@
   position: absolute;
   inset: 0;
   border-radius: 18px;
-  box-shadow: 0 0 27px rgba(120, 160, 255, 0.37), 0 0 8px rgba(184, 139, 255, 0.27);
+  box-shadow: 0 0 27px rgba(124, 77, 255, 0.37), 0 0 8px rgba(184, 139, 255, 0.3);
   pointer-events: none;
 }
 

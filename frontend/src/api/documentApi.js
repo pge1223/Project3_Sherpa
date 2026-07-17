@@ -24,6 +24,19 @@ export async function uploadDocument(projectId, file, sourceType = 'pdf', docume
   return data
 }
 
+// 가은/Claude(2026-07-16): StepSidebar에서 진행 중이던 프로젝트로 "이어서" 업로드 화면에
+// 돌아올 수 있게 하면서 필요해짐 — 이미 업로드된 문서 목록을 다시 불러와 화면에 채운다.
+export async function getDocuments(projectId) {
+  const res = await fetch(`${API_BASE_URL}/documents/${projectId}`, {
+    headers: { ...authHeaders() },
+  })
+  const data = await res.json()
+  if (!res.ok) {
+    throw new Error(data.detail || '문서 목록을 불러오지 못했습니다.')
+  }
+  return data
+}
+
 // projectId가 있어야 공고문이 RAG 색인까지 되고 documents 컬렉션에 저장된다(document_role: 'criteria').
 export async function fetchUrl(url, projectId) {
   const res = await fetch(`${API_BASE_URL}/documents/fetch-url`, {

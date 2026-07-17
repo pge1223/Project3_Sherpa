@@ -75,6 +75,43 @@
   - `ai/meeting/graph/reevaluate.py`/`test_reevaluate.py` 삭제 여부 경이와 정리
   - 실제 브라우저로 "분석 시작" → "위원 재평가" 버튼 클릭까지 e2e 확인(지금까지는 curl
     검증만 함)
+  - 재인님에게 `CommitteeVideoStage.jsx` 직접 수정 사실 전달(폴백 연출 추가, 영상 없는
+    위원 건너뛰지 않게 바꾼 것, `getAvailableSpeakers()` 실패 시 동작 변경) — 설계 의도랑
+    맞는지 확인 필요
+  - (Claude Code와 세션) `dev`를 `feature/pge`에 두 차례 더 최신화 —
+    PR #38(윤한, DOC-001~002 문서 업로드 API + openai 패키지), PR #39(오늘 위 작업이
+    합쳐진 우리 PR), PR #40(몽고DB 연결 수정), PR #41(재인, 위원 발언 영상(TTS+MuseTalk)
+    스트리밍을 실제 서비스에 연동 — `CommitteeVideoStage.jsx`, `backend/app/api/routes/
+    media.py`, `ai/media/*`). 충돌 2건 모두 순수 추가라 안전하게 해결:
+    - `frontend/src/pages/ProjectDetailPage.jsx` — 재인님의 `CommitteeVideoStage` import/
+      렌더 추가분 채택
+    - `backend/app/api/routes/meetings.py` — `media_script=[]`로 고정돼 있던 걸 재인님이
+      `document["media_script"]`(run.py가 실제로 채운 값)로 고친 것 채택
+  - 사용자 요청으로 "분석 시작" 옆에 회의를 영상 시뮬레이션으로 보는 화면(스샷 기반:
+    AI 회의 시뮬레이션 배지, 위원 2패널, "정적 이미지 대체" 폴백, 자막, 진행 체크리스트)을
+    만들다가, 재인님의 `CommitteeVideoStage.jsx`가 이미 `ProjectDetailPage.jsx`에
+    실제 영상(TTS+MuseTalk) 스트리밍으로 붙어있는 걸 발견 — **기능적 중복**(오늘 두 번째,
+    `run_meeting()` 때와 같은 패턴). 사용자와 논의 후 별도 페이지로 만들지 않고
+    **`CommitteeVideoStage.jsx`에 흡수**하기로 결정:
+    - 원래 아바타 영상이 준비 안 된 위원(`getAvailableSpeakers()`에 없는 speaker_id)은
+      건너뛰었는데, 이제 "정적 이미지 대체" 폴백 연출(마이크 펄스, 아바타 원,
+      "🔊 영상 생성 실패 · 음성으로 재생 중" 캡션)로 대체하고 텍스트 길이 기반 시간만큼
+      보여준 뒤 다음 순서로 진행하도록 수정 — 영상 있는 위원과 없는 위원이 한 시퀀스로
+      이어짐
+    - 자막 박스 + 전체 위원 진행 체크리스트(✓완료/진행 중/대기)를 스트리밍/폴백 여부와
+      무관하게 항상 표시하도록 추가
+    - `getAvailableSpeakers()` 조회 자체가 실패하는 경우도 원래는 대기 루프만 유지했는데,
+      이제 전체를 폴백으로 간주하고 계속 진행하도록 동작 변경
+    - 만들었던 `MeetingSimulationPage.jsx`/`/simulation` 라우트/"회의 시작" 버튼은
+      삭제(중복 제거) — `buildTranscript()`를 `meetingTheme.js` 공용 유틸로 뺀 것만 남음
+      (`MeetingChat.jsx`가 계속 사용)
+    - 빌드(`npm run build`) 통과 확인. 재인님 파일을 직접 고친 거라 전달 필요
+
+- 결정/이유: (추가)
+  - "회의를 본다"는 경험이 페이지 두 개(실제 영상 인라인 vs 별도 시뮬레이션 페이지)로
+    나뉘면 오히려 헷갈린다고 판단 — 사용자가 준 목업도 한 화면 안에서 위원별로
+    영상/폴백이 섞여 나오는 그림이었어서, 별도 페이지보다 기존 컴포넌트에 흡수하는 쪽을
+    선택함
 
 ## 2026-07-15
 

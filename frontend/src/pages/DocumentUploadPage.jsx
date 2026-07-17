@@ -1,20 +1,24 @@
-import { useRef, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useEffect, useRef, useState } from 'react'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import DocumentRow from '../components/upload/DocumentRow'
 import { isAcceptedDocument, formatFileSize, ACCEPTED_DOCUMENT_EXTENSIONS } from '../utils/file'
-import SpaceBackground from '../components/landing/SpaceBackground'
-import { createProject, analyzeProject } from '../api/projectApi'
-import { uploadDocument, fetchUrl } from '../api/documentApi'
+import { createProject, getProject } from '../api/projectApi'
+import { uploadDocument, fetchUrl, getDocuments } from '../api/documentApi'
+import { DOC_TYPE_OPTIONS } from '../utils/docType'
+import StepSidebar from '../components/wizard/StepSidebar'
 
-const DOC_TYPE_OPTIONS = [
-  { value: 'competition', label: '공모전' },
-  { value: 'government_support', label: '정부지원사업' },
-  { value: 'startup', label: '사업계획서(스타트업)' },
-]
+// 가은/Claude(2026-07-16): 백엔드 document.status -> 이 화면의 DocumentRow status로 매핑.
+// 인덱싱이 안 끝난 상태('uploaded')는 새로고침 시점엔 이미 끝나 있을 확률이 높지만,
+// 혹시 몰라 'embedding'으로 보수적으로 처리한다.
+function toRowStatus(backendStatus) {
+  if (backendStatus === 'indexed' || backendStatus === 'indexed_empty') return 'done'
+  if (backendStatus === 'indexing_failed' || backendStatus === 'conversion_failed') return 'error'
+  return 'embedding'
+}
 
 function UploadIcon() {
   return (
-    <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#5c86ac" strokeWidth="1.8">
+    <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#7c4dff" strokeWidth="1.8">
       <path d="M12 16V4M12 4 7 9M12 4l5 5" />
       <path d="M4 16v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3" />
     </svg>
@@ -23,6 +27,9 @@ function UploadIcon() {
 
 export default function DocumentUploadPage() {
   const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
+  const continuingProjectId = searchParams.get('projectId')
+
   const [criteriaTab, setCriteriaTab] = useState('url')
   const [criteriaUrl, setCriteriaUrl] = useState('')
   const [documents, setDocuments] = useState([])
@@ -31,14 +38,39 @@ export default function DocumentUploadPage() {
   const [fileError, setFileError] = useState('')
   const [title, setTitle] = useState('새 프로젝트')
   const [docType, setDocType] = useState(DOC_TYPE_OPTIONS[0].value)
-  const [projectId, setProjectId] = useState(null)
+  const [projectId, setProjectId] = useState(continuingProjectId)
   const [criteriaLoading, setCriteriaLoading] = useState(false)
   const [criteriaError, setCriteriaError] = useState('')
   const [analyzing, setAnalyzing] = useState(false)
   const [analyzeError, setAnalyzeError] = useState('')
+  const [loadingExisting, setLoadingExisting] = useState(!!continuingProjectId)
 
   const targetFileInputRef = useRef(null)
   const criteriaFileInputRef = useRef(null)
+
+  // 가은/Claude(2026-07-16): StepSidebar에서 "정보 입력/문서 첨부" 단계로 다시 들어올 때
+  // ?projectId=가 있으면(진행 중이던 프로젝트) 새로 만들지 않고 이어서 보여준다 — 제목/문서
+  // 유형/이미 업로드된 문서 목록을 그대로 불러온다.
+  useEffect(() => {
+    if (!continuingProjectId) return
+    Promise.all([getProject(continuingProjectId), getDocuments(continuingProjectId)])
+      .then(([project, docs]) => {
+        setTitle(project.title)
+        setDocType(project.doc_type)
+        setDocuments(
+          docs.map((d) => ({
+            id: d.id,
+            type: d.source_type === 'url' ? 'url' : 'file',
+            name: d.original_filename,
+            meta: formatFileSize(d.file_size),
+            status: toRowStatus(d.status),
+            progress: 100,
+          })),
+        )
+      })
+      .catch((err) => setAnalyzeError(err.message))
+      .finally(() => setLoadingExisting(false))
+  }, [continuingProjectId])
 
   async function ensureProject() {
     if (projectId) return projectId
@@ -63,7 +95,19 @@ export default function DocumentUploadPage() {
 
     try {
       const pid = await ensureProject()
-      await uploadDocument(pid, file, 'pdf', documentRole)
+      const doc = await uploadDocument(pid, file, 'pdf', documentRole)
+      // 가은/Claude(2026-07-16): HWP/HWPX 변환 실패(용준, ai/rag/converters)는 HTTP
+      // 200으로 응답이 오되 status="conversion_failed"로만 표시된다 — 예전엔 응답을
+      // 검사 안 하고 무조건 'done'으로 표시해서 변환 실패가 조용히 묻혔다.
+      // conversion_error(= DocumentConversionError.user_message)를 그대로 보여준다.
+      if (doc.status === 'conversion_failed') {
+        updateDoc(id, {
+          status: 'error',
+          progress: 100,
+          meta: doc.conversion_metadata?.conversion_error || '문서를 변환하지 못했습니다.',
+        })
+        return
+      }
       updateDoc(id, { status: 'done', progress: 100 })
     } catch (err) {
       updateDoc(id, { status: 'error', progress: 100, meta: err.message })
@@ -75,7 +119,7 @@ export default function DocumentUploadPage() {
     const accepted = files.filter(isAcceptedDocument)
     const rejected = files.length - accepted.length
 
-    setFileError(rejected > 0 ? `PDF, DOCX, PPTX 파일만 업로드할 수 있습니다.` : '')
+    setFileError(rejected > 0 ? `PDF, DOCX, PPTX, HWP, HWPX 파일만 업로드할 수 있습니다.` : '')
     if (accepted.length === 0) return
 
     accepted.forEach((file) => uploadOne(file, documentRole))
@@ -130,14 +174,16 @@ export default function DocumentUploadPage() {
   const targetDropHandlers = makeDropHandlers(setIsDragging, 'target')
   const criteriaDropHandlers = makeDropHandlers(setIsCriteriaDragging, 'criteria')
 
+  // 가은/Claude(2026-07-16): STEP3 "공모전 분석"(멘토 추천/선택) 화면을 새로 만들면서,
+  // "분석 시작"이 바로 실제 회의(/analyze, 1~2분 실제 OpenAI 호출)를 돌리는 대신 그 화면
+  // (MentorSelectionPage)으로 이동하도록 바꿨다. 실제 /analyze 호출은 거기서 멘토
+  // 2~4명을 고른 뒤 "멘토 선택하기"를 눌러야 시작된다.
   async function handleAnalyze() {
     setAnalyzeError('')
     setAnalyzing(true)
     try {
       const pid = await ensureProject()
-      const result = await analyzeProject(pid)
-      sessionStorage.setItem(`analysis:${pid}`, JSON.stringify(result))
-      navigate(`/projects/${pid}`)
+      navigate(`/projects/${pid}/analysis`)
     } catch (err) {
       setAnalyzeError(err.message)
     } finally {
@@ -147,259 +193,202 @@ export default function DocumentUploadPage() {
 
   return (
     <div style={styles.page}>
-      <SpaceBackground />
-      <div style={styles.pageInner}>
-        <img src="/images/logo4.png" alt="AI Review Board" style={styles.logo} />
+      <StepSidebar projectId={projectId} activeIndex={1} />
 
-        <button style={styles.backButton} onClick={() => navigate('/projects')}>
-          ← 뒤로
-        </button>
+      <main style={styles.main}>
+        <div style={styles.stepLabel}>STEP 2 / 7</div>
+        <h1 style={styles.title}>공모전 정보 입력 · 문서 첨부</h1>
+
+        {loadingExisting && <p style={styles.mutedNotice}>이전에 진행하던 프로젝트를 불러오는 중...</p>}
 
         <div style={styles.card}>
-        <div style={styles.header}>
-          <div style={{ flex: 1 }}>
-            <h1 style={styles.title}>문서 업로드</h1>
-            <div style={styles.titleRow}>
-              <input
-                type="text"
-                value={title}
-                onChange={(e) => setTitle(e.target.value)}
-                disabled={!!projectId}
-                style={styles.titleInput}
-                placeholder="프로젝트 제목"
-              />
-              <select
-                value={docType}
-                onChange={(e) => setDocType(e.target.value)}
-                disabled={!!projectId}
-                style={styles.docTypeSelect}
-              >
-                {DOC_TYPE_OPTIONS.map((opt) => (
-                  <option key={opt.value} value={opt.value}>
-                    {opt.label}
-                  </option>
-                ))}
-              </select>
-            </div>
-          </div>
-          <button style={styles.menuButton}>⋯</button>
-        </div>
-
-        <div style={styles.columns}>
-          <div
-            style={{ ...styles.dropzone, ...(isDragging ? styles.dropzoneDragging : {}) }}
-            {...targetDropHandlers}
-          >
-            <UploadIcon />
-            <div style={styles.dropzoneTitle}>{isDragging ? '여기에 놓으세요' : '평가 대상 문서'}</div>
-            <div style={styles.dropzoneHint}>PDF, DOCX, PPTX</div>
-            <button style={styles.selectButton} onClick={() => targetFileInputRef.current?.click()}>
-              파일 선택
-            </button>
+          <div style={styles.titleRow}>
             <input
-              ref={targetFileInputRef}
-              type="file"
-              accept={ACCEPTED_DOCUMENT_EXTENSIONS.join(',')}
-              multiple
-              style={styles.hiddenInput}
-              onChange={(e) => handleFileInputChange(e, 'target')}
+              type="text"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              disabled={!!projectId}
+              style={styles.titleInput}
+              placeholder="프로젝트 제목"
             />
+            <select
+              value={docType}
+              onChange={(e) => setDocType(e.target.value)}
+              disabled={!!projectId}
+              style={styles.docTypeSelect}
+            >
+              {DOC_TYPE_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
           </div>
 
-          <div style={styles.criteriaBox}>
-            <div style={styles.criteriaHeader}>
-              <span style={styles.criteriaTitle}>기준 문서 · 공고문</span>
-              <span style={styles.proposalBadge}>제안 · 협의 필요</span>
+          <div style={styles.columns}>
+            <div
+              style={{ ...styles.dropzone, ...(isDragging ? styles.dropzoneDragging : {}) }}
+              {...targetDropHandlers}
+            >
+              <UploadIcon />
+              <div style={styles.dropzoneTitle}>{isDragging ? '여기에 놓으세요' : '평가 대상 문서'}</div>
+              <div style={styles.dropzoneHint}>PDF, DOCX, PPTX, HWP, HWPX</div>
+              <button style={styles.selectButton} onClick={() => targetFileInputRef.current?.click()}>
+                파일 선택
+              </button>
+              <input
+                ref={targetFileInputRef}
+                type="file"
+                accept={ACCEPTED_DOCUMENT_EXTENSIONS.join(',')}
+                multiple
+                style={styles.hiddenInput}
+                onChange={(e) => handleFileInputChange(e, 'target')}
+              />
             </div>
 
-            <div style={styles.tabs}>
-              <button
-                style={{ ...styles.tab, ...(criteriaTab === 'file' ? styles.tabActive : {}) }}
-                onClick={() => setCriteriaTab('file')}
-              >
-                파일 업로드
-              </button>
-              <button
-                style={{ ...styles.tab, ...(criteriaTab === 'url' ? styles.tabActive : {}) }}
-                onClick={() => setCriteriaTab('url')}
-              >
-                URL 입력
-              </button>
-            </div>
-
-            {criteriaTab === 'url' ? (
-              <>
-                <div style={styles.urlRow}>
-                  <input
-                    type="text"
-                    value={criteriaUrl}
-                    onChange={(e) => setCriteriaUrl(e.target.value)}
-                    onKeyDown={(e) => e.key === 'Enter' && handleFetchCriteriaUrl()}
-                    placeholder="https://example.com/공고문"
-                    style={styles.urlInput}
-                    disabled={criteriaLoading}
-                  />
-                  <button style={styles.fetchButton} onClick={handleFetchCriteriaUrl} disabled={criteriaLoading}>
-                    {criteriaLoading ? '가져오는 중...' : '가져오기'}
-                  </button>
-                </div>
-                {criteriaError && <p style={styles.fileError}>{criteriaError}</p>}
-                <p style={styles.helperText}>공모전·정부지원사업 공고 페이지 링크를 붙여넣으세요</p>
-              </>
-            ) : (
-              <div
-                style={{
-                  ...styles.dropzone,
-                  ...styles.criteriaDropzone,
-                  ...(isCriteriaDragging ? styles.dropzoneDragging : {}),
-                }}
-                {...criteriaDropHandlers}
-              >
-                <div style={styles.criteriaDropzoneLeft}>
-                  <UploadIcon />
-                  <div>
-                    <div style={styles.criteriaDropzoneTitle}>
-                      {isCriteriaDragging ? '여기에 놓으세요' : '평가 기준 문서'}
-                    </div>
-                    <div style={styles.dropzoneHint}>PDF, DOCX, PPTX</div>
-                  </div>
-                </div>
-                <button
-                  style={{ ...styles.selectButton, marginTop: 0, flexShrink: 0 }}
-                  onClick={() => criteriaFileInputRef.current?.click()}
-                >
-                  파일 선택
-                </button>
-                <input
-                  ref={criteriaFileInputRef}
-                  type="file"
-                  accept={ACCEPTED_DOCUMENT_EXTENSIONS.join(',')}
-                  multiple
-                  style={styles.hiddenInput}
-                  onChange={(e) => handleFileInputChange(e, 'criteria')}
-                />
+            <div style={styles.criteriaBox}>
+              <div style={styles.criteriaHeader}>
+                <span style={styles.criteriaTitle}>기준 문서 · 공고문</span>
+                <span style={styles.proposalBadge}>제안 · 협의 필요</span>
               </div>
-            )}
+
+              <div style={styles.tabs}>
+                <button
+                  style={{ ...styles.tab, ...(criteriaTab === 'file' ? styles.tabActive : {}) }}
+                  onClick={() => setCriteriaTab('file')}
+                >
+                  파일 업로드
+                </button>
+                <button
+                  style={{ ...styles.tab, ...(criteriaTab === 'url' ? styles.tabActive : {}) }}
+                  onClick={() => setCriteriaTab('url')}
+                >
+                  URL 입력
+                </button>
+              </div>
+
+              {criteriaTab === 'url' ? (
+                <>
+                  <div style={styles.urlRow}>
+                    <input
+                      type="text"
+                      value={criteriaUrl}
+                      onChange={(e) => setCriteriaUrl(e.target.value)}
+                      onKeyDown={(e) => e.key === 'Enter' && handleFetchCriteriaUrl()}
+                      placeholder="https://example.com/공고문"
+                      style={styles.urlInput}
+                      disabled={criteriaLoading}
+                    />
+                    <button style={styles.fetchButton} onClick={handleFetchCriteriaUrl} disabled={criteriaLoading}>
+                      {criteriaLoading ? '가져오는 중...' : '가져오기'}
+                    </button>
+                  </div>
+                  {criteriaError && <p style={styles.fileError}>{criteriaError}</p>}
+                  <p style={styles.helperText}>공모전·정부지원사업 공고 페이지 링크를 붙여넣으세요</p>
+                </>
+              ) : (
+                <div
+                  style={{
+                    ...styles.dropzone,
+                    ...styles.criteriaDropzone,
+                    ...(isCriteriaDragging ? styles.dropzoneDragging : {}),
+                  }}
+                  {...criteriaDropHandlers}
+                >
+                  <div style={styles.criteriaDropzoneLeft}>
+                    <UploadIcon />
+                    <div>
+                      <div style={styles.criteriaDropzoneTitle}>
+                        {isCriteriaDragging ? '여기에 놓으세요' : '평가 기준 문서'}
+                      </div>
+                      <div style={styles.dropzoneHint}>PDF, DOCX, PPTX, HWP, HWPX</div>
+                    </div>
+                  </div>
+                  <button
+                    style={{ ...styles.selectButton, marginTop: 0, flexShrink: 0 }}
+                    onClick={() => criteriaFileInputRef.current?.click()}
+                  >
+                    파일 선택
+                  </button>
+                  <input
+                    ref={criteriaFileInputRef}
+                    type="file"
+                    accept={ACCEPTED_DOCUMENT_EXTENSIONS.join(',')}
+                    multiple
+                    style={styles.hiddenInput}
+                    onChange={(e) => handleFileInputChange(e, 'criteria')}
+                  />
+                </div>
+              )}
+            </div>
+          </div>
+
+          {fileError && <p style={styles.fileError}>{fileError}</p>}
+
+          <div style={styles.uploadedHeader}>업로드된 문서</div>
+          <div style={styles.uploadedList}>
+            {documents.map((doc, i) => (
+              <div key={doc.id}>
+                <DocumentRow document={doc} />
+                {i < documents.length - 1 && <div style={styles.rowDivider} />}
+              </div>
+            ))}
+          </div>
+
+          {analyzeError && <p style={styles.fileError}>{analyzeError}</p>}
+          <div style={styles.analyzeRow}>
+            <button style={styles.analyzeButton} onClick={handleAnalyze} disabled={analyzing}>
+              {analyzing ? '분석 중...' : '분석 시작'}
+            </button>
           </div>
         </div>
-
-        {fileError && <p style={styles.fileError}>{fileError}</p>}
-
-        <div style={styles.uploadedHeader}>업로드된 문서</div>
-        <div style={styles.uploadedList}>
-          {documents.map((doc, i) => (
-            <div key={doc.id}>
-              <DocumentRow document={doc} />
-              {i < documents.length - 1 && <div style={styles.rowDivider} />}
-            </div>
-          ))}
-        </div>
-
-        {analyzeError && <p style={styles.fileError}>{analyzeError}</p>}
-        <div style={styles.analyzeRow}>
-          <button style={styles.analyzeButton} onClick={handleAnalyze} disabled={analyzing}>
-            {analyzing ? '분석 중...' : '분석 시작'}
-          </button>
-        </div>
-        </div>
-      </div>
+      </main>
     </div>
   )
 }
 
+const ACCENT = '#7c4dff'
+
 const styles = {
   page: {
-    position: 'relative',
-    zIndex: 1,
     minHeight: '100vh',
-    padding: '48px 24px',
-    display: 'flex',
-    justifyContent: 'center',
+    display: 'grid',
+    gridTemplateColumns: '260px 1fr',
+    background: '#f7f7fb',
+    color: '#1f2333',
   },
-  pageInner: {
-    position: 'relative',
-    zIndex: 2,
-    width: '100%',
-    maxWidth: 760,
-  },
-  logo: {
-    display: 'block',
-    width: 240,
-    height: 'auto',
-    margin: '0 auto 20px',
-  },
-  backButton: {
-    display: 'inline-flex',
-    alignItems: 'center',
-    gap: 6,
-    padding: '8px 4px',
-    marginBottom: 12,
-    border: 'none',
-    background: 'transparent',
-    color: '#cdd9f7',
-    fontSize: 14,
-    fontWeight: 600,
-    cursor: 'pointer',
-  },
+  main: { padding: '24px 32px', maxWidth: 760, overflowY: 'auto' },
+  stepLabel: { fontSize: 12, fontWeight: 700, color: ACCENT, letterSpacing: 0.5 },
+  title: { fontSize: 22, fontWeight: 700, margin: '4px 0 20px' },
+  mutedNotice: { margin: '0 0 16px', fontSize: 13, color: '#8b8fa3' },
   card: {
-    width: '100%',
     background: '#fff',
-    border: '1px solid #d9e8f5',
-    borderRadius: 16,
-    boxShadow: '0 8px 24px rgba(43, 111, 178, 0.10)',
-    padding: 28,
-    height: 'fit-content',
-  },
-  header: {
-    display: 'flex',
-    alignItems: 'flex-start',
-    justifyContent: 'space-between',
-  },
-  title: {
-    margin: 0,
-    fontSize: 20,
-    fontWeight: 700,
-    color: '#1a3a5c',
-  },
-  subtitle: {
-    margin: '4px 0 0',
-    fontSize: 13,
-    color: '#7994ac',
+    border: '1px solid #ece9f7',
+    borderRadius: 14,
+    padding: 24,
   },
   titleRow: {
     display: 'flex',
     gap: 8,
-    marginTop: 8,
   },
   titleInput: {
     flex: 1,
     padding: '8px 10px',
     fontSize: 13,
-    border: '1px solid #cfe0f0',
+    border: '1px solid #ded9f2',
     borderRadius: 8,
     outline: 'none',
-    background: '#f8fbfe',
-    color: '#17324a',
+    background: '#faf9ff',
+    color: '#1f2333',
   },
   docTypeSelect: {
     padding: '8px 10px',
     fontSize: 13,
-    border: '1px solid #cfe0f0',
+    border: '1px solid #ded9f2',
     borderRadius: 8,
     outline: 'none',
-    background: '#f8fbfe',
-    color: '#17324a',
-  },
-  menuButton: {
-    width: 32,
-    height: 32,
-    borderRadius: '50%',
-    border: '1px solid #d9e8f5',
-    background: '#f5faff',
-    color: '#5c86ac',
-    fontSize: 16,
-    lineHeight: 1,
-    cursor: 'pointer',
+    background: '#faf9ff',
+    color: '#1f2333',
   },
   columns: {
     display: 'grid',
@@ -410,9 +399,9 @@ const styles = {
   dropzone: {
     borderWidth: 1.5,
     borderStyle: 'dashed',
-    borderColor: '#b8d3ea',
+    borderColor: '#cfc7ef',
     borderRadius: 12,
-    background: '#f5faff',
+    background: '#faf9ff',
     padding: '32px 16px',
     display: 'flex',
     flexDirection: 'column',
@@ -422,8 +411,8 @@ const styles = {
     transition: 'border-color 0.15s, background 0.15s',
   },
   dropzoneDragging: {
-    borderColor: '#2f7fd1',
-    background: '#e7f2fc',
+    borderColor: ACCENT,
+    background: `${ACCENT}11`,
   },
   criteriaDropzone: {
     marginTop: 14,
@@ -440,24 +429,24 @@ const styles = {
   criteriaDropzoneTitle: {
     fontSize: 15,
     fontWeight: 700,
-    color: '#17324a',
+    color: '#1f2333',
   },
   dropzoneTitle: {
     fontSize: 15,
     fontWeight: 700,
-    color: '#17324a',
+    color: '#1f2333',
     marginTop: 4,
   },
   dropzoneHint: {
     fontSize: 12,
-    color: '#7994ac',
+    color: '#8b8fa3',
   },
   selectButton: {
     marginTop: 8,
     padding: '8px 18px',
     borderRadius: 999,
     border: 'none',
-    background: '#2f7fd1',
+    background: ACCENT,
     color: '#fff',
     fontSize: 13,
     fontWeight: 600,
@@ -467,7 +456,7 @@ const styles = {
     display: 'none',
   },
   criteriaBox: {
-    border: '1px solid #d9e8f5',
+    border: '1px solid #ece9f7',
     borderRadius: 12,
     padding: 16,
   },
@@ -479,7 +468,7 @@ const styles = {
   criteriaTitle: {
     fontSize: 14,
     fontWeight: 700,
-    color: '#17324a',
+    color: '#1f2333',
   },
   proposalBadge: {
     fontSize: 11,
@@ -492,7 +481,7 @@ const styles = {
   tabs: {
     display: 'flex',
     gap: 4,
-    background: '#eef5fb',
+    background: '#f0eefc',
     borderRadius: 999,
     padding: 4,
     marginTop: 14,
@@ -503,15 +492,15 @@ const styles = {
     borderRadius: 999,
     border: 'none',
     background: 'transparent',
-    color: '#7994ac',
+    color: '#8b8fa3',
     fontSize: 13,
     fontWeight: 600,
     cursor: 'pointer',
   },
   tabActive: {
     background: '#fff',
-    color: '#17324a',
-    boxShadow: '0 1px 4px rgba(43, 111, 178, 0.15)',
+    color: ACCENT,
+    boxShadow: '0 1px 4px rgba(124, 77, 255, 0.15)',
   },
   urlRow: {
     display: 'flex',
@@ -522,18 +511,18 @@ const styles = {
     flex: 1,
     padding: '10px 12px',
     fontSize: 13,
-    border: '1px solid #cfe0f0',
+    border: '1px solid #ded9f2',
     borderRadius: 8,
     outline: 'none',
-    background: '#f8fbfe',
-    color: '#17324a',
+    background: '#faf9ff',
+    color: '#1f2333',
     minWidth: 0,
   },
   fetchButton: {
     padding: '0 16px',
     borderRadius: 8,
     border: 'none',
-    background: '#2f7fd1',
+    background: ACCENT,
     color: '#fff',
     fontSize: 13,
     fontWeight: 600,
@@ -542,7 +531,7 @@ const styles = {
   helperText: {
     margin: '10px 0 0',
     fontSize: 12,
-    color: '#94a9bd',
+    color: '#a1a5b8',
   },
   fileError: {
     margin: '16px 0 0',
@@ -552,17 +541,17 @@ const styles = {
   uploadedHeader: {
     fontSize: 13,
     fontWeight: 700,
-    color: '#17324a',
+    color: '#1f2333',
     marginTop: 28,
     marginBottom: 8,
   },
   uploadedList: {
-    border: '1px solid #e2edf7',
+    border: '1px solid #ece9f7',
     borderRadius: 12,
     padding: '4px 12px',
   },
   rowDivider: {
-    borderTop: '1px solid #eef5fb',
+    borderTop: '1px solid #f2f1f8',
   },
   analyzeRow: {
     display: 'flex',
@@ -573,7 +562,7 @@ const styles = {
     padding: '12px 40px',
     borderRadius: 999,
     border: 'none',
-    background: '#e0413a',
+    background: ACCENT,
     color: '#fff',
     fontSize: 15,
     fontWeight: 700,
