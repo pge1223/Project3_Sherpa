@@ -16,10 +16,13 @@ from app.api.routes.projects import router as project_router
 from app.api.routes.documents import router as document_router
 from app.api.routes.meetings import router as meeting_router
 from app.api.routes.media import router as media_router  # 재인/Claude (2026-07-16): 위원 발언 영상 스트리밍 중계 (app/api/routes/media.py)
+from app.core.logger import logger
 app = FastAPI(
     title="AI Review Board API",
     description="RAG 기반 AI 심사위원회 시스템",
     version="0.1.0",
+    docs_url=None,
+    redoc_url=None,
 )
 
 app.add_middleware(
@@ -38,11 +41,13 @@ app.include_router(media_router)  # 재인/Claude (2026-07-16): /media/available
 @app.on_event("startup")
 async def startup():
     await connect_db()
+    logger.info("AI Review Board API 서버 시작")
 
 
 @app.on_event("shutdown")
 async def shutdown():
     await close_db()
+    logger.info("AI Review Board API 서버 종료")
 
 
 @app.get("/")

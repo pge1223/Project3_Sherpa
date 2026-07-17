@@ -30,6 +30,7 @@ from ai.rag.embedding.config import EMBEDDING_VERSION
 import chromadb
 
 from app.common.exceptions import BadRequestException, InternalServerException
+from app.repositories.project_repository import ProjectRepository
 from app.config import settings
 from app.models.document import DocumentModel
 from app.repositories.document_repository import DocumentRepository
@@ -39,6 +40,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 document_repo = DocumentRepository()
+project_repo = ProjectRepository()
 
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -131,6 +133,13 @@ def get_current_user(authorization: Optional[str]) -> str:
         raise HTTPException(status_code=401, detail="유효하지 않은 토큰입니다")
 
 
+async def verify_project_owner(project_id: str, user_email: str):
+    project = await project_repo.find_by_id_and_user(project_id, user_email)
+    if not project:
+        raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없습니다")
+    return project
+
+
 def _apply_cleaning(page_content: WebPageContent) -> tuple[WebPageContent, CleanedWebContent]:
     """clean_page_content()는 CleanedWebContent(title/fetched_at/encoding 없음)를 반환하므로,
     원본 WebPageContent의 title/fetched_at/encoding/is_js_rendered_suspected는 그대로 두고
@@ -221,6 +230,7 @@ async def upload_document(
     authorization: Optional[str] = Header(None, alias="authorization"),
 ):
     user_email = get_current_user(authorization)
+    await verify_project_owner(project_id, user_email)
 
     stored_filename = f"{uuid.uuid4()}_{file.filename}"
     file_path = os.path.join(UPLOAD_DIR, stored_filename)
@@ -281,6 +291,7 @@ async def get_documents(
     authorization: Optional[str] = Header(None, alias="authorization"),
 ):
     user_email = get_current_user(authorization)
+    await verify_project_owner(project_id, user_email)
     documents = await document_repo.find_by_project_id(project_id)
 
     return [
