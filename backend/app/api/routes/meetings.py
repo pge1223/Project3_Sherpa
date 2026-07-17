@@ -93,6 +93,7 @@ analyze_project()가 이 함수 하나만 호출하면 되도록 만들었다"�
   이 필드 추가 전에 저장된 기존 meetings 레코드로 재평가를 시도하면 KeyError 위험 있음.
 """
 import asyncio
+import io
 import json
 import logging
 import sys
@@ -100,8 +101,11 @@ import time
 import uuid
 from pathlib import Path
 from typing import Optional
+from urllib.parse import quote
+from xml.sax.saxutils import escape as _xml_escape
 
 from fastapi import APIRouter, Header, HTTPException
+from fastapi.responses import StreamingResponse
 from jose import jwt, JWTError
 from openai import OpenAI
 from starlette.concurrency import run_in_threadpool
@@ -974,6 +978,130 @@ async def get_project_report(
         "evidence": meeting.get("evidence"),
         "created_at": meeting.get("created_at"),
     }
+
+
+# Claude(2026-07-17): RPT-005 PDF 렌더링. reportlab의 Paragraph는 텍스트를 간이 XML로
+# 파싱하므로, LLM/사용자 원문에 "<"/"&" 등이 그대로 들어가면 파싱이 깨진다 — 표시 전
+# 항상 xml.sax.saxutils.escape()로 이스케이프한다. Helvetica 등 reportlab 기본 폰트는
+# 한글 글리프가 없어 그대로 쓰면 빈 사각형만 나온다 — CID 폰트(HYSMyeongJo-Medium,
+# Adobe-Korea1)를 등록해 폰트 파일 임베딩 없이 한글을 그린다(reportlab 표준 방식).
+_PDF_FONT = "HYSMyeongJo-Medium"
+
+
+def _register_pdf_font() -> str:
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+
+    if _PDF_FONT not in pdfmetrics.getRegisteredFontNames():
+        pdfmetrics.registerFont(UnicodeCIDFont(_PDF_FONT))
+    return _PDF_FONT
+
+
+def _build_report_pdf(project: dict, meeting: dict) -> bytes:
+    """RPT-005: project title + score_result + chair_summary + top_revisions를 담은
+    평가 결과 PDF를 만든다. CPU-bound(폰트/레이아웃 계산)라 호출부에서 threadpool로
+    감싸 실행한다."""
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.units import mm
+    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+
+    font_name = _register_pdf_font()
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle("KTitle", parent=styles["Title"], fontName=font_name)
+    heading_style = ParagraphStyle("KHeading", parent=styles["Heading2"], fontName=font_name)
+    body_style = ParagraphStyle("KBody", parent=styles["BodyText"], fontName=font_name, leading=16)
+
+    project_title = project.get("title") or "제목 없음"
+
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=A4, title=project_title)
+    story: list = [Paragraph(_xml_escape(project_title), title_style), Spacer(1, 8 * mm)]
+
+    score_result = meeting.get("score_result") or {}
+    if score_result:
+        story.append(
+            Paragraph(
+                f'총점: {score_result.get("total_score")} / {score_result.get("max_score")}', heading_style
+            )
+        )
+        criterion_names = {
+            c["criterion_id"]: c["criterion_name"] for c in (meeting.get("rubric") or {}).get("criteria", [])
+        }
+        rows = [["평가 기준", "점수", "만점"]]
+        for b in score_result.get("breakdown") or []:
+            criterion_id = b.get("criterion_id")
+            rows.append(
+                [
+                    _xml_escape(criterion_names.get(criterion_id, criterion_id or "")),
+                    str(b.get("raw_score")),
+                    str(b.get("max_score")),
+                ]
+            )
+        table = Table(rows, colWidths=[100 * mm, 30 * mm, 30 * mm])
+        table.setStyle(
+            TableStyle(
+                [
+                    ("FONTNAME", (0, 0), (-1, -1), font_name),
+                    ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.whitesmoke),
+                ]
+            )
+        )
+        story.append(Spacer(1, 4 * mm))
+        story.append(table)
+        story.append(Spacer(1, 8 * mm))
+
+    chair_summary = meeting.get("chair_summary") or {}
+    if chair_summary.get("overall_assessment"):
+        story.append(Paragraph("위원장 종합", heading_style))
+        story.append(Paragraph(_xml_escape(chair_summary["overall_assessment"]), body_style))
+        story.append(Spacer(1, 8 * mm))
+
+    top_revisions = meeting.get("top_revisions") or []
+    if top_revisions:
+        story.append(Paragraph("수정 우선순위", heading_style))
+        for rev in sorted(top_revisions, key=lambda r: r.get("priority") or 0):
+            line = f'{rev.get("priority")}. {rev.get("title") or ""} — {rev.get("action") or ""}'
+            story.append(Paragraph(_xml_escape(line), body_style))
+        story.append(Spacer(1, 4 * mm))
+
+    doc.build(story)
+    return buffer.getvalue()
+
+
+# RPT-005: 평가 결과 PDF 내보내기. RPT-001(get_project_report)과 같은 자리에 두되,
+# 소유권 확인은 project_repo.find_by_id_and_user()로 한다 — documents.py의
+# verify_project_owner()와 동일한 방식으로, 다운로드는 실제 파일이 응답에 실려 나가는
+# 만큼 다른 사용자의 프로젝트 문서/식별정보 조회보다 소유권 확인을 더 엄격히 해야 한다는
+# 요청에 따름(RPT-001은 project_repo.find_by_id()만 쓰던 것과 다르다).
+@router.get("/{project_id}/report/export")
+async def export_project_report(
+    project_id: str,
+    authorization: Optional[str] = Header(None, alias="authorization"),
+):
+    user_email = get_current_user(authorization)
+
+    project = await project_repo.find_by_id_and_user(project_id, user_email)
+    if project is None:
+        raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없습니다.")
+
+    meeting = await meeting_repo.find_latest_by_project_id(project_id)
+    if meeting is None:
+        raise HTTPException(status_code=404, detail="회의 결과가 없습니다. 먼저 분석을 시작하세요.")
+
+    pdf_bytes = await run_in_threadpool(_build_report_pdf, project, meeting)
+
+    filename = f'{project.get("title") or project_id}_report.pdf'
+    # 한글 파일명은 RFC 6266 filename*(UTF-8 percent-encoding)로 넘긴다 — 그냥
+    # filename="..."에 non-ASCII를 넣으면 브라우저별로 헤더 파싱이 깨질 수 있다.
+    content_disposition = f"attachment; filename*=UTF-8''{quote(filename)}"
+    return StreamingResponse(
+        io.BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={"Content-Disposition": content_disposition},
+    )
 
 
 @router.post("/{project_id}/ask", response_model=AskQuestionResponse)
