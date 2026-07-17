@@ -23,13 +23,17 @@
    막힌다. competition/government_support만 됨(우선순위도 competition이 1순위로 정해짐).
 4. submission은 document_role="target"인 첫 문서의 parsed_text를 쓴다(문서가 여러 개면
    첫 번째만 — 여러 문서를 어떻게 합칠지는 정해진 바 없어서 협의 필요).
-5. retrieved_evidence는 rubric 각 기준의 criterion_name으로 RAGIndexingService.search()를
-   돌려 모은 것이다(documents.py의 기존 인스턴스를 그대로 재사용 — KUREEmbedder를 두 번
-   로딩하지 않기 위해). ai/rag/role_retrieval(역할 기반 재정렬)은 이번엔 안 썼다 — M4
-   그래프가 애초에 위원 전체에게 같은 evidence 리스트를 통째로 넘기도록 설계돼 있어서
-   (reviewer_prompt.txt가 "본인 전문 범위만 상세히 검토"를 프롬프트 레벨에서 지시함),
-   지금 구조에 맞지 않는다. 위원별로 다른 검색 결과를 주고 싶다면 이건 경이의 그래프
-   설계를 바꿔야 하는 별도 논의가 필요하다.
+5. [2026-07-17 갱신] evidence_context/evidence_callback은 MeetingEvidenceOrchestrationService
+   (ai/rag/orchestration, RAG-003 RoleAwareRetrievalService·RAG-004 EvidenceLinkingService·
+   RAG-005 EvidenceSufficiencyService 조립, README.md 참고)가 만든다 — persona_id마다
+   role_mapping.py의 role_id로 검색하고(위원별로 다른 검색 결과), 위원 의견 생성 후
+   evidence_callback으로 근거 연결·근거충족도 게이팅까지 붙인다. retrieved_evidence(flat)는
+   evidence_context를 chunk_id 기준으로 평탄화한 값으로, run_meeting() 자체엔 안전망
+   fallback일 뿐이고 MeetingModel 저장/MTG-007 rerun_reviewer()/ask_committee()가 쓰는
+   레거시 flat 경로용이다(_flatten_evidence_context()). role_retrieval_service는
+   documents.py의 기존 RAGIndexingService 인스턴스를 재사용한다(KUREEmbedder 중복 로딩
+   방지). **domain="government_support"는 role_mapping.py 매핑이 없어 500으로 막힌다**
+   (아래 [아직 협의가 필요한 것] 참고).
 6. llm_call은 실제 OpenAI 호출이다(_build_real_llm_call). LLM_PROFILE=dev가 기본값이라
    gpt-5-nano로 도는데, 값을 quality로 바꾸면 gpt-5-mini로 바뀐다(backend/.env). 호출
    상한(_MAX_LLM_CALLS_PER_MEETING)과 recursion_limit을 걸어 루프/재시도 폭주를 막았다
@@ -41,8 +45,13 @@
 [아직 협의가 필요한 것 — 정리]
 - rubric_mapping_startup.json이 없음 (담당: 가은/경이, PER-002 확장 필요)
 - submission이 여러 target 문서를 어떻게 합칠지 (지금은 첫 문서만 사용)
-- retrieved_evidence를 위원별로 다르게 줄지(ai/rag/role_retrieval 활용) — 그러려면
-  LangGraph reviewer 노드가 개별 evidence를 받도록 경이의 그래프 구조 변경이 필요
+- [2026-07-17 해결] retrieved_evidence를 위원별로 다르게 줄지 — MeetingEvidenceOrchestrationService
+  (ai/rag/orchestration, RAG-003·004·005) + run_meeting()의 evidence_context/evidence_callback
+  연동으로 해결됨(아래 analyze_project() 실제 흐름 5번 참고). 단, domain="government_support"는
+  role_mapping.py에 persona_id -> role_id 매핑이 없어(policy_fit/budget_execution 미확정)
+  analyze_project() 호출 시 PersonaRoleMappingError(500)로 막힌다 — 이전엔 role_id=None
+  semantic-only 검색으로 동작했던 것과 달라진 점. 매핑 확정(용준)/RoleMappingConfig
+  완화 여부는 team 확인 필요, 지금은 competition만 실질적으로 동작.
 - 응답 시간: committee 인원만큼 실제 OpenAI 호출이 들어가 수십 초~분 단위가 걸린다
   (이 세션 e2e 테스트 실측 3~4분/5회 호출). 지금은 동기 HTTP POST라 그대로 끝날 때까지
   프론트가 기다린다 — 백그라운드 처리(polling/SSE)로 바꿀지는 윤한과 인프라(INF-007)
@@ -100,6 +109,10 @@ from starlette.concurrency import run_in_threadpool
 import chromadb
 
 from ai.rag.embedding.kure_embedder import KUREEmbedder
+from ai.rag.evidence_linking.service import EvidenceLinkingService
+from ai.rag.evidence_sufficiency.service import EvidenceSufficiencyService
+from ai.rag.orchestration import MeetingEvidenceOrchestrationService
+from ai.rag.role_retrieval.service import RoleAwareRetrievalService
 from ai.rag.similar_cases import (
     SimilarCaseConfig,
     SimilarCaseRepository,
@@ -164,6 +177,17 @@ _MAX_LLM_CALLS_PER_MEETING = 10
 # 폭주하는 건 _MAX_LLM_CALLS_PER_MEETING이 llm_call 쪽에서 여전히 막아주지만, 필요하면
 # run_meeting()/rerun_reviewer()에 config를 받는 파라미터를 추가하는 걸 경이와 논의 필요.
 _RECURSION_LIMIT = 12
+
+# RAG-003/004/005: MeetingEvidenceOrchestrationService가 조립하는 하위 서비스(상태 없음,
+# 앱 시작 시 1회 초기화 — ai/rag/orchestration/README.md 2절). documents.py의 기존
+# RAGIndexingService 인스턴스를 그대로 주입해 KUREEmbedder를 두 번 로딩하지 않는다(RAG-006과
+# 동일 패턴). MeetingEvidenceOrchestrationService 자체는 검색 결과 캐시를 들고 있어 회의
+# 1회(요청 1건)마다 새로 만들어야 하므로 여기서 만들지 않는다(analyze_project() 참고).
+from app.api.routes.documents import _get_indexing_service  # noqa: E402
+
+_role_retrieval_service = RoleAwareRetrievalService(retrieval_service=_get_indexing_service())
+_evidence_linking_service = EvidenceLinkingService()
+_evidence_sufficiency_service = EvidenceSufficiencyService()
 
 # RAG-006: similar_success_cases 검색 서비스 (앱 시작 시 1회 초기화)
 _similar_case_config = SimilarCaseConfig()
@@ -277,40 +301,26 @@ def _load_rubric_mapping(domain: str) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-# 가은/Claude(2026-07-17): 위원별 역할 기반 검색(RAG-003, ai/rag/role_retrieval) 도입
-# 1단계 — "구체적인 제안"의 3단계 중 2번(검색 호출 변경)만 지금 하고, 1번(persona_id ↔
-# role_id 매핑, 용준님 상의 필요)과 3번(위원별로 다른 evidence를 그래프에 넘기기, 경이님
-# 상의 필요)은 팀 채널 공유 문서로만 남겨둔다(pge-devlog.md 참고). 그래서 지금은 모든
-# 호출에 role_id=None을 쓴다 — RoleAwareRetrievalService.search_by_role()은 role_id가
-# 없으면 build_expanded_query()가 질의를 그대로 반환하고 rerank_by_role()의 role_score도
-# 항상 0이라(ai/rag/role_retrieval/reranker.py), semantic_score만으로 순위를 매기던
-# 기존 RAGIndexingService.search() 결과와 동일하다 — 즉 지금 당장은 동작 변화가 없는
-# "배선 교체"다. role_id 매핑이 정해지면 이 함수(또는 이 함수를 호출하는 쪽)에 role_id만
-# 넘기면 바로 위원별 역할 검색이 켜지도록 미리 갈아끼워 둔 것.
-def _search_evidence_for_rubric(project_id: str, rubric: dict, top_k: int = 3) -> list[dict]:
-    """rubric 기준별로 RoleAwareRetrievalService.search_by_role()을 돌려 근거를 모은다.
-    documents.py의 기존 RAGIndexingService 인스턴스를 그대로 주입한다(KUREEmbedder 중복
-    로딩 방지)."""
-    from app.api.routes.documents import _get_indexing_service
-    from ai.rag.role_retrieval.service import RoleAwareRetrievalService
-
-    role_service = RoleAwareRetrievalService(_get_indexing_service())
+# 가은/Claude(2026-07-17): 위원별 역할 기반 검색 "배선 교체"(위 이전 버전 주석 참고)를
+# RAG-003/004/005 정식 연동으로 교체한다 — MeetingEvidenceOrchestrationService
+# (ai/rag/orchestration, README.md 2절 호출 예시 그대로)가 persona_id -> role_id 매핑
+# (role_mapping.py, 용준 확정)까지 포함해 evidence_context/evidence_callback을 만들어주므로,
+# 여기서 role_id=None을 직접 넘기던 이 함수는 더 이상 필요 없다.
+#
+# 다만 MeetingModel.retrieved_evidence(주석 참고 — MTG-007 rerun_reviewer()가 evidence_context를
+# 모르는 flat 레거시 경로만 지원해 이 필드를 그대로 요구함)와 ask_committee()의
+# _render_evidence_lines()는 여전히 flat list가 필요하다. evidence_context를 chunk_id
+# 기준으로 평탄화해 채워준다 — reviewer 노드(ai/meeting/graph/nodes/reviewer.py)는
+# evidence_context가 있는 위원에겐 이 flat 값을 쓰지 않고(하위호환 fallback 경로만 참조),
+# evidence_context가 비어 있는 위원에게만 안전망으로 쓰인다.
+def _flatten_evidence_context(evidence_context: list[dict]) -> list[dict]:
     evidence_by_chunk: dict[str, dict] = {}
-    for criterion in rubric["criteria"]:
-        response = role_service.search_by_role(
-            query=criterion["criterion_name"], project_id=project_id, role_id=None, top_k=top_k
-        )
-        for r in response.results:
-            if r.chunk_id in evidence_by_chunk:
+    for entry in evidence_context:
+        for item in entry.get("retrieved_evidence") or []:
+            chunk_id = item.get("chunk_id")
+            if chunk_id is None or chunk_id in evidence_by_chunk:
                 continue
-            evidence_by_chunk[r.chunk_id] = {
-                "chunk_id": r.chunk_id,
-                "document_name": r.metadata.get("document_title") or r.metadata.get("source_filename"),
-                "page": r.metadata.get("location_number"),
-                "section": r.metadata.get("section_title"),
-                "text": r.content,
-                "score": r.final_score,
-            }
+            evidence_by_chunk[chunk_id] = item
     return list(evidence_by_chunk.values())
 
 
@@ -634,10 +644,38 @@ async def analyze_project(
         )
     effective_mapping = {**mapping, "committee": committee}
 
-    retrieved_evidence = _search_evidence_for_rubric(project_id, rubric)
-
     meeting_id = f"MTG-{project_id}-{uuid.uuid4().hex[:8]}"
     llm_call = _build_real_llm_call(meeting_id)
+
+    # RAG-003/004/005: MeetingEvidenceOrchestrationService는 검색 결과 캐시를 들고 있어
+    # 회의 1회(요청 1건)마다 새로 만들어야 한다(README.md "주의" — 재사용하면 다른 회의의
+    # 캐시가 섞인다). rubric_mapping은 committee로 필터링하기 전의 원본 mapping을 넘긴다 —
+    # iter_persona_criteria()는 rubric_mapping["rubric"]의 모든 criterion을 도므로
+    # committee 선택과 무관하다(이전 _search_evidence_for_rubric()도 build_rubric(mapping)의
+    # 전체 rubric 기준으로 검색했던 것과 동일한 범위).
+    #
+    # domain="government_support"는 role_mapping.py에 persona_id -> role_id 매핑이 아직
+    # 없어(role_mapping.py 주석 참고, 용준 확인 필요) prepare_meeting_evidence()가
+    # PersonaRoleMappingError를 던진다 — competition만 우선 지원되는 지금 상태를 그대로
+    # 유지한다(아래에서 잡지 않고 그대로 올려 500으로 드러나게 둔다. RoleMappingConfig로
+    # 조용히 완화하는 건 role_mapping.py 팀 정책이라 여기서 임의로 넣지 않는다).
+    evidence_service = MeetingEvidenceOrchestrationService(
+        role_retrieval_service=_role_retrieval_service,
+        evidence_linking_service=_evidence_linking_service,
+        evidence_sufficiency_service=_evidence_sufficiency_service,
+        top_k=5,
+    )
+    evidence_context = evidence_service.prepare_meeting_evidence(
+        project_id=project_id,
+        domain=domain,
+        rubric_mapping=mapping,
+        trace_id=meeting_id,
+    )
+    evidence_callback = evidence_service.create_evidence_callback(trace_id=meeting_id)
+    # MeetingModel.retrieved_evidence(MTG-007 rerun_reviewer()용 flat 레거시 포맷)와
+    # ask_committee()가 여전히 필요로 하는 flat 근거 — evidence_context를 chunk_id 기준으로
+    # 평탄화한다(_flatten_evidence_context() 위 주석 참고).
+    retrieved_evidence = _flatten_evidence_context(evidence_context)
 
     # RAG-006: 유사 성공 사례 검색
     try:
@@ -722,6 +760,8 @@ async def analyze_project(
             submission=submission,
             retrieved_evidence=retrieved_evidence,
             llm_call=llm_call,
+            evidence_context=evidence_context,
+            evidence_callback=evidence_callback,
             similar_success_cases=similar_success_cases,
             on_progress=on_progress,
         )
