@@ -270,19 +270,28 @@ async def upload_document(
     await verify_project_owner(project_id, user_email)
 
     # DOC-005: 업로드 파일 검증
-    ALLOWED_EXTENSIONS = {".pdf", ".docx", ".pptx"}
+    # HWP/HWPX는 ai/rag/converters(#45)가 내부적으로 PDF로 변환해 처리한다
+    # (ai/rag/converters/INTEGRATION.md 5번 참고) — 화이트리스트에도 포함해야 한다.
+    ALLOWED_EXTENSIONS = {".pdf", ".docx", ".pptx", ".hwp", ".hwpx"}
     ALLOWED_MIME_TYPES = {
         "application/pdf",
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "application/x-hwp",
+        "application/haansofthwp",
+        "application/vnd.hancom.hwp",
+        "application/haansofthwpx",
+        "application/vnd.hancom.hwpx",
     }
     MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
 
     file_ext = os.path.splitext(file.filename or "")[1].lower()
     if file_ext not in ALLOWED_EXTENSIONS:
-        raise BadRequestException(detail=f"지원하지 않는 파일 형식입니다. 허용: PDF, DOCX, PPTX")
+        raise BadRequestException(detail=f"지원하지 않는 파일 형식입니다. 허용: PDF, DOCX, PPTX, HWP, HWPX")
 
-    if file.content_type and file.content_type not in ALLOWED_MIME_TYPES:
+    # HWP/HWPX는 OS/브라우저에 등록된 표준 MIME이 없어 대부분 application/octet-stream으로
+    # 전송된다 — 확장자 화이트리스트를 이미 통과했으므로 이 두 확장자는 MIME 검사를 건너뛴다.
+    if file_ext not in {".hwp", ".hwpx"} and file.content_type and file.content_type not in ALLOWED_MIME_TYPES:
         raise BadRequestException(detail=f"지원하지 않는 MIME 타입입니다: {file.content_type}")
 
     content = await file.read()
