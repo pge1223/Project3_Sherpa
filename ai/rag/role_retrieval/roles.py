@@ -68,8 +68,47 @@ _PLANNING = RoleProfile(
     section_keywords=["개요", "목표", "일정", "운영", "계획", "전략"],
 )
 
+_POLICY = RoleProfile(
+    role_id="policy",
+    display_name="정책·공공성 심사위원",
+    description=(
+        "정책 목표, 공공성, 지원요건, 규정, 사회적 가치 및 정책 부합성 관점에서 "
+        "사업계획서를 검토한다."
+    ),
+    query_instruction=(
+        "정책·공공성 심사 관점에서 정책 목표, 정책 부합성, 공공성, 지원요건·지원대상, "
+        "규정 및 준수사항, 사회적 가치, 지역·산업 정책 연계, 지원 종료 후 지속가능성, "
+        "성과지표와 관련된 근거를 우선 검색하세요."
+    ),
+    focus_keywords=[
+        "정책 목표", "정책 부합성", "공공성", "지원요건", "지원대상", "규정", "준수사항",
+        "사회적 가치", "지역 연계", "산업 정책", "지속가능성", "성과지표",
+    ],
+    section_keywords=["정책", "공공성", "지원요건", "지원대상", "사회적 가치", "성과지표"],
+)
+
+_BUDGET_EXECUTION = RoleProfile(
+    role_id="budget_execution",
+    display_name="예산·집행계획 심사위원",
+    description=(
+        "예산 편성, 사업비 집행, 산출 근거, 일정, 마일스톤, 정산 및 위험 대응 관점에서 "
+        "사업계획서를 검토한다."
+    ),
+    query_instruction=(
+        "예산·집행계획 심사 관점에서 예산 및 사업비, 예산 배분, 비용 산출 근거, 집행계획, "
+        "보조금 및 자부담, 추진 일정, 마일스톤, 정산 및 보고, 위험 대응 및 예비비, "
+        "성과와 예산의 연결과 관련된 근거를 우선 검색하세요."
+    ),
+    focus_keywords=[
+        "예산", "사업비", "예산 배분", "비용 산출 근거", "집행계획", "자부담", "보조금",
+        "추진 일정", "마일스톤", "정산", "위험 대응", "예비비",
+    ],
+    section_keywords=["예산", "사업비", "집행계획", "일정", "마일스톤", "정산"],
+)
+
 DEFAULT_ROLE_PROFILES: dict[str, RoleProfile] = {
-    profile.role_id: profile for profile in (_FINANCE, _TECHNOLOGY, _MARKETING, _PLANNING)
+    profile.role_id: profile
+    for profile in (_FINANCE, _TECHNOLOGY, _MARKETING, _PLANNING, _POLICY, _BUDGET_EXECUTION)
 }
 
 
