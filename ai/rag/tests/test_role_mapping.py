@@ -40,6 +40,36 @@ class TestCompetitionMapping:
         )
 
 
+class TestGovernmentSupportMapping:
+    @pytest.mark.parametrize(
+        "persona_id, expected_role_id",
+        [
+            ("policy_fit", "policy"),
+            ("business_strategy", "planning"),
+            ("technical_feasibility", "technology"),
+            ("budget_execution", "budget_execution"),
+        ],
+    )
+    def test_government_support_persona_maps_to_expected_role(self, persona_id, expected_role_id):
+        assert resolve_role_id(domain="government_support", persona_id=persona_id) == expected_role_id
+
+    def test_business_strategy_feasibility_criterion_overrides_to_marketing(self):
+        assert (
+            resolve_role_id(
+                domain="government_support", persona_id="business_strategy", criterion_id="feasibility"
+            )
+            == "marketing"
+        )
+
+    def test_business_strategy_necessity_criterion_uses_default_planning(self):
+        assert (
+            resolve_role_id(
+                domain="government_support", persona_id="business_strategy", criterion_id="necessity"
+            )
+            == "planning"
+        )
+
+
 class TestUnknownDomainAndPersona:
     def test_unknown_domain_raises_without_fallback(self):
         with pytest.raises(PersonaRoleMappingError):
@@ -49,11 +79,9 @@ class TestUnknownDomainAndPersona:
         with pytest.raises(PersonaRoleMappingError):
             resolve_role_id(domain="competition", persona_id="unknown_persona")
 
-    def test_government_support_not_yet_configured(self):
-        # 팀이 아직 확정하지 않은 도메인 -- 임의로 매핑을 추가하지 않았으므로 미지원이어야 한다.
-        assert "government_support" not in supported_domains()
+    def test_unknown_persona_in_government_support_raises_without_fallback(self):
         with pytest.raises(PersonaRoleMappingError):
-            resolve_role_id(domain="government_support", persona_id="business_strategy")
+            resolve_role_id(domain="government_support", persona_id="unknown_persona")
 
 
 class TestStrictDefaultAndFallback:
@@ -84,3 +112,6 @@ class TestStrictDefaultAndFallback:
 class TestSupportedDomains:
     def test_competition_listed(self):
         assert "competition" in supported_domains()
+
+    def test_government_support_listed(self):
+        assert "government_support" in supported_domains()
