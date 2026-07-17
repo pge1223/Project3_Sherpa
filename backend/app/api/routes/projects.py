@@ -6,6 +6,10 @@ from app.schemas.project import ProjectCreateRequest, ProjectUpdateRequest, Proj
 from app.repositories.project_repository import ProjectRepository
 from app.models.project import ProjectModel
 from app.config import settings
+from starlette.concurrency import run_in_threadpool
+from app.repositories.document_repository import DocumentRepository
+from app.repositories.meeting_repository import MeetingRepository
+from app.api.routes.documents import _get_indexing_service
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 project_repo = ProjectRepository()
@@ -99,6 +103,23 @@ async def delete_project(project_id: str, authorization: Optional[str] = Header(
     if not project:
         raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없습니다")
 
+    # 1. Chroma 벡터 청크 삭제
+    indexing_service = _get_indexing_service()
+    await run_in_threadpool(indexing_service.delete_project, project_id)
+
+    # 2. MongoDB 문서 삭제
+    document_repo = DocumentRepository()
+    documents = await document_repo.find_by_project_id(project_id)
+    for doc in documents:
+        await document_repo.delete_by_id(doc["_id"])
+
+    # 3. MongoDB 회의 삭제
+    meeting_repo = MeetingRepository()
+    meetings = await meeting_repo.find_by_project_id(project_id)
+    for meeting in meetings:
+        await meeting_repo.delete_by_id(meeting["_id"])
+
+    # 4. MongoDB 프로젝트 삭제
     await project_repo.delete_project(project_id)
     return {"message": "프로젝트가 삭제되었습니다"}
 
