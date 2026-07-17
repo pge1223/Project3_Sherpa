@@ -158,6 +158,36 @@ def test_config_validation():
 
 
 # ---------------------------------------------------------------------------
+# CHUNKING_VERSION (v1 -> v2): PDF 줄바꿈 정규화/whole-line 제목 인식/글머리표 보존 도입으로
+# 청크 내용·chunk_id가 실질적으로 달라지므로 버전을 올렸다 — chunk_id에 버전이 반영되는지,
+# 동일 문서라도 v1/v2가 다른 chunk_id를 갖는지 확인한다.
+# ---------------------------------------------------------------------------
+
+def test_new_chunks_are_tagged_with_chunking_v2():
+    blocks = [_doc_block("법령규정을 학습", order=0), _doc_block("하여, 이에 대한 질의응답", order=1)]
+    extraction = _extraction(blocks, file_type=FileType.PDF)
+    result = chunk_document(extraction, _file_context(file_type="pdf"))
+
+    assert result.chunking_version == "chunking_v2"
+    assert all(c.chunking_version == "chunking_v2" for c in result.chunks)
+
+
+def test_same_document_v1_and_v2_config_produce_different_chunk_ids():
+    """chunking_version이 chunk_id 해시에 포함되므로(_generate_chunk_id), 동일 문서라도
+    v1/v2 설정으로 청킹하면 서로 다른 chunk_id가 나와야 한다(기존 Chroma v1 레코드와
+    충돌 없이 공존 가능해야 하기 때문)."""
+    blocks = [_doc_block("법령규정을 학습", order=0), _doc_block("하여, 이에 대한 질의응답", order=1)]
+    extraction = _extraction(blocks, file_type=FileType.PDF)
+
+    v1_result = chunk_document(extraction, _file_context(file_type="pdf"), ChunkingConfig(chunking_version="chunking_v1"))
+    v2_result = chunk_document(extraction, _file_context(file_type="pdf"), ChunkingConfig(chunking_version="chunking_v2"))
+
+    v1_ids = {c.chunk_id for c in v1_result.chunks}
+    v2_ids = {c.chunk_id for c in v2_result.chunks}
+    assert v1_ids.isdisjoint(v2_ids)
+
+
+# ---------------------------------------------------------------------------
 # 페이지/슬라이드/DOCX/HTML 위치 보존
 # ---------------------------------------------------------------------------
 
@@ -690,3 +720,280 @@ def test_merge_small_tail_piece_noop_for_single_piece():
     merged = chunker_module._merge_small_tail_piece(piece_ranges, "only piece", chunk_size=100)
 
     assert merged == piece_ranges
+
+
+# ---------------------------------------------------------------------------
+# HWPX→PDF 변환 재현: 문장 중간 줄바꿈/장식 기호 정규화, 제목 인식·상속 (K-Lawyer 문서 재현)
+# ---------------------------------------------------------------------------
+
+def test_korean_sentence_split_across_pdf_lines_is_merged_into_one_sentence():
+    """'법령규정을 학습 / ‧ / 하여, 이에 대한 / 질의응답'처럼 PDF가 한 문장을 줄 단위 블록
+    4개로 쪼개도, 정규화 후에는 문장 중간 줄바꿈과 장식 기호('‧')가 사라져야 한다."""
+    blocks = [
+        _doc_block("법령규정을 학습", order=0),
+        _doc_block("‧", order=1),
+        _doc_block("하여, 이에 대한", order=2),
+        _doc_block("질의응답", order=3),
+    ]
+    extraction = _extraction(blocks, file_type=FileType.PDF)
+    result = chunk_document(extraction, _file_context(file_type="pdf"))
+
+    assert len(result.chunks) == 1
+    content = result.chunks[0].content
+    assert content == "법령규정을 학습 하여, 이에 대한 질의응답"
+    assert "‧" not in content
+    assert "\n" not in content
+
+
+def test_pdf_line_wrap_merge_preserves_heading_list_and_paragraph_boundaries():
+    """제목(whole-line)·글머리표 목록·일반 문단 경계는 줄바꿈 병합 대상이 아니어야 한다."""
+    blocks = [
+        _doc_block("1) 개요", order=0),
+        _doc_block("이 시스템은 법령 정보를", order=1),
+        _doc_block("제공하는 챗봇이다.", order=2),
+        _doc_block("▢ 기대효과", order=3),
+        _doc_block("- 상담 시간 단축", order=4),
+        _doc_block("- 법률 접근성 향상", order=5),
+    ]
+    extraction = _extraction(blocks, file_type=FileType.PDF)
+    result = chunk_document(extraction, _file_context(file_type="pdf"))
+
+    overview_chunk = next(c for c in result.chunks if c.section_title == "개요")
+    effect_chunk = next(c for c in result.chunks if c.section_title == "기대효과")
+
+    assert overview_chunk.content == "1) 개요\n\n이 시스템은 법령 정보를 제공하는 챗봇이다."
+    # 글머리표 목록 두 항목은 서로 다른 항목이므로 한 문장으로 합쳐지면 안 된다.
+    assert "- 상담 시간 단축" in effect_chunk.content
+    assert "- 법률 접근성 향상" in effect_chunk.content
+    assert "- 상담 시간 단축 - 법률 접근성 향상" not in effect_chunk.content
+
+
+def test_pdf_line_wrap_merge_does_not_affect_docx():
+    """동일한 줄 단위 블록 구조라도 DOCX는 병합 대상이 아니다 (파서가 이미 문단 단위로 만듦)."""
+    blocks = [
+        _doc_block("법령규정을 학습", order=0, location_type=LocationType.DOCUMENT, location_number=None),
+        _doc_block("‧", order=1, location_type=LocationType.DOCUMENT, location_number=None),
+        _doc_block("하여, 이에 대한 질의응답", order=2, location_type=LocationType.DOCUMENT, location_number=None),
+    ]
+    extraction = _extraction(blocks, file_type=FileType.DOCX)
+    result = chunk_document(extraction, _file_context(file_type="docx", source_filename="test.docx"))
+
+    joined = "\n\n".join(c.content for c in result.chunks)
+    # DOCX는 정규화 대상이 아니므로 장식 기호 블록('‧')이 그대로 남는다 (회귀 없음 확인용).
+    assert "‧" in joined
+
+
+def test_pdf_line_wrap_merge_does_not_affect_pptx():
+    blocks = [
+        _doc_block("법령규정을 학습", order=0, location_type=LocationType.SLIDE, location_number=1),
+        _doc_block("‧", order=1, location_type=LocationType.SLIDE, location_number=1),
+        _doc_block("하여, 이에 대한 질의응답", order=2, location_type=LocationType.SLIDE, location_number=1),
+    ]
+    extraction = _extraction(blocks, file_type=FileType.PPTX)
+    result = chunk_document(extraction, _file_context(file_type="pptx", source_filename="test.pptx"))
+
+    joined = "\n\n".join(c.content for c in result.chunks)
+    assert "‧" in joined
+
+
+def test_pdf_heading_section_title_inherited_by_following_chunks():
+    """제목 인식 후 다음 청크들이 section_title을 상속해야 한다 (K-Lawyer 문서의 4개 제목 유형)."""
+    blocks = [
+        _doc_block("1) 개요", order=0),
+        _doc_block("본 시스템은 법령 정보를 제공한다.", order=1),
+        _doc_block("2) 필요성(현 문제점)", order=2),
+        _doc_block("법률 상담 접근성이 낮다.", order=3),
+        _doc_block("3) 시스템 요구사항 및 기능", order=4),
+        _doc_block("자연어 질의응답 기능이 필요하다.", order=5),
+        _doc_block("4) 사용예시", order=6),
+        _doc_block("사용자가 질문을 입력하면 답변한다.", order=7),
+        _doc_block("① 법제처 법령 학습", order=8),
+        _doc_block("국가법령정보센터 데이터를 학습한다.", order=9),
+    ]
+    extraction = _extraction(blocks, file_type=FileType.PDF)
+    result = chunk_document(extraction, _file_context(file_type="pdf"))
+
+    section_titles = {c.section_title for c in result.chunks}
+    assert section_titles == {
+        "개요", "필요성(현 문제점)", "시스템 요구사항 및 기능", "사용예시", "법제처 법령 학습",
+    }
+    assert next(c for c in result.chunks if "법률 상담 접근성" in c.content).section_title == "필요성(현 문제점)"
+    assert next(c for c in result.chunks if "국가법령정보센터" in c.content).section_title == "법제처 법령 학습"
+
+
+def test_pdf_unrecognizable_heading_stays_null_instead_of_guessing():
+    """제목처럼 보이지 않는 일반 문장은 임의로 section_title을 만들어내지 않고 null을 유지해야 한다."""
+    blocks = [_doc_block("이 문서는 일반적인 설명으로 시작한다.", order=0)]
+    extraction = _extraction(blocks, file_type=FileType.PDF)
+    result = chunk_document(extraction, _file_context(file_type="pdf"))
+
+    assert result.chunks[0].section_title is None
+
+
+# ---------------------------------------------------------------------------
+# 화이트박스 단위 테스트: whole-line heading 추출 (숫자)/원문자 제목, adapters 줄바꿈 병합)
+# ---------------------------------------------------------------------------
+
+from ai.rag.chunking import config as chunking_config
+from ai.rag.chunking import adapters as adapters_module
+
+
+def test_extract_whole_line_heading_title_numbered_paren():
+    assert chunking_config.extract_whole_line_heading_title("1) 개요") == "개요"
+
+
+def test_extract_whole_line_heading_title_circled_number():
+    assert chunking_config.extract_whole_line_heading_title("① 법제처 법령 학습") == "법제처 법령 학습"
+
+
+def test_extract_whole_line_heading_title_marker():
+    assert chunking_config.extract_whole_line_heading_title("▢ 기대효과") == "기대효과"
+
+
+def test_extract_whole_line_heading_title_returns_none_for_plain_sentence():
+    assert chunking_config.extract_whole_line_heading_title("일반 문장입니다.") is None
+
+
+def test_extract_whole_line_heading_title_returns_none_when_remainder_too_long():
+    long_text = "1) " + "가" * 40
+    assert chunking_config.extract_whole_line_heading_title(long_text) is None
+
+
+def _unified(content, kind="paragraph", location_number=1, order=0):
+    return adapters_module.UnifiedBlock(
+        content=content, kind=kind, location_type=ChunkLocationType.PAGE,
+        location_number=location_number, order=order, source_block_id=f"blk_{order}", metadata={},
+    )
+
+
+def test_merge_wrapped_pdf_lines_merges_sentence_continuation():
+    blocks = [_unified("법령규정을 학습", order=0), _unified("하여, 이에 대한 질의응답", order=1)]
+    merged = adapters_module.merge_wrapped_pdf_lines(blocks)
+
+    assert len(merged) == 1
+    assert merged[0].content == "법령규정을 학습 하여, 이에 대한 질의응답"
+
+
+def test_merge_wrapped_pdf_lines_drops_decorative_symbol_only_block():
+    blocks = [_unified("‧", order=0)]
+    merged = adapters_module.merge_wrapped_pdf_lines(blocks)
+
+    assert merged == []
+
+
+def test_merge_wrapped_pdf_lines_keeps_sentence_ending_with_period_separate():
+    blocks = [_unified("첫 번째 문장입니다.", order=0), _unified("두 번째 문장입니다.", order=1)]
+    merged = adapters_module.merge_wrapped_pdf_lines(blocks)
+
+    assert len(merged) == 2
+
+
+def test_merge_wrapped_pdf_lines_does_not_merge_across_heading_block():
+    heading = _unified("제목", kind="heading", order=0)
+    body = _unified("본문 내용", order=1)
+    merged = adapters_module.merge_wrapped_pdf_lines([heading, body])
+
+    assert len(merged) == 2
+    assert merged[0].content == "제목"
+    assert merged[1].content == "본문 내용"
+
+
+def test_merge_wrapped_pdf_lines_does_not_merge_across_list_item_boundary():
+    blocks = [_unified("- 첫 항목", order=0), _unified("- 둘째 항목", order=1)]
+    merged = adapters_module.merge_wrapped_pdf_lines(blocks)
+
+    assert len(merged) == 2
+
+
+def test_merge_wrapped_pdf_lines_does_not_merge_across_page_boundary():
+    blocks = [
+        _unified("페이지1 마지막 줄", order=0, location_number=1),
+        _unified("페이지2 첫 줄", order=1, location_number=2),
+    ]
+    merged = adapters_module.merge_wrapped_pdf_lines(blocks)
+
+    assert len(merged) == 2
+
+
+# ---------------------------------------------------------------------------
+# 글머리표('•' 등) 보존: 장식 기호로 오인해 삭제/오병합하지 않아야 함
+# ---------------------------------------------------------------------------
+
+def test_bullet_item_is_not_merged_into_preceding_plain_sentence():
+    """'• 첫 번째 항목'은 새 목록 항목이므로 종결부호 없는 이전 문장과 합쳐지면 안 된다."""
+    blocks = [_unified("앞 문장에 종결부호 없음", order=0), _unified("• 첫 번째 항목", order=1)]
+    merged = adapters_module.merge_wrapped_pdf_lines(blocks)
+
+    assert len(merged) == 2
+    assert merged[0].content == "앞 문장에 종결부호 없음"
+    assert merged[1].content == "• 첫 번째 항목"
+
+
+def test_isolated_bullet_marker_combines_with_following_text_as_list_item():
+    """'•'만 있는 독립 블록은 삭제되지 않고 다음 본문과 결합해 목록 항목이 되어야 한다."""
+    blocks = [_unified("•", order=0), _unified("첫 번째 항목", order=1)]
+    merged = adapters_module.merge_wrapped_pdf_lines(blocks)
+
+    assert len(merged) == 1
+    assert merged[0].content == "• 첫 번째 항목"
+
+
+def test_consecutive_bullet_items_keep_their_boundary():
+    """연속된 '• 항목' 두 개는 서로 다른 목록 항목이므로 경계가 유지되어야 한다."""
+    blocks = [_unified("• 첫 번째 항목", order=0), _unified("• 두 번째 항목", order=1)]
+    merged = adapters_module.merge_wrapped_pdf_lines(blocks)
+
+    assert len(merged) == 2
+    assert merged[0].content == "• 첫 번째 항목"
+    assert merged[1].content == "• 두 번째 항목"
+
+
+def test_consecutive_isolated_bullet_markers_each_combine_with_own_following_text():
+    """'•'/'첫 번째 항목'/'•'/'두 번째 항목'처럼 마커와 텍스트가 번갈아 독립 블록이어도
+    각 마커가 자신의 텍스트하고만 결합해야 하고(다른 항목과 섞이면 안 됨) 경계가 유지되어야 한다."""
+    blocks = [
+        _unified("•", order=0),
+        _unified("첫 번째 항목", order=1),
+        _unified("•", order=2),
+        _unified("두 번째 항목", order=3),
+    ]
+    merged = adapters_module.merge_wrapped_pdf_lines(blocks)
+
+    assert [b.content for b in merged] == ["• 첫 번째 항목", "• 두 번째 항목"]
+
+
+def test_isolated_decorative_dot_is_still_removed_conservatively():
+    """장식 기호 제거는 실제 문제를 일으킨 '‧'(HYPHENATION POINT)에만 보수적으로 적용된다."""
+    blocks = [_unified("법령규정을 학습", order=0), _unified("‧", order=1), _unified("하여, 이에 대한 질의응답", order=2)]
+    merged = adapters_module.merge_wrapped_pdf_lines(blocks)
+
+    assert len(merged) == 1
+    assert merged[0].content == "법령규정을 학습 하여, 이에 대한 질의응답"
+    assert "‧" not in merged[0].content
+
+
+def test_bullet_marker_variants_are_not_deleted_as_decorative():
+    """◦/∙/·도 '•'와 동일하게 목록 마커로 취급되어 독립 블록이어도 삭제되지 않아야 한다."""
+    for marker in ("◦", "∙", "·"):
+        blocks = [_unified(marker, order=0), _unified("항목 내용", order=1)]
+        merged = adapters_module.merge_wrapped_pdf_lines(blocks)
+        assert len(merged) == 1
+        assert merged[0].content == f"{marker} 항목 내용"
+
+
+def test_k_lawyer_style_bullet_list_preserved_in_document_chunk():
+    """실제 재현 사례: HWPX 변환 PDF에서 글머리표 목록 두 항목이 청크 content에서 별도
+    항목으로 남아야 한다(공백 하나로 뭉개지면 안 됨)."""
+    blocks = [
+        _doc_block("▢ 기대효과", order=0),
+        _doc_block("•", order=1),
+        _doc_block("상담 시간 단축", order=2),
+        _doc_block("•", order=3),
+        _doc_block("법률 접근성 향상", order=4),
+    ]
+    extraction = _extraction(blocks, file_type=FileType.PDF)
+    result = chunk_document(extraction, _file_context(file_type="pdf"))
+
+    effect_chunk = next(c for c in result.chunks if c.section_title == "기대효과")
+    assert "• 상담 시간 단축" in effect_chunk.content
+    assert "• 법률 접근성 향상" in effect_chunk.content
