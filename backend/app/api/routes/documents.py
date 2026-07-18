@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import threading
@@ -43,7 +44,7 @@ from app.repositories.project_repository import ProjectRepository
 from app.config import settings
 from app.models.document import DocumentModel
 from app.repositories.document_repository import DocumentRepository
-from app.schemas.document import DocumentResponse, FetchUrlRequest
+from app.schemas.document import DocumentResponse, FetchUrlRequest, FetchUrlResponse
 
 logger = logging.getLogger(__name__)
 
@@ -189,6 +190,41 @@ def _chunk_and_index_webpage(
     return summary.stored_count
 
 
+# 가은/Claude(2026-07-19, INF-007): 공고문 색인(청킹+임베딩+Chroma 저장)이 끝날 때까지
+# fetch-url 응답 자체를 막고 있었다 — 정상 케이스도 수 초~수십 초가 걸리고, 예전엔 hang
+# 버그(용준/Claude 2026-07-18, Chroma 이중 client 문제 — 지금은 고쳐짐)로 5분+ 무응답도
+# 실측됐다. 근본 hang 원인은 고쳐졌지만, "색인이 오래 걸리는 것 자체"와 "타임아웃이
+# 아예 없다"는 별개 문제라 — 색인을 백그라운드로 넘기고 타임아웃을 강제한다.
+# GET /{project_id}/{document_id}/status(기존 DOC-004 엔드포인트)를 프론트가 폴링해서
+# 완료 여부를 확인한다.
+_WEBPAGE_INDEXING_TIMEOUT_SECONDS = 120
+
+
+async def _index_webpage_background(
+    *, document_id: str, project_id: str, url: str, title: str, cleaned: CleanedWebContent
+) -> None:
+    """색인을 백그라운드로 돌리고 끝나면 documents 컬렉션의 status를 patch한다
+    (meetings.py의 _synthesize_chair_background()와 동일 패턴). asyncio.wait_for로
+    타임아웃을 걸지만, run_in_threadpool로 넘긴 실제 스레드 자체를 강제 종료하지는
+    못한다 — 진짜 hang이면 그 스레드는 백그라운드에 남아있게 되고, 여기선 "기다리는 걸
+    포기하고 실패로 기록"까지만 보장한다(요청/폴링 쪽을 무한 대기에서 풀어주는 게 목적)."""
+    try:
+        stored_count = await asyncio.wait_for(
+            run_in_threadpool(_chunk_and_index_webpage, document_id, project_id, url, title, cleaned),
+            timeout=_WEBPAGE_INDEXING_TIMEOUT_SECONDS,
+        )
+        status_value = "indexed" if stored_count > 0 else "indexed_empty"
+    except asyncio.TimeoutError:
+        logger.warning(
+            "공고문 색인 타임아웃: document_id=%s (%ds 초과)", document_id, _WEBPAGE_INDEXING_TIMEOUT_SECONDS
+        )
+        status_value = "indexing_timeout"
+    except Exception:
+        logger.exception("공고문 색인 중 오류가 발생했습니다: document_id=%s", document_id)
+        status_value = "indexing_failed"
+    await document_repo.update_fields(document_id, {"status": status_value})
+
+
 # 가은/Claude (2026-07-15): 비회원 로그인은 Authorization 헤더 없이 그대로 들어온다 —
 # 헤더가 없으면 401 대신 고정 게스트 사용자로 통과시킨다 (projects.py와 동일 컨벤션).
 GUEST_USER_EMAIL = "guest@local"
@@ -230,11 +266,16 @@ def _apply_cleaning(page_content: WebPageContent) -> tuple[WebPageContent, Clean
 
 
 # DOC-004: URL 문서 수집
-@router.post("/fetch-url", response_model=UrlExtractionResult)
+# 가은/Claude(2026-07-19, INF-007): 색인(청킹+임베딩)이 끝날 때까지 이 응답 자체를 막지
+# 않는다 — project_id가 있으면 document_id를 즉시 만들어 반환하고, 색인은
+# _index_webpage_background()로 넘긴다. 프론트는 응답에 담긴 page_content/attachments/
+# warnings로 문서 행을 바로 그리고, document_status가 "indexing"이면
+# GET /{project_id}/{document_id}/status(DOC-004, 기존 엔드포인트)를 폴링한다.
+@router.post("/fetch-url", response_model=FetchUrlResponse)
 async def fetch_url(
     request: FetchUrlRequest,
     authorization: Optional[str] = Header(None, alias="authorization"),
-) -> UrlExtractionResult:
+) -> FetchUrlResponse:
     user_email = get_current_user(authorization)
 
     try:
@@ -246,6 +287,9 @@ async def fetch_url(
     except Exception:
         logger.exception("URL 문서 수집 중 예상하지 못한 오류가 발생했습니다: url=%s", request.url)
         raise InternalServerException(detail=_GENERIC_ERROR_MESSAGE)
+
+    document_id: Optional[str] = None
+    document_status: Optional[str] = None
 
     if result.page_content is not None:
         try:
@@ -269,6 +313,7 @@ async def fetch_url(
                 mime_type="text/html",
                 source_type="url",
                 document_role="criteria",
+                status="indexing",
                 parsed_text=merged_page_content.text,
                 # 가은/Claude(2026-07-18): 실측(sotong.go.kr) — 평가기준이 본문이 아니라
                 # HWP 요강 파일에만 있는 공고가 실제로 있었다. 재접속 후에도(getDocuments())
@@ -280,22 +325,18 @@ async def fetch_url(
                 or None,
             )
             document_id = await document_repo.create(document)
-            try:
-                stored_count = await run_in_threadpool(
-                    _chunk_and_index_webpage,
-                    document_id,
-                    request.project_id,
-                    request.url,
-                    merged_page_content.title or request.url,
-                    cleaned,
+            document_status = "indexing"
+            asyncio.create_task(
+                _index_webpage_background(
+                    document_id=document_id,
+                    project_id=request.project_id,
+                    url=request.url,
+                    title=merged_page_content.title or request.url,
+                    cleaned=cleaned,
                 )
-                status_value = "indexed" if stored_count > 0 else "indexed_empty"
-            except Exception:
-                logger.exception("공고문 색인 중 오류가 발생했습니다: document_id=%s", document_id)
-                status_value = "indexing_failed"
-            await document_repo.update_fields(document_id, {"status": status_value})
+            )
 
-    return result
+    return FetchUrlResponse(**result.model_dump(), document_id=document_id, document_status=document_status)
 
 
 # DOC-001: 문서 업로드
