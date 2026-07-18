@@ -1,25 +1,36 @@
 {
-  "schema_version": "2.0.0",
-  "engine": "openai-tts",
-  "model": "gpt-4o-mini-tts",
+  "schema_version": "3.0.0",
+  "engine": "elevenlabs",
+  "model": "eleven_multilingual_v2",
+  "_comment": "2026-07-18: OpenAI(gpt-4o-mini-tts)에서 ElevenLabs로 교체 - 이유는 ai/media/tts/tts_engine_decision.md의 '결정 변경(2026-07-18)' 섹션 참고. 위원 A/B는 이미 있던 페르소나, C/D는 아바타 2명->4명 확장으로 이번에 추가됨(실제 위원 persona_id가 아니라 얼굴/목소리 전용 식별자 - backend/app/api/routes/media.py의 AVAILABLE_SPEAKER_IDS, frontend/src/components/meeting/CommitteeVideoStage.jsx의 AVATAR_SLOTS와 이름을 맞춰서 관리).",
   "voices": {
     "business_strategy": {
       "persona_slot": "persona_a",
-      "voice_id": "nova",
+      "voice_id": "5DWGv3VDkihNUcbvaonB",
+      "voice_name": "Kelee K - Seoul Narrator",
       "gender": "female",
-      "voice_character": "밝고 친근한 여성",
-      "tone": "차분함",
-      "instructions": "천천히 자연스럽게, 아나운서처럼 발표하듯이, 여성스러우면서 자연스러운 톤으로 말하세요.",
-      "note": "HAI-003: 위원 A. gpt-4o-mini-tts는 steerable이라 instructions로 톤 보정 가능"
+      "note": "위원 A. 기존 OpenAI voice_id(nova)에서 교체, 성별은 유지"
     },
     "technical_feasibility": {
       "persona_slot": "persona_b",
-      "voice_id": "cedar",
+      "voice_id": "CxErO97xpQgQXYmapDKX",
+      "voice_name": "Theo - Warm, Smooth and Soft",
       "gender": "male",
-      "voice_character": "안정적이고 신뢰감있는",
-      "tone": "분석적",
-      "instructions": "분석적이고 또렷한 톤으로, 논리적으로 말하세요.",
-      "note": "HAI-003: 위원 B, A와 구분되는 남성 보이스. 페르소나 B 영상(남성 외형)이 이 보이스와 맞춰져야 함"
+      "note": "위원 B. 처음엔 Yohan Koo로 골랐다가 청취 후 음질/톤 피드백으로 Theo로 재변경. 기존 OpenAI voice_id(cedar)에서 교체, 성별은 유지"
+    },
+    "persona_c": {
+      "persona_slot": "persona_c",
+      "voice_id": "PjQVfrNWnioYjSH163LF",
+      "voice_name": "Gihong - Calm Announcer",
+      "gender": "male",
+      "note": "2026-07-18 아바타 4명 확장분. 실제 위원 persona_id 아님(얼굴/목소리 전용 식별자) - 제스처 영상(_1/_2) 아직 없음, 대기 루프(_rf)만 있음"
+    },
+    "persona_d": {
+      "persona_slot": "persona_d",
+      "voice_id": "8jHHF8rMqMlg8if2mOUe",
+      "voice_name": "Han - Conversational",
+      "gender": "female",
+      "note": "2026-07-18 아바타 4명 확장분. 실제 위원 persona_id 아님(얼굴/목소리 전용 식별자) - 제스처 영상(_1/_2) 아직 없음, 대기 루프(_rf)만 있음"
     }
   }
 }

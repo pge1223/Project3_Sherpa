@@ -19,7 +19,12 @@ router = APIRouter(prefix="/media", tags=["media"])
 # (media_stream.schema.md §2 참고 — 이것도 팀 동의 필요한 제안).
 # 재인/Claude(2026-07-17): 2번째 아바타(technical_feasibility) 영상 세트까지
 # musetalk_setup_v2.ipynb에서 제스처 포함 검증 완료 - 2명으로 확장.
-AVAILABLE_SPEAKER_IDS = ["business_strategy", "technical_feasibility"]
+# 재인/Claude(2026-07-18): persona_c/persona_d 2명 추가 - 4명으로 확장. 이 둘은 실제
+# 위원 persona_id가 아니라 CommitteeVideoStage.jsx의 AVATAR_SLOTS와 짝을 이루는
+# 얼굴·목소리 전용 식별자다(순서 기반 동적 배정 - 어떤 위원이든 먼저 말하는 순서대로
+# 이 슬롯을 빌려쓴다). 제스처 영상(_1/_2)은 아직 없고 대기 루프(_rf)만 있는 상태 -
+# gesture_index는 항상 0으로만 요청되는 걸로 코랩 쪽과 맞춰둠.
+AVAILABLE_SPEAKER_IDS = ["business_strategy", "technical_feasibility", "persona_c", "persona_d"]
 
 
 @router.get("/available-speakers")

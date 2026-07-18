@@ -37,26 +37,68 @@ import { personaColor } from './meetingTheme'
 // 등장하는 위원이 누구든 대신 쓸 수 있는 자원"으로 바꿨다. 화면에 뜨는 이름/색은 실제
 // 위원(line.speaker_id) 그대로 쓰고, 코랩으로 나가는 WebSocket 요청의 speaker_id만
 // 슬롯에 등록된 코랩 ID로 바꿔치기해서 그 얼굴·목소리로 립싱크가 실제로 생성되게 한다.
+//
+// 재인/Claude(2026-07-18): 대기 루프용 <video>와 스트리밍용 <video>를 별개 엘리먼트로
+// 분리했다 - 원래는 하나의 <video>에서 src를 계속 바꿔치기했는데(대기 루프 <-> 스트림),
+// 그러다보니 세 가지 문제를 겪었다: (1) 스트림이 버퍼 부족으로 잠깐 멈추면 그 태그
+// 자체가 멈춰서 화면이 얼어붙어 보임 (2) 스트림 끝나고 대기 루프로 되돌아갈 때
+// video.play()를 다시 불러야 하는데, 크롬이 "전력 절약을 위해 배경 영상 재생을
+// 중단시켰다"며 이 재호출을 거부하는 경우가 있어서 그대로 영원히 멈춰버림 (3) 버퍼
+// 기준(RESUME_THRESHOLD)을 올려서 (2)/재생 중 끊김은 줄였더니, 이번엔 짧은 발화에서
+// "버퍼 채우는 동안" 화면이 멈춘 것처럼 보임. 셋 다 근본 원인은 같다 - 태그 하나를
+// 계속 껐다 켰다 하는 구조. 이제 대기 루프 엘리먼트는 마운트 시 딱 한 번 재생을
+// 시작하면 그 뒤로 절대 건드리지 않고 계속 뒤에서 돈다. 스트리밍 엘리먼트는 평소엔
+// 투명하게 숨겨뒀다가, 버퍼가 충분히 쌓여 실제 재생이 걸렸을 때만 위로 드러내고,
+// 끝나면 다시 숨긴다 - 대기 루프는 그동안 한 번도 멈춘 적이 없으니 전환 자체가 항상
+// 끊김 없다.
+//
+// 재인/Claude(2026-07-19): 위원이 2명 -> 4명으로 늘면서 "A 발언 끝나고 B로 넘어가는
+// 사이가 너무 오래 걸린다"는 문제가 두드러졌다. 1차로 "A 영상이 화면에 뜨는 순간(reveal)
+// B 요청을 미리 보내 백그라운드에서 준비"하는 프리페치를 넣었는데(TTS는 GPU를 안 써서
+// A의 GPU 생성/재생 중에도 병렬 가능), 그래도 "A의 tail(무음 대기 영상, 발화 없는
+// 나머지 구간)이 다 끝날 때까지 B를 화면에 안 보여준다"는 제약 때문에 tail이 긴 경우
+// (예: 발화 11초 + tail 9초) 체감 대기가 여전했다. 그래서 2차로: 코랩이 "TTS(실제
+// 발화) 끝났다"는 신호(tts_end)를 보내주면 그 시점부터 "발언 중" 배지만 끄고, 그
+// +2초 뒤(또는 A가 그 전에 자연 종료되면 그 즉시 - 둘 중 먼저 오는 조건)부터 B가
+// 화면을 넘겨받을 수 있게 했다. A의 tail 자체는 강제로 끊거나 pause/mute 하지 않고
+// 그대로 자연 재생되게 둔다 - tail은 원본 루프 영상 그대로라 무음(GPU 연산 없음,
+// _pace_and_feed 주석 참고)이므로 화면에 계속 떠 있어도 B의 오디오와 겹칠 소리가
+// 없고, 위원마다 타일이 분리돼 있어 동시에 여러 타일이 화면에 보여도 기술적으로
+// 문제없다. 그래서 "화면에 한 번에 한 명만 revealed"라는 예전 제약(단일값
+// revealedSpeakerId)을 없애고 위원별 revealedMap으로 바꿨다 - "발언 중" 표시만
+// speakingMap으로 따로 관리해서 한 번에 한 명만 켜지게 한다(자세한 흐름은
+// streamLine() 안의 transitionGateRef 관련 주석 참고).
 const MIME_CODEC = 'video/mp4; codecs="avc1.42E01E, mp4a.40.2"'
-// 재인/Claude(2026-07-18): tail(무음 뒷부분) 프레임을 페이싱 없이 한꺼번에 몰아서
-// 보내도록 백엔드(app.py)를 고친 뒤로, 스트림 데이터가 "꾸준히 조금씩"이 아니라
-// "초반에 왕창 도착"하는 패턴으로 바뀌었다. 예전 값(0.8)은 꾸준한 트리클 전제로
-// 튜닝된 거라, 몰아오는 패턴에서는 재생을 너무 일찍 시작해버려 tail burst가
-// 도착하기 직전 잠깐 버퍼링이 걸리는 걸 실측으로 확인했다(재생 시작 buffered=1.14s
-// 상태로 시작 -> 1.2초 만에 버퍼 부족). 1.5로 올려서 재생 시작을 살짝 늦추는 대신,
-// 시작한 뒤로는 tail까지 안 끊기게 한다.
+// 재인/Claude(2026-07-18): tail 프레임을 페이싱 없이 한꺼번에 몰아서 보내도록
+// 백엔드를 고친 뒤로, 스트림 데이터가 "꾸준히 조금씩"이 아니라 "초반에 왕창 도착"하는
+// 패턴으로 바뀌었다. 예전 값(0.8)은 꾸준한 트리클 전제로 튜닝된 거라, 몰아오는
+// 패턴에서는 재생을 너무 일찍 시작해버려 tail burst가 도착하기 직전 잠깐 버퍼링이
+// 걸리는 걸 실측으로 확인했다. 1.5로 올려서 재생 시작을 살짝 늦추는 대신, 시작한
+// 뒤로는 tail까지 안 끊기게 한다.
 const RESUME_THRESHOLD = 1.5
 const PAUSE_THRESHOLD = 0.15
+// 재인/Claude(2026-07-19): 위원 A의 TTS(실제 발화)가 끝난 뒤, 위원 B가 화면을
+// 넘겨받기까지의 최소 대기 시간. 0초로 하면 마치 말을 끊고 끼어드는 것처럼 보이고,
+// 너무 길면 프리페치 이득이 줄어든다 - "한 사람 말 끝 -> 짧은 정적 -> 다음 사람
+// 시작"하는 실제 회의 흐름처럼 느껴지는 값으로 2초를 선택했다. A의 tail이 이보다
+// 짧게 끝나면(즉 자연 종료가 더 빠르면) 이 값과 상관없이 자연 종료 시점에 넘어간다
+// - 이 값 때문에 지금보다 느려지는 경우는 없다(streamLine()의 timeGateOk 참고).
+const NEXT_AVATAR_MIN_GAP_MS = 2000
 
 // 아바타 얼굴·목소리 자산(코랩 PERSONA_MAP에 등록된 ID) + 대기 루프 영상. 슬롯
-// 순서(0번=persona_a, 1번=persona_b)가 "이번 회의에서 몇 번째로 등장하는 위원인지"에
-// 대응한다 - 실제 어떤 위원(persona_id)이 그 슬롯을 쓰는지는 매 회의마다 달라진다.
-// backend/app/api/routes/media.py의 AVAILABLE_SPEAKER_IDS와 사람이 직접 동기화해서
-// 관리한다 - 아바타 자산이 늘면 여기도 같이 늘려야 한다. 실제 서비스 자산 위치가
-// 정해지기 전까지 임시로 프론트 mock-videos에 둠.
+// 순서(0번=persona_a, 1번=persona_b, ...)가 "이번 회의에서 몇 번째로 등장하는
+// 위원인지"에 대응한다 - 실제 어떤 위원(persona_id)이 그 슬롯을 쓰는지는 매 회의마다
+// 달라진다. backend/app/api/routes/media.py의 AVAILABLE_SPEAKER_IDS와 사람이 직접
+// 동기화해서 관리한다 - 아바타 자산이 늘면 여기도 같이 늘려야 한다. 실제 서비스
+// 자산 위치가 정해지기 전까지 임시로 프론트 mock-videos에 둠.
+// 재인/Claude(2026-07-18): 2명 -> 4명으로 확장. persona_c/d는 실제 위원 페르소나 ID가
+// 아니라(8개 위원 후보 중 어디에도 없는 이름) 이 프로젝트 전용으로 새로 만든 "배우"
+// 식별자다 - 코랩 PERSONA_MAP에도 이 이름 그대로 등록한다.
 const AVATAR_SLOTS = [
   { colabSpeakerId: 'business_strategy', idleVideo: '/mock-videos/persona_a/avata_rf.mp4' },
   { colabSpeakerId: 'technical_feasibility', idleVideo: '/mock-videos/persona_b/avata_b_rf.mp4' },
+  { colabSpeakerId: 'persona_c', idleVideo: '/mock-videos/persona_c/avata_c_rf.mp4' },
+  { colabSpeakerId: 'persona_d', idleVideo: '/mock-videos/persona_d/avata_d_rf.mp4' },
 ]
 
 // 아바타 창이 없는 위원(예: 위원장) 줄을 재생할 때 - 영상 없이 자막만 이 시간만큼
@@ -74,34 +116,19 @@ function lineDurationMs(text) {
 // 추가했다. 최초 1차 회의(mediaLines prop)도 내부적으로는 "첫 번째 배치"로 취급 —
 // 배치 하나 안에서의 재생/진행률 표시(발언 N/M, 칩 목록) 로직은 이전과 동일하고,
 // 그 배치가 끝나면 큐에 다음 배치가 있는지 확인해서 있으면 이어서, 없으면 대기 상태로
-// 돌아간다. 이렇게 하면 위원 A 답변이 재생되는 도중 위원 B에게 새 질문을 해도 재생
-// 중인 걸 끊지 않고 큐 맨 뒤에 자연스럽게 이어붙는다.
-// 재인/Claude(2026-07-18): 대기 루프용 <video>와 스트리밍용 <video>를 별개 엘리먼트로
-// 분리했다 - 원래는 하나의 <video>에서 src를 계속 바꿔치기했는데(대기 루프 <-> 스트림),
-// 그러다보니 세 가지 문제를 겪었다: (1) 스트림이 버퍼 부족으로 잠깐 멈추면 그 태그
-// 자체가 멈춰서 화면이 얼어붙어 보임 (2) 스트림 끝나고 대기 루프로 되돌아갈 때
-// video.play()를 다시 불러야 하는데, 크롬이 "전력 절약을 위해 배경 영상 재생을
-// 중단시켰다"며 이 재호출을 거부하는 경우가 있어서 그대로 영원히 멈춰버림 (3) 버퍼
-// 기준(RESUME_THRESHOLD)을 올려서 (2)/재생 중 끊김은 줄였더니, 이번엔 짧은 발화에서
-// "버퍼 채우는 동안" 화면이 멈춘 것처럼 보임. 셋 다 근본 원인은 같다 - 태그 하나를
-// 계속 껐다 켰다 하는 구조. 이제 대기 루프 엘리먼트는 마운트 시 딱 한 번 재생을
-// 시작하면 그 뒤로 절대 건드리지 않고 계속 뒤에서 돈다. 스트리밍 엘리먼트는 평소엔
-// 투명하게 숨겨뒀다가, 버퍼가 충분히 쌓여 실제 재생이 걸렸을 때만(revealedSpeakerId)
-// 위로 드러내고, 끝나면 다시 숨긴다 - 대기 루프는 그동안 한 번도 멈춘 적이 없으니
-// 전환 자체가 항상 끊김 없다.
+// 돌아간다.
 const CommitteeVideoStage = forwardRef(function CommitteeVideoStage({ mediaLines }, ref) {
   // speakerId -> { idle: <video>, stream: <video> } 엘리먼트 쌍. 창이 위원마다 따로
   // 있으니 ref도 위원별로, 그리고 idle/stream 용도별로 따로 관리한다.
   const videoRefs = useRef({})
-  const monitorTimerRef = useRef(null)
-  const fallbackTimerRef = useRef(null)
-  const tokenRef = useRef(0)
-  // 현재 진행 중인 스트림(WebSocket)을 확실히 끊는 함수를 담아둔다. effect가
-  // 다시 실행될 때(StrictMode의 이중 마운트 포함) cancelled 플래그만 세우고
-  // 끝내면, 이미 열려서 데이터를 계속 받고 있는 WebSocket/MediaSource가 살아있는
-  // 채로 video.src가 다른 곳으로 넘어가서 "SourceBuffer가 제거됐다" 에러가 반복
-  // 발생하는 걸 실제로 겪었다 - 그래서 cleanup에서 반드시 이 함수로 실제 연결을 끊는다.
-  const activeCleanupRef = useRef(null)
+  // 아래 세 개는 위원(speakerId)별로 독립된 값을 갖는다 - A와 B가 동시에 스트리밍
+  // (A는 재생 중, B는 미리 받는 중) 상태일 수 있어서 공유하면 안 된다.
+  const monitorTimersRef = useRef({}) // speakerId -> intervalId
+  const tokensRef = useRef({}) // speakerId -> 마지막으로 발급한 토큰 번호
+  const activeCleanupsRef = useRef({}) // speakerId -> WebSocket을 닫는 함수
+  // holdForReading(아바타 창 없는 위원)은 위원별 자원이 없으니 별도의 단일 토큰으로 관리.
+  const holdTokenRef = useRef(0)
+  const holdTimerRef = useRef(null)
   // 아직 재생을 시작하지 않은 배치들. 화면 렌더링에는 쓰지 않는 순수 내부 상태라
   // useState가 아니라 ref로 둔다(매 배치 진행마다 리렌더가 필요 없음).
   const batchQueueRef = useRef([])
@@ -109,9 +136,9 @@ const CommitteeVideoStage = forwardRef(function CommitteeVideoStage({ mediaLines
   const wakeRef = useRef(null)
 
   // 아바타 슬롯에 실제로 누구를 배정할지는 최초 mediaLines에서 순서대로 처음 등장하는
-  // 위원 2명으로 한 번만 고정한다(세션 내내 안 바뀜). speakerId는 화면 표시/색상/큐
-  // 매칭에 쓰는 "진짜 위원 ID", colabSpeakerId는 실제 WebSocket 요청에 실어보낼 "코랩이
-  // 아는 ID"로 분리해서 관리한다.
+  // 위원들로 한 번만 고정한다(세션 내내 안 바뀜). speakerId는 화면 표시/색상/큐 매칭에
+  // 쓰는 "진짜 위원 ID", colabSpeakerId는 실제 WebSocket 요청에 실어보낼 "코랩이 아는
+  // ID"로 분리해서 관리한다.
   const [avatarTiles] = useState(() => {
     const sorted = [...(mediaLines || [])].sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
     const tiles = []
@@ -128,14 +155,34 @@ const CommitteeVideoStage = forwardRef(function CommitteeVideoStage({ mediaLines
     }
     return tiles
   })
-  const [statusText, setStatusText] = useState('')
+  // statusText도 위원별로 분리 - A가 재생 중이고 B가 백그라운드에서 준비 중일 때,
+  // B의 "생성 중..." 상태가 A의 배지에 잘못 덮어써지면 안 된다.
+  const [statusTextMap, setStatusTextMap] = useState({})
   const [currentLine, setCurrentLine] = useState(null)
   const [currentIndex, setCurrentIndex] = useState(-1)
   // 진행률 표시(발언 N/M, 칩 목록)는 "현재 재생 중인 배치"를 기준으로 한다.
   const [activeBatch, setActiveBatch] = useState([])
-  // 버퍼가 충분히 쌓여 실제로 재생이 시작된 위원의 speakerId - 이 값과 일치하는
-  // 타일만 스트리밍 엘리먼트를 드러낸다(그 전까지는 대기 루프가 계속 보임).
-  const [revealedSpeakerId, setRevealedSpeakerId] = useState(null)
+  // 재인/Claude(2026-07-19): revealedMap(stream 영상이 보이는지)과 speakingMap("발언
+  // 중" 배지)을 분리했다 - 위원마다 타일이 따로 있어서 여러 명이 동시에 자기 stream
+  // 영상을 보여줘도(예: A는 무음 tail 재생 중, B는 이미 발화 시작) 기술적으로 전혀
+  // 문제 없다. 다만 "지금 누가 말하고 있는지"는 한 번에 한 명이어야 자연스러우니
+  // speakingMap만 별도로 한 번에 하나씩 켜지게 관리한다.
+  const [revealedMap, setRevealedMap] = useState({})
+  const [speakingMap, setSpeakingMap] = useState({})
+  // 다음 위원이 화면(speakingMap)을 넘겨받아도 되는 시점을 표현하는 단일 게이트 -
+  // readyAt: 이 시각(Date.now() 기준) 이후면 통과. forceReady: 직전 위원 영상이 이미
+  // 완전히 자연 종료됐으면(tail까지 다 끝남) 시각 상관없이 즉시 통과. 새 배치 시작 시
+  // "즉시 통과"로 리셋되고(첫 위원은 기다릴 대상이 없으므로), 그 배치 안에서는 매
+  // 위원이 자기 reveal/tts_end/ended 시점마다 갱신한다 - 자세한 흐름은 streamLine()
+  // 안의 주석 참고.
+  // 재인/Claude(2026-07-19): owner(현재 게이트를 쥐고 있는 speakerId)를 추가했다 -
+  // 위원 4명 실측에서 "C가 아직 말하는 중(배지 안 꺼짐)인데 D가 먼저 발언 시작"하는
+  // 버그가 있었다. 원인: A의 tail이 길면 A는 한참 뒤에야 자연 종료(ended)되는데, 그
+  // 사이 이미 B->C까지 게이트가 넘어가 있어도 A의 finish()가 뒤늦게 실행되면서
+  // "내가 revealed였으니 게이트를 연다"고 무조건 덮어써버렸다(누가 지금 게이트를
+  // 쥐고 있는지 확인 안 함) - 그래서 아직 C가 발화 중인데 D가 게이트를 통과해버림.
+  // owner 체크로 "지금 내가 게이트 주인일 때만" 게이트를 건드리게 막는다.
+  const transitionGateRef = useRef({ readyAt: 0, forceReady: true, owner: null })
 
   function enqueueLines(newLines) {
     const sorted = [...(newLines || [])].sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
@@ -159,20 +206,26 @@ const CommitteeVideoStage = forwardRef(function CommitteeVideoStage({ mediaLines
   // 아바타 창이 없는 위원(예: 위원장) 줄 - 영상 없이 자막만 읽을 시간만큼 보여준다.
   function holdForReading(line) {
     return new Promise((resolve) => {
-      const token = ++tokenRef.current
-      fallbackTimerRef.current = setTimeout(() => {
-        if (token !== tokenRef.current) return
+      const token = ++holdTokenRef.current
+      holdTimerRef.current = setTimeout(() => {
+        if (token !== holdTokenRef.current) return
         resolve()
       }, lineDurationMs(line.text))
     })
   }
 
-  function streamLine(line, tile) {
+  // onReveal: 이 줄이 실제로 화면에 드러나는 순간(=다음 위원 요청을 미리 보내도 되는
+  // 시점) 호출된다. streamLine 자체는 이 콜백이 불린 뒤에도 백그라운드에서 계속
+  // 스트리밍/재생을 이어가다가, 그 위원 영상이 정말 끝나면(또는 에러나면) 그제서야
+  // Promise를 resolve한다 - 다만 reveal이 먼저 왔다면 이미 resolve된 뒤라 이 두 번째
+  // resolve 시도는 아무 효과가 없다(Promise는 한 번만 resolve됨, 안전).
+  function streamLine(line, tile, onReveal) {
     return new Promise((resolve) => {
-      const token = ++tokenRef.current
-      if (monitorTimerRef.current) clearInterval(monitorTimerRef.current)
-      setStatusText('')
-      const video = videoRefs.current[tile.speakerId]?.stream
+      const speakerKey = tile.speakerId
+      const token = (tokensRef.current[speakerKey] = (tokensRef.current[speakerKey] || 0) + 1)
+      if (monitorTimersRef.current[speakerKey]) clearInterval(monitorTimersRef.current[speakerKey])
+      setStatusTextMap((prev) => ({ ...prev, [speakerKey]: '' }))
+      const video = videoRefs.current[speakerKey]?.stream
       if (!video) {
         resolve()
         return
@@ -181,11 +234,30 @@ const CommitteeVideoStage = forwardRef(function CommitteeVideoStage({ mediaLines
       let mediaSource = null
       let sourceBuffer = null
       let switched = false // 첫 바이너리 데이터가 오기 전까지는 대기 루프를 계속 보여줌
+      let revealed = false // 이 위원 영상이 실제로 화면(stream)에 드러난 적 있는지
+      // 재인/Claude(2026-07-19): tts_end 신호는 "서버가 언제 보냈는지"가 아니라 "영상의
+      // 몇 초 지점부터 tail인지"만 알려준다(speechEndVideoTime) - 신호가 도착하자마자
+      // 반영하면 데이터가 재생 위치보다 앞서 도착하는 특성상 실제 발화가 끝나기 한참
+      // 전에 배지가 꺼지고 다음 위원으로 넘어가는 버그가 있었다(실측 확인). 그래서
+      // monitorBuffer()가 매 tick마다 실제 재생 위치(video.currentTime)와 비교해서,
+      // 진짜로 그 지점을 재생했을 때만(speechEndApplied) 배지를 끄고 게이트를 연다.
+      let speechEndVideoTime = null
+      let speechEndApplied = false
+      let queueAdvanced = false // 큐를 다음으로 넘기는 resolve를 이미 호출했는지
       const appendQueue = []
       let appending = false
       let streamDone = false
 
-      const isStale = () => token !== tokenRef.current
+      const isStale = () => tokensRef.current[speakerKey] !== token
+
+      // reveal이든 완전 종료든, 둘 중 먼저 오는 쪽이 큐를 다음으로 넘긴다 - reveal
+      // 없이(예: 스트림이 버퍼 한 번도 못 채우고 에러난 경우) 끝나버리면 finish()의
+      // 호출이 안전망 역할을 한다.
+      function advanceQueueOnce() {
+        if (queueAdvanced) return
+        queueAdvanced = true
+        resolve()
+      }
 
       let appendCount = 0
       function pump() {
@@ -241,41 +313,77 @@ const CommitteeVideoStage = forwardRef(function CommitteeVideoStage({ mediaLines
         }
       }
 
+      // 재인/Claude(2026-07-19): 직전 위원의 전환 게이트를 확인한다 - forceReady면
+      // (직전 위원이 이미 완전히 자연 종료됐으면) 무조건 통과, 아니면 readyAt 시각을
+      // 지났는지로 판단한다. 배치의 첫 위원은 run()에서 게이트를 이미 "즉시 통과"
+      // 상태로 초기화해두므로 여기서 별도 처리가 필요 없다.
+      function timeGateOk() {
+        const gate = transitionGateRef.current
+        return gate.forceReady || Date.now() >= gate.readyAt
+      }
+
       function monitorBuffer() {
         if (isStale()) {
-          clearInterval(monitorTimerRef.current)
+          clearInterval(monitorTimersRef.current[speakerKey])
           return
         }
         if (!switched) return
         const ahead = bufferedAhead()
         if (ahead === null) {
           // SourceBuffer가 무효화됨 - 이 상태로는 더 진행 못하니 정리하고 다음
-          // 순서(또는 마지막이면 대기 루프)로 넘어간다. 안 그러면 이 인터벌이
-          // 영원히 같은 에러만 반복하면서 아무 진행도 안 되는 상태로 멈춘다.
-          clearInterval(monitorTimerRef.current)
-          setStatusText('영상 스트림 오류 - 건너뜀')
+          // 순서로 넘어간다. 안 그러면 이 인터벌이 영원히 같은 에러만 반복하면서
+          // 아무 진행도 안 되는 상태로 멈춘다.
+          clearInterval(monitorTimersRef.current[speakerKey])
+          setStatusTextMap((prev) => ({ ...prev, [speakerKey]: '영상 스트림 오류 - 건너뜀' }))
           finish()
           return
         }
+        // 재인/Claude(2026-07-19): tts_end로 받은 "몇 초 지점부터 tail인지"를 실제
+        // 재생 위치(video.currentTime)가 지났을 때만 반영한다 - 신호 도착 시점에
+        // 바로 반영하면 데이터가 재생보다 앞서 도착하는 특성상 아직 발화 중인데
+        // 배지가 꺼지는 버그가 있었다. speechEndApplied로 한 번만 반영되게 막는다
+        // (안 그러면 currentTime이 그 지점을 지난 뒤 매 tick마다 게이트의 +2초
+        // 타이머가 "지금부터 다시 +2초"로 계속 밀려서 다음 위원이 영원히 못 넘어옴).
+        if (revealed && !speechEndApplied && speechEndVideoTime !== null && video.currentTime >= speechEndVideoTime) {
+          speechEndApplied = true
+          setSpeakingMap((prev) => (prev[speakerKey] ? { ...prev, [speakerKey]: false } : prev))
+          // owner 체크: 내가 지금도 게이트 주인일 때만 연다 - 이론상 내가 reveal된
+          // 이후로 게이트 주인은 항상 나였어야 하지만(다음 위원은 내가 열어줘야만
+          // 넘어갈 수 있으므로), 방어적으로 동일하게 체크한다.
+          if (transitionGateRef.current.owner === speakerKey) {
+            transitionGateRef.current = { readyAt: Date.now() + NEXT_AVATAR_MIN_GAP_MS, forceReady: false, owner: speakerKey }
+          }
+        }
         if (video.paused) {
-          if (ahead >= RESUME_THRESHOLD || (streamDone && ahead > 0.05)) {
+          const bufferedEnough = ahead >= RESUME_THRESHOLD || (streamDone && ahead > 0.05)
+          if (bufferedEnough && timeGateOk()) {
             video.play().then(() => {
-              // 실제로 재생이 걸린 순간에만(최초 1회) 대기 루프 위로 드러낸다 -
-              // 그 전까지는 대기 루프가 뒤에서 계속 자연스럽게 보인다.
-              setRevealedSpeakerId((prev) => (prev === tile.speakerId ? prev : tile.speakerId))
+              if (!revealed) {
+                revealed = true
+                setRevealedMap((prev) => ({ ...prev, [speakerKey]: true }))
+                setSpeakingMap((prev) => ({ ...prev, [speakerKey]: true }))
+                // 다음 위원 전환 게이트: 아직은 내 실제 재생이 tts_end 지점을 지난 게
+                // 아니므로(방금 막 reveal됐을 뿐) 일단 막아둔다 - 위 speechEndApplied
+                // 체크가 나중에 이 값을 다시 채워준다. owner를 나로 명시해서, 나보다
+                // 앞서 있던(A 등) 늦게 끝나는 위원의 finish()가 이 게이트를 더 이상
+                // 못 건드리게 한다(finish()의 owner 체크 참고).
+                transitionGateRef.current = { readyAt: Infinity, forceReady: false, owner: speakerKey }
+                onReveal?.()
+                advanceQueueOnce() // 화면에 뜨기 시작한 순간, 다음 위원 요청을 미리 보내도록 큐 진행
+              }
             }).catch(() => {})
           }
         } else if (ahead < PAUSE_THRESHOLD && !streamDone) {
           video.pause()
         }
       }
-      monitorTimerRef.current = setInterval(monitorBuffer, 200)
+      monitorTimersRef.current[speakerKey] = setInterval(monitorBuffer, 200)
 
       // 대기 루프 -> 발언 화면 전환은 첫 바이너리 데이터가 실제로 도착했을 때만 한다.
       function switchToStream() {
         switched = true
         video.muted = false // 발화 오디오를 들려야 하므로 음소거 해제
-        setStatusText('')
+        setStatusTextMap((prev) => ({ ...prev, [speakerKey]: '' }))
 
         mediaSource = new MediaSource()
         mediaSource.addEventListener('error', (e) => {
@@ -302,10 +410,25 @@ const CommitteeVideoStage = forwardRef(function CommitteeVideoStage({ mediaLines
 
       function finish() {
         video.removeEventListener('ended', onEnded)
-        if (activeCleanupRef.current === closeWs) activeCleanupRef.current = null
-        // 스트리밍 엘리먼트를 다시 숨긴다 - 대기 루프는 그동안 한 번도 멈춘 적이
-        // 없으므로 별도로 재생을 재시작할 필요가 없다(그게 이 구조 변경의 핵심).
-        setRevealedSpeakerId((prev) => (prev === tile.speakerId ? null : prev))
+        if (activeCleanupsRef.current[speakerKey] === closeWs) activeCleanupsRef.current[speakerKey] = null
+        setRevealedMap((prev) => (prev[speakerKey] ? { ...prev, [speakerKey]: false } : prev))
+        setSpeakingMap((prev) => (prev[speakerKey] ? { ...prev, [speakerKey]: false } : prev))
+        // 내가 화면을 넘겨받았던 적이 있다면(revealed) 이제 완전히 끝났으니 다음
+        // 위원을 즉시 통과시킨다 - tts_end로 이미 +2초 타이머가 걸려있었더라도, 자연
+        // 종료가 그보다 먼저 왔다는 뜻이므로 더 기다릴 이유가 없다(정확히 이게 tail이
+        // 짧은 경우에 손해를 안 보는 이유). revealed가 한 번도 안 됐다면(에러 등으로
+        // 화면에 나온 적 없음) 애초에 게이트를 잡고 있지 않았으므로 건드리지 않는다.
+        //
+        // 재인/Claude(2026-07-19): owner 체크 추가 - 이게 없으면 실측에서 이런 버그가
+        // 났다: A의 tail이 길어서 A가 한참 뒤에야 자연 종료되는데, 그 사이 이미
+        // B->C까지 게이트가 넘어가 C가 발화 중인 상태였다. 이때 A의 finish()가 뒤늦게
+        // 실행되면서 "내가 revealed였다"는 이유만으로 게이트를 무조건 열어버려서, 아직
+        // C가 말하는 중(배지 안 꺼짐)인데 D가 게이트를 통과해 발언을 시작해버렸다.
+        // "지금 게이트를 쥐고 있는 게 진짜 나일 때만" 열도록 owner를 확인한다.
+        if (revealed && transitionGateRef.current.owner === speakerKey) {
+          transitionGateRef.current = { readyAt: 0, forceReady: true, owner: speakerKey }
+        }
+        advanceQueueOnce() // reveal이 한 번도 안 됐을 경우(에러 등)의 안전망
         resolve()
       }
 
@@ -332,7 +455,7 @@ const CommitteeVideoStage = forwardRef(function CommitteeVideoStage({ mediaLines
           /* 이미 닫혀있으면 무시 */
         }
       }
-      activeCleanupRef.current = closeWs
+      activeCleanupsRef.current[speakerKey] = closeWs
 
       ws.onopen = () => {
         if (isStale()) {
@@ -357,12 +480,18 @@ const CommitteeVideoStage = forwardRef(function CommitteeVideoStage({ mediaLines
         if (typeof event.data === 'string') {
           const msg = JSON.parse(event.data)
           if (msg.type === 'status') {
-            setStatusText('생성 중...')
+            setStatusTextMap((prev) => ({ ...prev, [speakerKey]: '생성 중...' }))
+          } else if (msg.type === 'tts_end') {
+            // 재인/Claude(2026-07-19): 값만 저장한다 - 실제 배지 끄기/게이트 열기는
+            // monitorBuffer()가 video.currentTime으로 이 지점을 실제로 지날 때 처리한다
+            // (신호 도착 시점에 바로 반영하면 데이터가 재생보다 앞서 도착해서 아직
+            // 발화 중인데 배지가 꺼지는 버그가 있었음 - 위 monitorBuffer 주석 참고).
+            speechEndVideoTime = typeof msg.speech_seconds === 'number' ? msg.speech_seconds : 0
           } else if (msg.type === 'done') {
             streamDone = true
             maybeEndStream()
           } else if (msg.type === 'error') {
-            setStatusText('에러: ' + msg.message)
+            setStatusTextMap((prev) => ({ ...prev, [speakerKey]: '에러: ' + msg.message }))
             finish()
           }
         } else {
@@ -373,7 +502,7 @@ const CommitteeVideoStage = forwardRef(function CommitteeVideoStage({ mediaLines
       }
       ws.onerror = () => {
         if (!isStale()) {
-          setStatusText('연결 에러')
+          setStatusTextMap((prev) => ({ ...prev, [speakerKey]: '연결 에러' }))
           finish()
         }
       }
@@ -419,21 +548,29 @@ const CommitteeVideoStage = forwardRef(function CommitteeVideoStage({ mediaLines
         if (!batch) continue
 
         setActiveBatch(batch)
+        // 새 배치의 첫 위원은 기다릴 대상이 없으니 게이트를 즉시 통과 상태로 리셋.
+        transitionGateRef.current = { readyAt: 0, forceReady: true, owner: null }
         for (let i = 0; i < batch.length; i++) {
           if (cancelled) return
           const line = batch[i]
           const tile = avatarTiles.find((t) => t.speakerId === line.speaker_id)
-          setCurrentIndex(i)
-          setCurrentLine(line)
           if (tile && availableIds.includes(tile.colabSpeakerId)) {
+            // currentIndex/currentLine(진행률 칩, 자막)은 요청을 보내는 시점이 아니라
+            // 실제로 화면에 드러나는 시점(onReveal)에 갱신한다 - 안 그러면 B를 미리
+            // 요청 보내자마자 자막이 B로 바뀌어버려서, 아직 화면엔 A가 재생 중인데
+            // 자막만 B인 어색한 상태가 된다.
             // eslint-disable-next-line no-await-in-loop
-            await streamLine(line, tile)
+            await streamLine(line, tile, () => {
+              setCurrentIndex(i)
+              setCurrentLine(line)
+            })
             if (cancelled) return
-            // 대기 루프로 되돌리는 별도 호출이 필요 없다 - streamLine의 finish()가
-            // 스트리밍 엘리먼트만 숨기고, 대기 루프는 애초에 멈춘 적이 없다.
           } else {
             // 아바타 창이 없는 위원(위원장 등)이거나, 창은 있지만 백엔드가 아직 준비
             // 안 됐다고 답한 경우 - 영상 없이 자막만 잠깐 보여주고 다음으로 넘어간다.
+            // 이 경로는 "미리 준비"할 네트워크 요청이 없으므로 바로 자막부터 갱신한다.
+            setCurrentIndex(i)
+            setCurrentLine(line)
             // eslint-disable-next-line no-await-in-loop
             await holdForReading(line)
           }
@@ -446,16 +583,19 @@ const CommitteeVideoStage = forwardRef(function CommitteeVideoStage({ mediaLines
     return () => {
       cancelled = true
       wakeRef.current?.() // waitForNextBatch에서 잠들어 있던 루프를 깨워서 실제로 종료시킴
-      tokenRef.current += 1 // 진행 중이던 스트림/읽기 대기 콜백을 전부 무효화
-      if (monitorTimerRef.current) clearInterval(monitorTimerRef.current)
-      if (fallbackTimerRef.current) clearTimeout(fallbackTimerRef.current)
-      // 열려있는 WebSocket을 실제로 끊는다 - 플래그만 세우고 두면 이미 받고 있던
-      // 데이터가 계속 처리되면서 video.src가 다른 곳으로 넘어간 뒤에도 이전
-      // MediaSource를 계속 건드려서 에러가 반복되는 걸 겪었다.
-      if (activeCleanupRef.current) {
-        activeCleanupRef.current()
-        activeCleanupRef.current = null
+      // 위원별로 진행 중이던 스트림/타이머/연결을 전부 무효화하고 정리한다.
+      for (const key of Object.keys(tokensRef.current)) {
+        tokensRef.current[key] += 1
       }
+      for (const key of Object.keys(monitorTimersRef.current)) {
+        clearInterval(monitorTimersRef.current[key])
+      }
+      for (const key of Object.keys(activeCleanupsRef.current)) {
+        activeCleanupsRef.current[key]?.()
+        activeCleanupsRef.current[key] = null
+      }
+      holdTokenRef.current += 1
+      if (holdTimerRef.current) clearTimeout(holdTimerRef.current)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -469,10 +609,12 @@ const CommitteeVideoStage = forwardRef(function CommitteeVideoStage({ mediaLines
       )}
       <div style={styles.callArea}>
         {avatarTiles.map((tile) => {
-          // "발언 중" 표시는 currentLine(어떤 줄을 처리 중인지)이 아니라 revealedSpeakerId
-          // (실제로 버퍼가 다 차서 화면에 드러났는지) 기준으로 한다 - 버퍼링 중엔 아직
-          // 대기 루프가 보이고 있으니, 그 사이에 "발언 중" 배지가 먼저 뜨면 어색하다.
-          const active = revealedSpeakerId === tile.speakerId
+          // stream 영상 노출(idle 위에 겹쳐 보일지)과 "발언 중" 강조는 이제 서로 다른
+          // 상태다 - A가 무음 tail을 재생 중이어도(streamVisible=true) 이미 "발언
+          // 중"은 꺼져있을 수 있고(speaking=false), 그 사이 B가 speaking=true로
+          // 앞서 켜질 수 있다.
+          const streamVisible = !!revealedMap[tile.speakerId]
+          const speaking = !!speakingMap[tile.speakerId]
           const color = personaColor(tile.speakerId)
           if (!videoRefs.current[tile.speakerId]) videoRefs.current[tile.speakerId] = {}
           return (
@@ -480,16 +622,15 @@ const CommitteeVideoStage = forwardRef(function CommitteeVideoStage({ mediaLines
               key={tile.speakerId}
               style={{
                 ...styles.videoTile,
-                ...(active ? { boxShadow: `0 0 0 3px ${color}, 0 8px 24px rgba(0,0,0,0.35)` } : {}),
+                ...(speaking ? { boxShadow: `0 0 0 3px ${color}, 0 8px 24px rgba(0,0,0,0.35)` } : {}),
               }}
             >
               {/* muted를 JSX 속성으로 고정하면 안 된다 - switchToStream()이 오디오를 들려주려고
                   video.muted=false로 바꾼 직후 리렌더링이 일어나는데, 그때 React가 JSX의
                   muted(true)를 다시 적용해버려서 오디오 디코더 초기화 도중 음소거 상태가
-                  갑자기 또 바뀌는 문제가 실제로 있었다. 그래서 muted는 여기서 관리하지 않고
-                  순수 명령형으로만(video.muted = ...) 제어한다 - startIdleVideo()가 마운트
-                  직후 바로 true로 설정한다. 대기 루프 엘리먼트는 이후 다시 안 건드리므로
-                  이 문제 자체가 없지만, 일관성 있게 스트림 쪽도 동일하게 처리한다. */}
+                  갑자기 또 바뀌는 문제가 실제로 있었다. 그래서 muted는 순수 명령형으로만
+                  (video.muted = ...) 제어한다 - startIdleVideo()가 마운트 직후 바로 true로
+                  설정한다. */}
               <video
                 ref={(el) => {
                   videoRefs.current[tile.speakerId].idle = el
@@ -503,13 +644,15 @@ const CommitteeVideoStage = forwardRef(function CommitteeVideoStage({ mediaLines
                   videoRefs.current[tile.speakerId].stream = el
                 }}
                 playsInline
-                style={{ ...styles.video, ...styles.videoStream, ...(active ? styles.videoStreamVisible : {}) }}
+                style={{ ...styles.video, ...styles.videoStream, ...(streamVisible ? styles.videoStreamVisible : {}) }}
               />
-              <div style={{ ...styles.speakerBadge, ...(active ? { background: color } : {}) }}>
+              <div style={{ ...styles.speakerBadge, ...(speaking ? { background: color } : {}) }}>
                 {tile.label}
               </div>
-              {active && statusText && <div style={styles.statusBadge}>{statusText}</div>}
-              {active && <div style={styles.speakingBadge}>🔊 발언 중</div>}
+              {streamVisible && statusTextMap[tile.speakerId] && (
+                <div style={styles.statusBadge}>{statusTextMap[tile.speakerId]}</div>
+              )}
+              {speaking && <div style={styles.speakingBadge}>🔊 발언 중</div>}
             </div>
           )
         })}
