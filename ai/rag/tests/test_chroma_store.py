@@ -38,7 +38,7 @@ def _make_embedded_chunk(chunk_id: str, document_id: str, project_id: str, seed:
         "content_kind": "body",
         "source_block_ids": ["b1", "b2"],
         "source_block_orders": [0, 1],
-        "chunking_version": "chunking_v1",
+        "chunking_version": "chunking_v2",
         "embedding_model": _MODEL,
         "embedding_version": _VERSION,
         "indexable": True,
@@ -117,6 +117,35 @@ class TestUpsert:
         assert results[0].metadata["source_block_ids"] == ["b1", "b2"]
         assert results[0].metadata["source_block_orders"] == [0, 1]
         assert results[0].metadata["document_title"] == "문서 제목"
+
+    def test_section_page_document_id_chunk_id_round_trip(self, store):
+        """section_title/location_number(page)/document_id/chunk_id/document_role이
+        Chroma 저장·조회를 거쳐도 그대로 유지되어야 한다."""
+        chunks = [
+            _make_embedded_chunk(
+                "c1", "doc-1", "p1", 0.1,
+                section_title="1) 개요", location_number=3, document_role="submission",
+            )
+        ]
+        embedding_result = _make_embedding_result("p1", "doc-1", chunks)
+        store.upsert_embedding_result(embedding_result, IndexingContext(project_id="p1", document_id="doc-1"))
+
+        results = store.search(query_embedding=_vec(0.1), project_id="p1", top_k=1)
+        assert results[0].document_id == "doc-1"
+        assert results[0].chunk_id == "c1"
+        assert results[0].metadata["section_title"] == "1) 개요"
+        assert results[0].metadata["location_number"] == 3
+        assert results[0].metadata["document_role"] == "submission"
+
+    def test_section_title_none_is_dropped_not_stored_as_null_string(self, store):
+        """section을 확실히 판단하지 못해 None인 청크는 Chroma에 None 키가 저장되지 않고
+        (chroma가 None을 조용히 버림), 조회 시에도 section_title 키가 없거나 None이어야 한다."""
+        chunks = [_make_embedded_chunk("c1", "doc-1", "p1", 0.1, section_title=None)]
+        embedding_result = _make_embedding_result("p1", "doc-1", chunks)
+        store.upsert_embedding_result(embedding_result, IndexingContext(project_id="p1", document_id="doc-1"))
+
+        results = store.search(query_embedding=_vec(0.1), project_id="p1", top_k=1)
+        assert results[0].metadata.get("section_title") is None
 
     def test_reindexing_same_chunk_no_duplicate(self, store):
         chunks = [_make_embedded_chunk("c1", "doc-1", "p1", 0.1)]

@@ -23,6 +23,13 @@ class IndexingContext(BaseModel):
     document_title: Optional[str] = Field(
         None, description="ChunkSourceContext.document_title과 동일한 값을 호출자가 그대로 전달 (Chunk엔 저장되지 않음)"
     )
+    document_role: Optional[str] = Field(
+        None,
+        description=(
+            "문서가 회의에서 맡는 역할(예: 사용자가 제출한 검토 대상 문서 vs 참고용 공고문/평가기준 문서). "
+            "호출자가 아는 경우에만 전달하는 선택 필드로, 없으면 청크 메타데이터에 저장되지 않는다."
+        ),
+    )
     collection_name: str = Field(default=DEFAULT_COLLECTION_NAME, description="Chroma 컬렉션 이름")
 
     @field_validator("project_id", "document_id")

@@ -98,6 +98,59 @@ _MAPPING = _rubric_mapping(
 )
 
 
+def _government_support_rubric_mapping() -> dict:
+    """rubric_mapping_government_support.json과 동일한 구조의 fixture(secondary_persona_id 포함)."""
+    return {
+        "committee": ["policy_fit", "business_strategy", "technical_feasibility", "budget_execution"],
+        "total_max_score": 100,
+        "rubric": [
+            {
+                "criterion_id": "necessity",
+                "criterion_name": "사업 필요성",
+                "max_score": 20,
+                "required": True,
+                "primary_persona_id": "business_strategy",
+                "secondary_persona_id": None,
+            },
+            {
+                "criterion_id": "feasibility",
+                "criterion_name": "사업화 가능성",
+                "max_score": 25,
+                "required": True,
+                "primary_persona_id": "business_strategy",
+                "secondary_persona_id": None,
+            },
+            {
+                "criterion_id": "tech_capability",
+                "criterion_name": "기술성 및 수행역량",
+                "max_score": 25,
+                "required": True,
+                "primary_persona_id": "technical_feasibility",
+                "secondary_persona_id": None,
+            },
+            {
+                "criterion_id": "execution_plan",
+                "criterion_name": "추진계획 적정성",
+                "max_score": 20,
+                "required": True,
+                "primary_persona_id": "budget_execution",
+                "secondary_persona_id": "technical_feasibility",
+            },
+            {
+                "criterion_id": "policy_alignment",
+                "criterion_name": "정책 부합성",
+                "max_score": 10,
+                "required": True,
+                "primary_persona_id": "policy_fit",
+                "secondary_persona_id": None,
+            },
+        ],
+    }
+
+
+_GOVERNMENT_SUPPORT_MAPPING = _government_support_rubric_mapping()
+
+
 class TestPrepareMeetingEvidenceSearch:
     def test_calls_role_aware_search_per_persona_criterion(self):
         fake = FakeRetrievalService({"p1": _GOOD_RECORDS})
@@ -300,6 +353,105 @@ class TestEvidenceCallback:
         assert result["linked_evidence_refs"] == []
         assert result["sufficiency"]["allow_numeric_score"] is False
         assert result["sufficiency"]["allow_definitive_judgment"] is False
+
+
+class TestGovernmentSupportOrchestration:
+    def _load_real_rubric_mapping(self) -> dict:
+        import json
+
+        path = REPO_ROOT / "ai" / "meeting" / "personas" / "rubric_mapping_government_support.json"
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def test_real_rubric_mapping_file_completes_without_persona_role_mapping_error(self):
+        mapping = self._load_real_rubric_mapping()
+        fake = FakeRetrievalService({"p1": _GOOD_RECORDS})
+        service = _make_service(fake)
+        entries = service.prepare_meeting_evidence(
+            project_id="p1", domain="government_support", rubric_mapping=mapping
+        )
+        assert len(entries) > 0
+
+    def test_fixture_rubric_mapping_completes_without_persona_role_mapping_error(self):
+        fake = FakeRetrievalService({"p1": _GOOD_RECORDS})
+        service = _make_service(fake)
+        entries = service.prepare_meeting_evidence(
+            project_id="p1", domain="government_support", rubric_mapping=_GOVERNMENT_SUPPORT_MAPPING
+        )
+        # rubric 5개 항목 + execution_plan의 secondary_persona_id(technical_feasibility)가
+        # 별도 (persona_id, criterion_id) 조합으로 추가되어 총 6건.
+        assert len(entries) == 6
+
+    def test_policy_fit_search_uses_policy_role_id(self):
+        fake = FakeRetrievalService({"p1": _GOOD_RECORDS})
+        service = _make_service(fake)
+        service.prepare_meeting_evidence(
+            project_id="p1", domain="government_support", rubric_mapping=_GOVERNMENT_SUPPORT_MAPPING
+        )
+        role_response = service._search_cache[("policy_fit", "policy_alignment")]
+        assert role_response.role_id == "policy"
+
+    def test_budget_execution_search_uses_budget_execution_role_id(self):
+        fake = FakeRetrievalService({"p1": _GOOD_RECORDS})
+        service = _make_service(fake)
+        service.prepare_meeting_evidence(
+            project_id="p1", domain="government_support", rubric_mapping=_GOVERNMENT_SUPPORT_MAPPING
+        )
+        role_response = service._search_cache[("budget_execution", "execution_plan")]
+        assert role_response.role_id == "budget_execution"
+
+    def test_business_strategy_necessity_uses_planning_role_id(self):
+        fake = FakeRetrievalService({"p1": _GOOD_RECORDS})
+        service = _make_service(fake)
+        service.prepare_meeting_evidence(
+            project_id="p1", domain="government_support", rubric_mapping=_GOVERNMENT_SUPPORT_MAPPING
+        )
+        role_response = service._search_cache[("business_strategy", "necessity")]
+        assert role_response.role_id == "planning"
+
+    def test_business_strategy_feasibility_uses_marketing_override_role_id(self):
+        fake = FakeRetrievalService({"p1": _GOOD_RECORDS})
+        service = _make_service(fake)
+        service.prepare_meeting_evidence(
+            project_id="p1", domain="government_support", rubric_mapping=_GOVERNMENT_SUPPORT_MAPPING
+        )
+        role_response = service._search_cache[("business_strategy", "feasibility")]
+        assert role_response.role_id == "marketing"
+
+    def test_technical_feasibility_uses_technology_role_id(self):
+        fake = FakeRetrievalService({"p1": _GOOD_RECORDS})
+        service = _make_service(fake)
+        service.prepare_meeting_evidence(
+            project_id="p1", domain="government_support", rubric_mapping=_GOVERNMENT_SUPPORT_MAPPING
+        )
+        role_response = service._search_cache[("technical_feasibility", "tech_capability")]
+        assert role_response.role_id == "technology"
+
+    def test_execution_plan_primary_and_secondary_persona_have_independent_cache_keys(self):
+        # execution_plan은 primary=budget_execution, secondary=technical_feasibility로
+        # iter_persona_criteria()가 두 persona 모두를 분리된 (persona_id, criterion_id)
+        # 캐시 키로 검색한다.
+        fake = FakeRetrievalService({"p1": _GOOD_RECORDS})
+        service = _make_service(fake)
+        service.prepare_meeting_evidence(
+            project_id="p1", domain="government_support", rubric_mapping=_GOVERNMENT_SUPPORT_MAPPING
+        )
+        assert ("budget_execution", "execution_plan") in service._search_cache
+        assert ("technical_feasibility", "execution_plan") in service._search_cache
+        primary = service._search_cache[("budget_execution", "execution_plan")]
+        secondary = service._search_cache[("technical_feasibility", "execution_plan")]
+        assert primary.role_id == "budget_execution"
+        assert secondary.role_id == "technology"
+
+    def test_returns_plain_evidence_context_data_contract(self):
+        fake = FakeRetrievalService({"p1": _GOOD_RECORDS})
+        service = _make_service(fake)
+        entries = service.prepare_meeting_evidence(
+            project_id="p1", domain="government_support", rubric_mapping=_GOVERNMENT_SUPPORT_MAPPING
+        )
+        for entry in entries:
+            assert isinstance(entry, dict)
+            assert set(entry.keys()) >= {"persona_id", "criterion_id", "retrieved_evidence", "sufficiency"}
+            assert isinstance(entry["retrieved_evidence"], list)
 
 
 class TestScopeBoundary:
