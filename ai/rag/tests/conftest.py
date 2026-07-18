@@ -25,6 +25,11 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers", "embedding_integration: 실제 KURE-v1 모델을 로딩하는 통합 테스트 (RUN_KURE_INTEGRATION=1로만 실행)"
     )
+    config.addinivalue_line(
+        "markers",
+        "url_integration: 실제 URL 네트워크 요청 + 실제 KURE-v1 모델을 사용하는 fetch-url 색인 통합 테스트 "
+        "(RUN_URL_INTEGRATION=1로만 실행)",
+    )
 
 
 @pytest.fixture
