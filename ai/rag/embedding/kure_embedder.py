@@ -5,7 +5,9 @@ ChunkingResult(indexable=True 청크)를 KURE-v1로 임베딩한다. LangGraph/F
 무관하게 단독 실행 가능하며, 모델은 인스턴스 생성 시 한 번만 로딩되어 재사용된다.
 """
 
+import logging
 import math
+import time
 from typing import Optional
 
 from sentence_transformers import SentenceTransformer
@@ -14,6 +16,8 @@ from ai.rag.chunking.schemas import Chunk, ChunkingResult
 from ai.rag.domain.schemas import IndexingContext
 from ai.rag.embedding.schemas import EmbeddingConfig, EmbeddedChunk, EmbeddingResult
 from ai.rag.embedding.text_builder import build_embedding_text
+
+logger = logging.getLogger(__name__)
 
 
 class EmptyQueryError(ValueError):
@@ -112,11 +116,22 @@ class KUREEmbedder:
                 embedding_version=self._config.embedding_version,
             )
 
+        total_chars = sum(len(t) for t in embed_texts)
+        max_chars = max((len(t) for t in embed_texts), default=0)
+        logger.info(
+            "rag.embed.encode_start document_id=%s text_count=%d total_chars=%d max_chars=%d batch_size=%d",
+            context.document_id, len(embed_texts), total_chars, max_chars, self._config.batch_size,
+        )
+        t0 = time.monotonic()
         vectors = self._model.encode(
             embed_texts,
             batch_size=self._config.batch_size,
             normalize_embeddings=self._config.normalize_embeddings,
             show_progress_bar=self._config.show_progress,
+        )
+        logger.info(
+            "rag.embed.encode_done document_id=%s elapsed_ms=%.0f",
+            context.document_id, (time.monotonic() - t0) * 1000,
         )
         self._validate_finite(vectors)
 

@@ -27,6 +27,12 @@ class AttachmentFileType(str, Enum):
     PPTX = "pptx"
     HWP = "hwp"
     HWPX = "hwpx"
+    # 가은/Claude(2026-07-18): 공모전 공고가 포스터 이미지 한 장으로만 올라오는 경우가
+    # 많아서(정부기관 사이트 실측 — sotong.go.kr) 추가. 다운로드 후 url_loader.py가
+    # 1페이지 PDF로 감싸서 기존 PDFParser의 임베디드 이미지 OCR(EasyOCR, PR #6)을
+    # 그대로 재사용한다 — 새 OCR 엔트리포인트를 만들지 않는다.
+    JPEG = "jpeg"
+    PNG = "png"
     UNKNOWN = "unknown"  # 확장자 없는 다운로드 링크 (다운로드 후 실제 형식 확인 필요)
 
 

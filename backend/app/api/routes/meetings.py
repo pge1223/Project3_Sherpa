@@ -96,6 +96,7 @@ import asyncio
 import io
 import json
 import logging
+import re
 import sys
 import time
 import uuid
@@ -110,9 +111,6 @@ from jose import jwt, JWTError
 from openai import OpenAI
 from starlette.concurrency import run_in_threadpool
 
-import chromadb
-
-from ai.rag.embedding.kure_embedder import KUREEmbedder
 from ai.rag.evidence_linking.service import EvidenceLinkingService
 from ai.rag.evidence_sufficiency.service import EvidenceSufficiencyService
 from ai.rag.orchestration import MeetingEvidenceOrchestrationService
@@ -159,8 +157,10 @@ if str(_MEETING_DIR) not in sys.path:
 # ai/meeting/graph/reevaluate.py, MTG-007 재평가 임시 구현)는 경이 버전으로 교체하고
 # 아래(analyze_project/reevaluate_reviewer)에 주석으로만 남겨둔다.
 from graph import (  # noqa: E402
+    build_dynamic_rubric_mapping,
     build_rubric,
     rerun_reviewer,
+    run_chair_phase,
     run_meeting,
 )
 # from graph import (
@@ -187,16 +187,38 @@ _RECURSION_LIMIT = 12
 # RAGIndexingService 인스턴스를 그대로 주입해 KUREEmbedder를 두 번 로딩하지 않는다(RAG-006과
 # 동일 패턴). MeetingEvidenceOrchestrationService 자체는 검색 결과 캐시를 들고 있어 회의
 # 1회(요청 1건)마다 새로 만들어야 하므로 여기서 만들지 않는다(analyze_project() 참고).
-from app.api.routes.documents import _get_indexing_service  # noqa: E402
+from app.api.routes.documents import _get_chroma_client, _get_indexing_service  # noqa: E402
 
 _role_retrieval_service = RoleAwareRetrievalService(retrieval_service=_get_indexing_service())
 _evidence_linking_service = EvidenceLinkingService()
 _evidence_sufficiency_service = EvidenceSufficiencyService()
 
 # RAG-006: similar_success_cases 검색 서비스 (앱 시작 시 1회 초기화)
+# 용준/Claude(2026-07-18, fetch-url 색인 5분+ hang 조사): 여기서 별도로
+# chromadb.PersistentClient(path=str(Path(settings.CHROMA_PERSIST_DIR)))와 KUREEmbedder()를
+# 새로 만들고 있었다 — documents.py의 client는 path=settings.CHROMA_PERSIST_DIR("./chroma_db")
+# 그대로 identifier로 쓰는데, 여기 str(Path(...))는 pathlib이 "./" 접두사를 제거해
+# identifier가 "chroma_db"로 달라진다("./chroma_db" != "chroma_db"). chromadb는
+# PersistentClient(path=...)를 프로세스 전역 캐시(SharedSystemClient._identifier_to_system)에
+# identifier 문자열 그대로 key로 저장하므로, 이 둘은 완전히 별개의 System(=별개의 엔진/SQLite
+# 연결)이 되어 같은 물리 chroma_db 디렉터리에 서로 모른 채 동시 접근한다 — 이 구조적 결함
+# 자체는 재현 스크립트로 직접 확인했다(서로 다른 identifier 문자열 → 서로 다른 System).
+# Windows는 SQLite 파일 잠금이 POSIX와 달리 mandatory라 이런 상태에서 한쪽이 쓰기 중일 때
+# 다른 쪽이 파일을 열려고 하면 즉시 에러 대신 무기한 대기로 이어질 수 있다는 것이 보고된
+# 5분+ hang의 가장 유력한 원인이다(팀이 이미 scripts/verify_klawyer_rag_quality.py에서
+# SharedSystemClient 캐싱과 Windows 잠금 문제를 겪은 적이 있다는 주석을 남겨둔 것과 같은
+# 메커니즘). 다만 실제 5분 hang을 이 조건만으로 직접 재현하지는 못했다 — 스크립트 재현은
+# 초 단위로 끝났고, 실제 hang은 체크포인트/DDL 타이밍이 겹쳐야 하는 레이스로 추정된다.
+# 즉 "구조적 결함이 존재한다"는 확인된 사실이고, "이것이 보고된 hang의 원인이다"는 가장
+# 유력한 가설이지 인과관계가 재현으로 확정된 것은 아니다 — 그래도 chromadb 자체가 금지하는
+# 상태(같은 경로에 서로 다른 identifier로 열린 System 2개)라 고칠 근거는 충분하다.
+# KUREEmbedder()도 SentenceTransformer를 프로세스에 두 번 로딩하는 낭비였다. documents.py의
+# 싱글턴 client/embedder를 그대로 재사용해 중복 생성을 없앤다 — collection_name만 다르면
+# (similar_cases) 같은 client로도 얼마든지 별도 컬렉션을 만들 수 있다(ChromaVectorStore/
+# SimilarCaseRepository 둘 다 client를 주입받는 구조라 client 자체의 재사용에는 문제가 없다).
 _similar_case_config = SimilarCaseConfig()
-_chroma_client = chromadb.PersistentClient(path=str(Path(settings.CHROMA_PERSIST_DIR)))
-_kure_embedder = KUREEmbedder()
+_chroma_client = _get_chroma_client()
+_kure_embedder = _get_indexing_service().embedder
 _similar_case_repo = SimilarCaseRepository(
     client=_chroma_client,
     collection_name=_similar_case_config.collection_name,
@@ -295,6 +317,15 @@ def _build_real_llm_call(meeting_id: str):
 #     return [{**v2_result, "persona_id": persona_id} for persona_id, v2_result in reviewer_results.items()]
 
 
+# 가은/Claude(2026-07-18): "source_document_id가 왜 항상 null이냐"는 질문에 대한 답 —
+# 버그가 아니라 지금 구조 자체가 그렇다. rubric은 업로드된 공고문에서 추출되는 게 아니라
+# domain(competition/government_support)별 정적 템플릿(rubric_mapping_{domain}.json)을
+# 그대로 쓴다(공고문 자동 추출은 용준 담당, notice_criteria 추출 자체가 미착수 —
+# meetings.py 상단 큰 주석의 [analyze_project() 실제 흐름] 3번 참고). 그래서 rubric.py의
+# build_rubric()이 source_document_id를 항상 None으로 채운다 — 공고문 URL을 아무리 잘
+# 수집해도 rubric 자체는 안 바뀐다. 반면 업로드된 공고문은 retrieved_evidence(RAG 검색)
+# 근거로는 쓰이므로, "루브릭이 안 먹었다"보다는 "애초에 루브릭에 반영되는 경로가 없다"가
+# 정확한 진단이다. 터미널에서 바로 확인할 수 있도록 로그를 남긴다.
 def _load_rubric_mapping(domain: str) -> dict:
     path = _PERSONAS_DIR / f"rubric_mapping_{domain}.json"
     if not path.exists():
@@ -302,7 +333,165 @@ def _load_rubric_mapping(domain: str) -> dict:
             status_code=400,
             detail=f"'{domain}' 도메인의 평가기준 템플릿(rubric_mapping_{domain}.json)이 아직 없습니다.",
         )
-    return json.loads(path.read_text(encoding="utf-8"))
+    mapping = json.loads(path.read_text(encoding="utf-8"))
+    logger.info(
+        "[rubric] domain=%s -> %s 정적 템플릿 로드 (공고문에서 자동 추출한 게 아니라 "
+        "도메인 고정 기준입니다 — source_document_id는 항상 null). criteria=%d개, committee=%s",
+        domain,
+        path.name,
+        len(mapping.get("rubric", [])),
+        mapping.get("committee"),
+    )
+    return mapping
+
+
+# 가은/Claude(2026-07-18): PER-002 동적 rubric — 공모전 공고문(criteria 문서)에서 LLM으로
+# 평가항목을 추출해 정적 템플릿(rubric_mapping_competition.json) 대신 쓴다. 경이 승인 조건
+# (팀 공유 답변, 2026-07-18):
+#   - RAG-003~005는 criterion_id가 동적이어도 그대로 동작하므로 큰 구조 변경 없음.
+#   - prepare_meeting_evidence()가 rubric_mapping["rubric"]의 persona 배정을 직접 쓰므로,
+#     추출 결과는 bare rubric이 아니라 persona 정보가 포함된 mapping 전체여야 하고, 같은
+#     effective_mapping을 RAG 쪽과 run_meeting() 양쪽에 넘겨야 한다 — analyze_project()가
+#     이미 mapping 변수 하나만 두 곳(evidence_service.prepare_meeting_evidence,
+#     run_meeting)에 그대로 전달하는 구조라 이 조건은 mapping을 만드는 지점만 바꾸면
+#     자동으로 만족된다(아래 analyze_project() 수정 참고).
+#   - 새 항목도 기존 4개 committee persona 중 하나에만 배정한다(새 위원 생성 금지) —
+#     실제 검증은 build_dynamic_rubric_mapping()(ai/meeting/graph/rubric.py)이 한다.
+#   - DB엔 정적 rubric이 아니라 실제 실행된 동적 rubric을 저장한다 — MeetingModel.rubric은
+#     이미 build_rubric(mapping)의 결과를 그대로 쓰므로 여기서 별도 수정이 필요 없다.
+# 프로젝트당 1회만 추출해서 project.dynamic_rubric_mapping에 캐시한다(재분석 때마다 다시
+# 부르지 않음). 공고문(criteria 문서)이 없거나 추출/검증에 실패하면 정적 템플릿
+# (base_mapping)으로 조용히 폴백한다 — competition 도메인에서만 시도한다
+# (government_support는 role_mapping.py 미확정 등으로 아직 범위 밖, PER-002 우선순위
+# 합의 참고).
+_RUBRIC_EXTRACTION_MAX_ITEMS = 8
+
+
+def _build_rubric_extraction_prompt(
+    criteria_text: str,
+    base_mapping: dict,
+    persona_cards: dict[str, dict],
+) -> str:
+    committee = base_mapping["committee"]
+    default_axis_lines = "\n".join(
+        f'- criterion_id: "{item["criterion_id"]}" ({item["criterion_name"]}) -> 기본 담당 위원: '
+        f'"{item["primary_persona_id"]}"'
+        for item in base_mapping["rubric"]
+    )
+    persona_lines = "\n".join(
+        f'- persona_id: "{pid}" ({persona_cards[pid]["display_name"]}, {persona_cards[pid]["role"]}) '
+        f'평가관점(perspective_id): {[p["perspective_id"] for p in persona_cards[pid]["evaluation_perspectives"]]}'
+        for pid in committee
+    )
+    truncated = criteria_text[:_SUBMISSION_TRUNCATE_CHARS]
+    return f"""당신은 공모전 공고문(모집요강)에서 실제 심사 평가항목을 추출하는 보조입니다.
+아래 [공고문 내용]을 읽고, 이 공모전의 평가항목을 최대 {_RUBRIC_EXTRACTION_MAX_ITEMS}개까지
+추출하세요.
+
+규칙:
+- 공고문에 명시된 평가항목을 최우선으로 사용하세요. 배점(가중치)이 공고문에 있으면 그대로
+  쓰고, 없으면 전체 100점을 항목 수로 균등 배분하세요(모든 항목의 max_score 합은 반드시
+  100이어야 합니다).
+- 아래 [기본 4범주]에 자연스럽게 대응되면 criterion_id를 새로 만들지 말고 그 criterion_id를
+  그대로 재사용하세요.
+- 기본 4범주 어디에도 안 맞는 공고문만의 고유 평가축(예: 팀 구성, 지속가능성, 파급효과)이
+  있을 때만 새 criterion_id(영문 snake_case)를 만드세요.
+- 반드시 아래 [참여 위원 목록]에 있는 persona_id 중 하나에만 primary_persona_id를
+  배정하세요. 새 위원을 만들지 마세요.
+- primary_perspective_id는 반드시 그 위원의 평가관점(perspective_id) 목록 중 하나를
+  그대로 쓰세요. 목록에 없는 값을 지어내지 마세요.
+- 필요하면 secondary_persona_id를 다른 위원 한 명으로 추가할 수 있습니다(선택, 없으면 null).
+- 공고문에서 평가항목 자체를 찾을 수 없으면 "criteria": []로 응답하세요.
+
+[기본 4범주 — 참고용, 그대로 재사용 가능]
+{default_axis_lines}
+
+[참여 위원 목록]
+{persona_lines}
+
+[공고문 내용]
+{truncated}
+
+다음 JSON 형식으로만 응답하세요:
+{{"criteria": [
+  {{"criterion_id": "...", "criterion_name": "...", "max_score": 25, "required": true,
+    "primary_persona_id": "...", "primary_perspective_id": "...", "secondary_persona_id": null}}
+]}}"""
+
+
+def _call_rubric_extraction_llm(prompt: str) -> str:
+    profile = (settings.LLM_PROFILE or "dev").lower()
+    model = settings.QUALITY_LLM_REVIEWER_MODEL if profile == "quality" else settings.DEV_LLM_REVIEWER_MODEL
+    client = OpenAI(api_key=settings.OPENAI_API_KEY, max_retries=1)
+    resp = client.chat.completions.create(
+        model=model,
+        messages=[{"role": "user", "content": prompt}],
+        response_format={"type": "json_object"},
+    )
+    return resp.choices[0].message.content
+
+
+async def _get_or_build_rubric_mapping(project: dict, project_id: str, domain: str, base_mapping: dict) -> dict:
+    """domain=="competition"이고 공고문(criteria 문서)이 색인돼 있으면 그걸로 동적
+    rubric을 추출해 project에 캐시하고 반환한다. 그 외(다른 domain, 공고문 없음,
+    추출/검증 실패)엔 base_mapping(정적 템플릿)을 그대로 반환한다 — 이 함수는 절대
+    예외를 밖으로 던지지 않는다(analyze_project()가 rubric 유무로 흐름을 막지 않게
+    하기 위함, "추출 실패 시 정적 템플릿 폴백" 팀 요구사항)."""
+    if domain != "competition":
+        return base_mapping
+
+    cached = project.get("dynamic_rubric_mapping")
+    if cached:
+        logger.info(
+            "[rubric] project_id=%s 캐시된 동적 rubric 재사용 criteria=%d개 source_document_id=%s",
+            project_id,
+            len(cached.get("rubric", [])),
+            cached.get("meta", {}).get("source_document_id"),
+        )
+        return cached
+
+    documents = await document_repo.find_by_project_id(project_id)
+    criteria_docs = [d for d in documents if d.get("document_role") == "criteria" and d.get("parsed_text")]
+    if not criteria_docs:
+        logger.info(
+            "[rubric] project_id=%s 공고문(criteria) 문서가 없어 정적 템플릿으로 진행합니다.",
+            project_id,
+        )
+        return base_mapping
+    criteria_doc = criteria_docs[0]
+
+    try:
+        persona_cards = {pid: get_persona_card(pid) for pid in base_mapping["committee"]}
+        prompt = _build_rubric_extraction_prompt(criteria_doc["parsed_text"], base_mapping, persona_cards)
+        raw = await run_in_threadpool(_call_rubric_extraction_llm, prompt)
+        parsed = json.loads(raw)
+        extracted_items = parsed.get("criteria")
+        if not isinstance(extracted_items, list):
+            raise ValueError(f"'criteria' 필드가 리스트가 아닙니다: {parsed!r}")
+        dynamic_mapping = build_dynamic_rubric_mapping(
+            base_mapping=base_mapping,
+            extracted_items=extracted_items,
+            source_document_id=str(criteria_doc["_id"]),
+            persona_cards=persona_cards,
+        )
+    except Exception as e:
+        logger.warning(
+            "[rubric] project_id=%s 동적 rubric 추출 실패(%s) — 정적 템플릿으로 폴백합니다.",
+            project_id,
+            e,
+        )
+        return base_mapping
+
+    logger.info(
+        "[rubric] project_id=%s 공고문에서 동적 rubric 추출 성공 criteria=%d개 "
+        "source_document_id=%s total_max_score=%s",
+        project_id,
+        len(dynamic_mapping["rubric"]),
+        dynamic_mapping["meta"]["source_document_id"],
+        dynamic_mapping["total_max_score"],
+    )
+    await project_repo.update_project(project_id, {"dynamic_rubric_mapping": dynamic_mapping})
+    return dynamic_mapping
 
 
 # 가은/Claude(2026-07-17): 위원별 역할 기반 검색 "배선 교체"(위 이전 버전 주석 참고)를
@@ -328,10 +517,60 @@ def _flatten_evidence_context(evidence_context: list[dict]) -> list[dict]:
     return list(evidence_by_chunk.values())
 
 
+# 가은/Claude(2026-07-18): "공고문 URL이 실제로 검색에 잡히는지" 확인용 로그 — 원래
+# _search_evidence_for_rubric()(role_id=None, 단순 semantic 검색)에 달아뒀던 진단
+# 로그인데, RAG-003/004/005 정식 연동(MeetingEvidenceOrchestrationService, 위 주석
+# 참고)으로 대체되면서 그 함수 자체가 없어졌다 — evidence_context를 만든 직후(호출부,
+# analyze_project())에서 persona_id/criterion_id별로 몇 건 잡혔는지, evidence_status
+# (RAG-005 사전 판정)까지 로그로 남기는 걸로 옮긴다.
+def _log_evidence_context(project_id: str, evidence_context: list[dict]) -> None:
+    total_hits = 0
+    for entry in evidence_context:
+        hits = entry.get("retrieved_evidence") or []
+        total_hits += len(hits)
+        hit_names = [
+            item.get("document_name") or item.get("source_filename") or "(제목 없음)" for item in hits
+        ]
+        logger.info(
+            "[evidence] persona=%s criterion=%s 검색결과=%d건 sufficiency=%s 출처=%s",
+            entry.get("persona_id"),
+            entry.get("criterion_id"),
+            len(hits),
+            (entry.get("sufficiency") or {}).get("evidence_status"),
+            hit_names or "(없음)",
+        )
+    if total_hits == 0:
+        logger.warning(
+            "[evidence] project_id=%s 전체 %d개 (persona, criterion) 조합에서 근거를 하나도 "
+            "못 찾았습니다 — 공고문/기획서가 색인(embedding)까지 끝났는지 documents 컬렉션의 "
+            "status를 확인하세요.",
+            project_id,
+            len(evidence_context),
+        )
+
+
 # 가은/Claude(2026-07-16): analyze_project()와 새 mentor-candidates 엔드포인트(STEP4
 # 멘토 추천 화면)가 둘 다 "document_role=target 첫 문서"를 필요로 해서 공용으로 뺐다.
 async def _load_target_submission(project_id: str) -> tuple[dict, dict]:
     documents = await document_repo.find_by_project_id(project_id)
+    # 가은/Claude(2026-07-18): "공모전 공고 URL 쪽이 색인이 안 된 것 같다" 진단용 —
+    # 이 프로젝트에 실제로 몇 개 문서가, 어떤 role/status로 올라와 있는지 분석 시작 시점에
+    # 터미널에서 바로 보이게 한다. status가 indexed가 아니면(uploaded/*_failed) 그 문서는
+    # RAG 검색에도 안 잡힌다.
+    logger.info(
+        "[documents] project_id=%s 문서 현황: %s",
+        project_id,
+        [
+            {
+                "role": d.get("document_role", "target"),
+                "name": d.get("original_filename"),
+                "status": d.get("status"),
+                "has_parsed_text": bool(d.get("parsed_text")),
+            }
+            for d in documents
+        ]
+        or "(문서 없음)",
+    )
     target_docs = [d for d in documents if d.get("document_role", "target") == "target" and d.get("parsed_text")]
     if not target_docs:
         raise HTTPException(
@@ -384,6 +623,53 @@ def _render_history_lines(history: list[dict] | None) -> str:
     )
 
 
+# 가은/Claude(2026-07-19): "의장이 질문할 때마다 KPI 얘기만 계속 한다" 문제 대응 —
+# _build_followup_prompt()가 매번 top_revisions 전체를 그대로(1순위부터) 넣어주다 보니,
+# 실제로 top_revisions[0]이 KPI 관련 항목이면 무슨 질문을 하든 모델이 거기로 돌아가는
+# 경향이 실측 확인됐다. "반복하지 말라"는 지시문만으론 배경자료 자체가 매번 같은 걸
+# 못 막는다 — 이미 이전 답변에서 실질적으로 다룬 항목은 순서를 뒤로 미뤄서(완전히
+# 빼지는 않음 — 위원장이 필요하면 여전히 참고할 수 있어야 함) "가장 먼저 보이는 항목"이
+# 매번 안 겹치게 한다.
+_KOREAN_STOPWORDS = {"및", "등", "이", "가", "을", "를", "의", "에", "와", "과", "은", "는", "그", "이런", "관련"}
+_ALREADY_MENTIONED_OVERLAP_RATIO = 0.4
+
+
+def _keywords(text: str) -> set[str]:
+    tokens = re.split(r"[\s,·/()\[\]:\-]+", text or "")
+    return {t for t in tokens if len(t) >= 2 and t not in _KOREAN_STOPWORDS}
+
+
+def _reorder_unmentioned_revisions_first(top_revisions: list | None, history: list[dict] | None) -> list | None:
+    """top_revisions 중 이전 대화 답변에서 이미 실질적으로 다룬 것으로 보이는 항목을
+    뒤로 미룬다. 제목(title)이 위원장 답변에 토씨 그대로 나오는 경우는 드물어서(자연어
+    패러프레이즈) 정확 문자열 매칭 대신, title의 핵심 단어가 이전 답변 전체와 일정 비율
+    (기본 40%) 이상 겹치면 "이미 언급됨"으로 본다.
+
+    prior_text를 토큰화해서 title의 키워드와 "정확히 같은 토큰"인지 비교하지 않고,
+    각 키워드가 prior_text 안에 "부분 문자열로" 나오는지를 본다 — 한국어는 조사가
+    단어에 바로 붙어서("KPI를", "구체화하고") 토큰 경계로 자르면 원형 키워드와 정확히
+    일치하지 않는 경우가 흔하기 때문이다(실측: "구체화" 키워드가 실제 답변의
+    "구체화하고"엔 부분 문자열로 있지만 토큰으로 자르면 "구체화하고" != "구체화").
+    """
+    if not top_revisions or not history:
+        return top_revisions
+
+    prior_text = " ".join(h.get("answer", "") for h in history if isinstance(h, dict))
+    if not prior_text:
+        return top_revisions
+
+    def _already_mentioned(item: dict) -> bool:
+        title_keywords = _keywords(item.get("title") or "")
+        if not title_keywords:
+            return False
+        matched = sum(1 for kw in title_keywords if kw in prior_text)
+        return matched / len(title_keywords) >= _ALREADY_MENTIONED_OVERLAP_RATIO
+
+    unmentioned = [r for r in top_revisions if not _already_mentioned(r)]
+    mentioned = [r for r in top_revisions if _already_mentioned(r)]
+    return unmentioned + mentioned
+
+
 # 가은/Claude(2026-07-17): STEP7 "대화형 피드백" 후속 질문 프롬프트. 새 그래프 노드를
 # 만드는 대신, 경이의 chair_prompt.txt 도입부("당신은 AI Review Board의
 # 위원장(review_chair)입니다...")를 그대로 재사용해 _build_real_llm_call()의
@@ -405,15 +691,19 @@ def _build_followup_prompt(
         )
         or "(없음)"
     )
+    # 가은/Claude(2026-07-19): 이미 대화에서 다룬 우선순위 항목을 뒤로 미뤄서, 매번 같은
+    # (1순위) 항목만 반복 인용되는 걸 줄인다 — 위 _reorder_unmentioned_revisions_first 참고.
+    reordered_revisions = _reorder_unmentioned_revisions_first(top_revisions, history)
     return f"""당신은 AI Review Board의 위원장(review_chair)입니다. 이 회의는 이미 끝났고
 아래는 그 결과입니다. 사용자가 결과에 대해 후속 질문을 하면, 이미 나온 위원 의견과
 위원장 종합만 근거로 답하세요. 문서나 위원 발언에 없는 새로운 사실·점수를 지어내지
 마세요.
 
 [위원장 종합]/[수정 우선순위]는 배경 참고 자료일 뿐입니다 — 그대로 옮겨 쓰지 말고, 이번
-질문의 핵심에 초점을 맞춰 답하세요. [이전 대화]에서 이미 한 말을 토씨 그대로 반복하지
-말고, 후속 질문이면 앞서 답한 내용에서 한 걸음 더 들어가서 답하세요. 2~4문장으로
-간결하게 답하세요.
+질문의 핵심에 초점을 맞춰 답하세요. [수정 우선순위]는 이미 [이전 대화]에서 다룬 항목이
+있으면 뒤쪽에 배치되어 있습니다 — 앞쪽 항목(아직 안 다룬 것)을 우선적으로 참고하세요.
+[이전 대화]에서 이미 한 말을 토씨 그대로 반복하지 말고, 후속 질문이면 앞서 답한
+내용에서 한 걸음 더 들어가서 답하세요. 2~4문장으로 간결하게 답하세요.
 
 [검토 대상 문서 요약]
 {truncated}
@@ -425,7 +715,7 @@ def _build_followup_prompt(
 {json.dumps(chair_summary, ensure_ascii=False) if chair_summary else "(없음)"}
 
 [수정 우선순위]
-{json.dumps(top_revisions, ensure_ascii=False) if top_revisions else "(없음)"}
+{json.dumps(reordered_revisions, ensure_ascii=False) if reordered_revisions else "(없음)"}
 
 [이전 대화]
 {_render_history_lines(history)}
@@ -619,17 +909,30 @@ async def analyze_project(
     authorization: Optional[str] = Header(None, alias="authorization"),
 ):
     user_email = get_current_user(authorization)
+    _analyze_started = time.time()
 
     project = await project_repo.find_by_id(project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없습니다.")
     domain = project["doc_type"]
+    logger.info("[analyze] === 시작 === project_id=%s domain=%s user=%s", project_id, domain, user_email)
 
     target_doc, submission = await _load_target_submission(project_id)
+    logger.info(
+        "[analyze] 평가 대상 문서 확정: %s (%d자)", submission["document_name"], len(submission["text"])
+    )
 
-    mapping = _load_rubric_mapping(domain)
+    base_mapping = _load_rubric_mapping(domain)
+    mapping = await _get_or_build_rubric_mapping(project, project_id, domain, base_mapping)
     rubric = build_rubric(mapping)
     full_committee = mapping["committee"]
+    logger.info(
+        "[analyze] rubric 확정: source=%s criteria=%d개 total_max_score=%s source_document_id=%s",
+        "dynamic(공고문 자동추출)" if mapping.get("meta", {}).get("dynamic") else "static(정적 템플릿)",
+        len(rubric["criteria"]),
+        rubric["total_max_score"],
+        rubric["source_document_id"],
+    )
 
     # 가은/Claude(2026-07-16): STEP4 멘토 선택 화면(mentor-candidates) 연동 — 사용자가
     # 2~4명을 골라 보내면 그 목록만 회의에 참여시킨다. run_meeting()은
@@ -647,6 +950,7 @@ async def analyze_project(
             detail=f"committee는 {full_committee} 중 2~4명이어야 합니다.",
         )
     effective_mapping = {**mapping, "committee": committee}
+    logger.info("[analyze] 참여 위원 확정: %s (%d/%d명)", committee, len(committee), len(full_committee))
 
     meeting_id = f"MTG-{project_id}-{uuid.uuid4().hex[:8]}"
     llm_call = _build_real_llm_call(meeting_id)
@@ -663,6 +967,11 @@ async def analyze_project(
     # PersonaRoleMappingError를 던진다 — competition만 우선 지원되는 지금 상태를 그대로
     # 유지한다(아래에서 잡지 않고 그대로 올려 500으로 드러나게 둔다. RoleMappingConfig로
     # 조용히 완화하는 건 role_mapping.py 팀 정책이라 여기서 임의로 넣지 않는다).
+    logger.info(
+        "[analyze] RAG-003~005 근거 검색 시작 project_id=%s meeting_id=%s (위원 x 기준 조합별 role 기반 검색)",
+        project_id,
+        meeting_id,
+    )
     evidence_service = MeetingEvidenceOrchestrationService(
         role_retrieval_service=_role_retrieval_service,
         evidence_linking_service=_evidence_linking_service,
@@ -675,6 +984,7 @@ async def analyze_project(
         rubric_mapping=mapping,
         trace_id=meeting_id,
     )
+    _log_evidence_context(project_id, evidence_context)
     evidence_callback = evidence_service.create_evidence_callback(trace_id=meeting_id)
     # MeetingModel.retrieved_evidence(MTG-007 rerun_reviewer()용 flat 레거시 포맷)와
     # ask_committee()가 여전히 필요로 하는 flat 근거 — evidence_context를 chunk_id 기준으로
@@ -692,6 +1002,11 @@ async def analyze_project(
         )
         _similar_response = await run_in_threadpool(_similar_case_service.search, _similar_request)
         similar_success_cases = _similar_response.model_dump(mode="json")
+        logger.info(
+            "[analyze] RAG-006 유사 성공 사례 검색 성공 meeting_id=%s 결과=%d건",
+            meeting_id,
+            similar_success_cases.get("total_results", 0),
+        )
     except Exception as e:
         logger.warning(f"RAG-006 similar_success_cases 검색 실패, None으로 진행: {e}")
         similar_success_cases = None
@@ -751,8 +1066,17 @@ async def analyze_project(
     #     "media_script": [],
     # }
     #
-    # run_meeting()이 그래프 조립부터 v2 문서 조립까지 다 해준다. 내부 graph.stream()도
-    # 동기 함수라 threadpool로 감싸는 건 그대로 유지.
+    # 가은/Claude(2026-07-17, 경이 확인): 위원장 종합을 백그라운드로 미루기로 함 —
+    # run_meeting()이 이제 리뷰+채점만 끝내고(include_chair=False) 바로 리턴한다.
+    # 이 단계(리뷰+채점)가 실패하면 progress_token을 바로 지우고 예외를 그대로 올린다
+    # (기존과 동일). 성공하면 지우지 않는다 — 아래 백그라운드 작업(위원장 종합)이 끝날
+    # 때까지 폴링 엔트리를 살려둬야 "결과 정리" 화면이 chair_done을 볼 수 있다.
+    logger.info(
+        "[analyze] LangGraph 실행 시작 meeting_id=%s (위원 리뷰 %d명 + 채점, 위원장 종합은 백그라운드)",
+        meeting_id,
+        len(committee),
+    )
+    _meeting_started = time.time()
     try:
         document = await run_in_threadpool(
             run_meeting,
@@ -768,16 +1092,28 @@ async def analyze_project(
             evidence_callback=evidence_callback,
             similar_success_cases=similar_success_cases,
             on_progress=on_progress,
+            include_chair=False,
         )
-    finally:
-        # 성공/실패 상관없이 여기서 바로 지운다 — 프론트는 마지막 폴링 결과가 아니라
-        # POST 응답 자체(성공 시 document, 실패 시 에러)로 완료를 판단하므로, 폴링
-        # 엔트리를 끝까지 남겨둘 이유가 없다. 안 지우면 요청마다 dict가 계속 쌓인다.
+    except Exception:
+        logger.exception(
+            "[analyze] LangGraph 실행 실패 meeting_id=%s elapsed=%.1fs",
+            meeting_id,
+            time.time() - _meeting_started,
+        )
         if progress_token:
             _analyze_progress.pop(progress_token, None)
+        raise
+    logger.info(
+        "[analyze] LangGraph 실행 완료 meeting_id=%s elapsed=%.1fs reviewer_results=%d개 status=%s",
+        meeting_id,
+        time.time() - _meeting_started,
+        len(document["reviewer_results"]),
+        document["status"],
+    )
 
-    # MTG-005: 회의 결과 저장. committee/submission/retrieved_evidence도 이제 진짜 값이라
-    # reevaluate_reviewer()가 재구성 없이 그대로 이어받을 수 있다.
+    # MTG-005: 회의 결과 저장(리뷰+채점만 끝난 상태, chair_summary=None). committee/
+    # submission/retrieved_evidence도 이제 진짜 값이라 reevaluate_reviewer()가 재구성
+    # 없이 그대로 이어받을 수 있다.
     meeting = MeetingModel(
         project_id=project_id,
         user_email=user_email,
@@ -800,11 +1136,84 @@ async def analyze_project(
         # 있었다(캐시된 회의를 다시 불러오면 영상 대본이 사라지는 문제) - document(=
         # run_meeting()의 반환값)에 이미 채워진 값을 그대로 쓰도록 수정.
         media_script=document["media_script"],
-        schema_version="2.1.0",
+        schema_version="2.2.0",
     )
-    await meeting_repo.create(meeting)
+    meeting_doc_id = await meeting_repo.create(meeting)
+    logger.info(
+        "[analyze] === 저장 완료 === meeting_doc_id=%s meeting_id=%s elapsed=%.1fs "
+        "(위원장 종합은 백그라운드에서 이어서 진행)",
+        meeting_doc_id,
+        meeting_id,
+        time.time() - _analyze_started,
+    )
+
+    # 가은/Claude(2026-07-17, 경이 확인): 위원 재실행 없이 chair 노드만 백그라운드에서
+    # 마저 돌리고 끝나면 Mongo 문서를 patch한다 - HTTP 응답은 여기서 기다리지 않고
+    # 바로 아래에서 document(리뷰+채점만 있는 버전)를 반환한다. 이 앱은 단일 프로세스
+    # 전제(_analyze_progress가 이미 그 전제 위에 있음, 위 주석 참고)라 별도 큐 없이
+    # asyncio.create_task로 충분하다.
+    asyncio.create_task(
+        _synthesize_chair_background(
+            meeting_doc_id=meeting_doc_id,
+            reviewer_results=document["reviewer_results"],
+            rubric=document["rubric"],
+            evidence=document["evidence"],
+            llm_call=llm_call,
+            progress_token=progress_token,
+        )
+    )
 
     return document
+
+
+async def _synthesize_chair_background(
+    *,
+    meeting_doc_id: str,
+    reviewer_results: list,
+    rubric: dict,
+    evidence: list,
+    llm_call,
+    progress_token: Optional[str],
+) -> None:
+    """analyze_project()가 리뷰+채점만 반환한 뒤, 위원장 종합을 이어서 백그라운드로
+    돌리고 끝나면 Mongo meetings 문서를 patch한다(가은/Claude 2026-07-17, 경이 확인).
+    실패해도 이미 반환된 리뷰 결과 자체는 유효하므로 예외를 삼키고 status만 "failed"로
+    남긴다 - 사용자는 "결과 정리" 화면에서 안내를 보고 새로고침하면 된다."""
+    _chair_started = time.time()
+    logger.info("[analyze] 위원장 종합(백그라운드) 시작 meeting_doc_id=%s", meeting_doc_id)
+    try:
+        chair_summary, top_revisions = await run_in_threadpool(
+            run_chair_phase,
+            reviewer_results=reviewer_results,
+            rubric=rubric,
+            evidence=evidence,
+            llm_call=llm_call,
+        )
+        await meeting_repo.update_result_by_id(
+            meeting_doc_id,
+            {"chair_summary": chair_summary, "top_revisions": top_revisions, "status": "completed"},
+        )
+        if progress_token:
+            _analyze_progress[progress_token] = {
+                **_analyze_progress.get(progress_token, {}),
+                "chair_done": True,
+            }
+        logger.info(
+            "[analyze] === 위원장 종합(백그라운드) 완료 === meeting_doc_id=%s elapsed=%.1fs top_revisions=%d개",
+            meeting_doc_id,
+            time.time() - _chair_started,
+            len(top_revisions or []),
+        )
+    except Exception:
+        logger.exception(
+            "[analyze] 위원장 종합(백그라운드) 실패 meeting_doc_id=%s elapsed=%.1fs",
+            meeting_doc_id,
+            time.time() - _chair_started,
+        )
+        await meeting_repo.update_result_by_id(meeting_doc_id, {"status": "failed"})
+    finally:
+        if progress_token:
+            _analyze_progress.pop(progress_token, None)
 
 
 @router.get("/{project_id}/analyze/progress", response_model=AnalyzeProgress)
