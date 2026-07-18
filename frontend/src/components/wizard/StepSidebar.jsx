@@ -20,14 +20,32 @@ import { useNavigate } from 'react-router-dom'
 // MentorSelectionPage 한 화면(같은 route)으로 합쳐졌다 — 사이드바도 한 행으로
 // 정리(7단계 -> 5단계). 이전엔 "공모전 분석"/"멘토 선택"도 이미 같은 route를
 // 가리키는 중복 행이었다.
+// 가은/Claude(2026-07-18): "hwpx 업로드가 실패한다"고 재현된 걸 추적해보니 실제로는
+// LibreOffice 변환이 깨진 게 아니라, projectId 없이(아직 프로젝트 생성 전) 이 사이드바를
+// 렌더링하면 아래 세 route가 `/projects/${projectId}/...`를 그대로 문자열로 만들어서
+// projectId가 null/undefined일 때 "/projects/null/..." 같은 깨진 경로가 만들어지는 버그였다.
+// 그 경로로 이동하면 useParams().projectId가 문자열 "null"이 되고, 그 상태로 다시
+// DocumentUploadPage로 돌아오면 ?projectId=null 쿼리가 실제 projectId처럼 취급되어
+// ensureProject()가 새 프로젝트를 만들지 않고 문자열 "null"을 그대로 써버려서
+// POST /documents/null(500)로 이어졌다 — uploadRoute처럼 나머지 route도 전부 projectId가
+// 있을 때만 만들고, 없으면 null(클릭 비활성)로 둔다.
 export function buildSteps(projectId) {
-  const uploadRoute = projectId ? `/projects/new?projectId=${projectId}` : '/projects/new'
+  const hasProject = !!projectId
+  const uploadRoute = hasProject ? `/projects/new?projectId=${projectId}` : '/projects/new'
   return [
     { title: '내 프로젝트', subtitle: '프로젝트 목록', route: '/projects' },
     { title: '공모전 정보 입력 · 문서 첨부', subtitle: '기본 정보 & 기획서 업로드', route: uploadRoute },
-    { title: '공모전 분석 · 멘토링 시작', subtitle: '멘토 추천 및 선택, 피드백 검토', route: `/projects/${projectId}/analysis` },
-    { title: '대화형 피드백', subtitle: '추가 질문', route: `/projects/${projectId}/feedback-chat` },
-    { title: '결과 정리', subtitle: '최종 리포트', route: `/projects/${projectId}` },
+    {
+      title: '공모전 분석 · 멘토링 시작',
+      subtitle: '멘토 추천 및 선택, 피드백 검토',
+      route: hasProject ? `/projects/${projectId}/analysis` : null,
+    },
+    {
+      title: '대화형 피드백',
+      subtitle: '추가 질문',
+      route: hasProject ? `/projects/${projectId}/feedback-chat` : null,
+    },
+    { title: '결과 정리', subtitle: '최종 리포트', route: hasProject ? `/projects/${projectId}` : null },
   ]
 }
 

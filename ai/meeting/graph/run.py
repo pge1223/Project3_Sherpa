@@ -30,15 +30,28 @@ ProgressCallback = Callable[[dict], None]
 # 채팅에도 그 일부만 보이는 부작용이 생겼다 - 실측 확인. "실제 아바타 영상을
 # 만들지 말지"는 CommitteeVideoStage.jsx가 available-speakers로 이미 따로
 # 걸러내고 있으니, 여기서는 위원 전체를 그대로 다 담는다.)
+#
+# 가은/Claude(2026-07-18): "발언 시작을 summary가 아니라 기준별 실행 가능한 제안
+# (rubric_scores[].suggestions)으로 보여달라"는 요청이 프론트 buildTranscript()의
+# media_script-없음 폴백 경로(meetingTheme.js)에만 적용돼 있었다 — 실제 회의는 항상
+# 여기서 media_script를 채우고 프론트가 media_script를 우선 쓰기 때문에, 그 폴백은
+# 실질적으로 한 번도 안 타고 계속 summary가 보이는 문제로 실측 확인됐다. 같은
+# suggestions-우선/summary-폴백 로직을 여기에도 그대로 반영한다.
 def _build_media_script(reviewer_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
     lines: list[dict[str, Any]] = []
     for reviewer in reviewer_results:
+        suggestions = [
+            s
+            for rubric_score in (reviewer.get("rubric_scores") or [])
+            for s in (rubric_score.get("suggestions") or [])
+        ]
+        text = " ".join(suggestions) if suggestions else reviewer["summary"]
         lines.append(
             {
                 "speaker_id": reviewer["persona_id"],
                 "speaker_name": reviewer["persona_name"],
                 "order": len(lines) + 1,
-                "text": reviewer["summary"],
+                "text": text,
                 # emotion은 아직 계산하는 곳이 없어서 일단 고정값 - 추후 판단 필요(재인 확인 예정)
                 "emotion": "neutral",
             }

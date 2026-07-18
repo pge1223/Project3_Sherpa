@@ -296,6 +296,15 @@ def _build_real_llm_call(meeting_id: str):
 #     return [{**v2_result, "persona_id": persona_id} for persona_id, v2_result in reviewer_results.items()]
 
 
+# 가은/Claude(2026-07-18): "source_document_id가 왜 항상 null이냐"는 질문에 대한 답 —
+# 버그가 아니라 지금 구조 자체가 그렇다. rubric은 업로드된 공고문에서 추출되는 게 아니라
+# domain(competition/government_support)별 정적 템플릿(rubric_mapping_{domain}.json)을
+# 그대로 쓴다(공고문 자동 추출은 용준 담당, notice_criteria 추출 자체가 미착수 —
+# meetings.py 상단 큰 주석의 [analyze_project() 실제 흐름] 3번 참고). 그래서 rubric.py의
+# build_rubric()이 source_document_id를 항상 None으로 채운다 — 공고문 URL을 아무리 잘
+# 수집해도 rubric 자체는 안 바뀐다. 반면 업로드된 공고문은 retrieved_evidence(RAG 검색)
+# 근거로는 쓰이므로, "루브릭이 안 먹었다"보다는 "애초에 루브릭에 반영되는 경로가 없다"가
+# 정확한 진단이다. 터미널에서 바로 확인할 수 있도록 로그를 남긴다.
 def _load_rubric_mapping(domain: str) -> dict:
     path = _PERSONAS_DIR / f"rubric_mapping_{domain}.json"
     if not path.exists():
@@ -303,7 +312,16 @@ def _load_rubric_mapping(domain: str) -> dict:
             status_code=400,
             detail=f"'{domain}' 도메인의 평가기준 템플릿(rubric_mapping_{domain}.json)이 아직 없습니다.",
         )
-    return json.loads(path.read_text(encoding="utf-8"))
+    mapping = json.loads(path.read_text(encoding="utf-8"))
+    logger.info(
+        "[rubric] domain=%s -> %s 정적 템플릿 로드 (공고문에서 자동 추출한 게 아니라 "
+        "도메인 고정 기준입니다 — source_document_id는 항상 null). criteria=%d개, committee=%s",
+        domain,
+        path.name,
+        len(mapping.get("rubric", [])),
+        mapping.get("committee"),
+    )
+    return mapping
 
 
 # 가은/Claude(2026-07-17): 위원별 역할 기반 검색 "배선 교체"(위 이전 버전 주석 참고)를
@@ -329,10 +347,60 @@ def _flatten_evidence_context(evidence_context: list[dict]) -> list[dict]:
     return list(evidence_by_chunk.values())
 
 
+# 가은/Claude(2026-07-18): "공고문 URL이 실제로 검색에 잡히는지" 확인용 로그 — 원래
+# _search_evidence_for_rubric()(role_id=None, 단순 semantic 검색)에 달아뒀던 진단
+# 로그인데, RAG-003/004/005 정식 연동(MeetingEvidenceOrchestrationService, 위 주석
+# 참고)으로 대체되면서 그 함수 자체가 없어졌다 — evidence_context를 만든 직후(호출부,
+# analyze_project())에서 persona_id/criterion_id별로 몇 건 잡혔는지, evidence_status
+# (RAG-005 사전 판정)까지 로그로 남기는 걸로 옮긴다.
+def _log_evidence_context(project_id: str, evidence_context: list[dict]) -> None:
+    total_hits = 0
+    for entry in evidence_context:
+        hits = entry.get("retrieved_evidence") or []
+        total_hits += len(hits)
+        hit_names = [
+            item.get("document_name") or item.get("source_filename") or "(제목 없음)" for item in hits
+        ]
+        logger.info(
+            "[evidence] persona=%s criterion=%s 검색결과=%d건 sufficiency=%s 출처=%s",
+            entry.get("persona_id"),
+            entry.get("criterion_id"),
+            len(hits),
+            (entry.get("sufficiency") or {}).get("evidence_status"),
+            hit_names or "(없음)",
+        )
+    if total_hits == 0:
+        logger.warning(
+            "[evidence] project_id=%s 전체 %d개 (persona, criterion) 조합에서 근거를 하나도 "
+            "못 찾았습니다 — 공고문/기획서가 색인(embedding)까지 끝났는지 documents 컬렉션의 "
+            "status를 확인하세요.",
+            project_id,
+            len(evidence_context),
+        )
+
+
 # 가은/Claude(2026-07-16): analyze_project()와 새 mentor-candidates 엔드포인트(STEP4
 # 멘토 추천 화면)가 둘 다 "document_role=target 첫 문서"를 필요로 해서 공용으로 뺐다.
 async def _load_target_submission(project_id: str) -> tuple[dict, dict]:
     documents = await document_repo.find_by_project_id(project_id)
+    # 가은/Claude(2026-07-18): "공모전 공고 URL 쪽이 색인이 안 된 것 같다" 진단용 —
+    # 이 프로젝트에 실제로 몇 개 문서가, 어떤 role/status로 올라와 있는지 분석 시작 시점에
+    # 터미널에서 바로 보이게 한다. status가 indexed가 아니면(uploaded/*_failed) 그 문서는
+    # RAG 검색에도 안 잡힌다.
+    logger.info(
+        "[documents] project_id=%s 문서 현황: %s",
+        project_id,
+        [
+            {
+                "role": d.get("document_role", "target"),
+                "name": d.get("original_filename"),
+                "status": d.get("status"),
+                "has_parsed_text": bool(d.get("parsed_text")),
+            }
+            for d in documents
+        ]
+        or "(문서 없음)",
+    )
     target_docs = [d for d in documents if d.get("document_role", "target") == "target" and d.get("parsed_text")]
     if not target_docs:
         raise HTTPException(
@@ -676,6 +744,7 @@ async def analyze_project(
         rubric_mapping=mapping,
         trace_id=meeting_id,
     )
+    _log_evidence_context(project_id, evidence_context)
     evidence_callback = evidence_service.create_evidence_callback(trace_id=meeting_id)
     # MeetingModel.retrieved_evidence(MTG-007 rerun_reviewer()용 flat 레거시 포맷)와
     # ask_committee()가 여전히 필요로 하는 flat 근거 — evidence_context를 chunk_id 기준으로
