@@ -159,6 +159,7 @@ if str(_MEETING_DIR) not in sys.path:
 # ai/meeting/graph/reevaluate.py, MTG-007 재평가 임시 구현)는 경이 버전으로 교체하고
 # 아래(analyze_project/reevaluate_reviewer)에 주석으로만 남겨둔다.
 from graph import (  # noqa: E402
+    build_dynamic_rubric_mapping,
     build_rubric,
     rerun_reviewer,
     run_chair_phase,
@@ -322,6 +323,155 @@ def _load_rubric_mapping(domain: str) -> dict:
         mapping.get("committee"),
     )
     return mapping
+
+
+# 가은/Claude(2026-07-18): PER-002 동적 rubric — 공모전 공고문(criteria 문서)에서 LLM으로
+# 평가항목을 추출해 정적 템플릿(rubric_mapping_competition.json) 대신 쓴다. 경이 승인 조건
+# (팀 공유 답변, 2026-07-18):
+#   - RAG-003~005는 criterion_id가 동적이어도 그대로 동작하므로 큰 구조 변경 없음.
+#   - prepare_meeting_evidence()가 rubric_mapping["rubric"]의 persona 배정을 직접 쓰므로,
+#     추출 결과는 bare rubric이 아니라 persona 정보가 포함된 mapping 전체여야 하고, 같은
+#     effective_mapping을 RAG 쪽과 run_meeting() 양쪽에 넘겨야 한다 — analyze_project()가
+#     이미 mapping 변수 하나만 두 곳(evidence_service.prepare_meeting_evidence,
+#     run_meeting)에 그대로 전달하는 구조라 이 조건은 mapping을 만드는 지점만 바꾸면
+#     자동으로 만족된다(아래 analyze_project() 수정 참고).
+#   - 새 항목도 기존 4개 committee persona 중 하나에만 배정한다(새 위원 생성 금지) —
+#     실제 검증은 build_dynamic_rubric_mapping()(ai/meeting/graph/rubric.py)이 한다.
+#   - DB엔 정적 rubric이 아니라 실제 실행된 동적 rubric을 저장한다 — MeetingModel.rubric은
+#     이미 build_rubric(mapping)의 결과를 그대로 쓰므로 여기서 별도 수정이 필요 없다.
+# 프로젝트당 1회만 추출해서 project.dynamic_rubric_mapping에 캐시한다(재분석 때마다 다시
+# 부르지 않음). 공고문(criteria 문서)이 없거나 추출/검증에 실패하면 정적 템플릿
+# (base_mapping)으로 조용히 폴백한다 — competition 도메인에서만 시도한다
+# (government_support는 role_mapping.py 미확정 등으로 아직 범위 밖, PER-002 우선순위
+# 합의 참고).
+_RUBRIC_EXTRACTION_MAX_ITEMS = 8
+
+
+def _build_rubric_extraction_prompt(
+    criteria_text: str,
+    base_mapping: dict,
+    persona_cards: dict[str, dict],
+) -> str:
+    committee = base_mapping["committee"]
+    default_axis_lines = "\n".join(
+        f'- criterion_id: "{item["criterion_id"]}" ({item["criterion_name"]}) -> 기본 담당 위원: '
+        f'"{item["primary_persona_id"]}"'
+        for item in base_mapping["rubric"]
+    )
+    persona_lines = "\n".join(
+        f'- persona_id: "{pid}" ({persona_cards[pid]["display_name"]}, {persona_cards[pid]["role"]}) '
+        f'평가관점(perspective_id): {[p["perspective_id"] for p in persona_cards[pid]["evaluation_perspectives"]]}'
+        for pid in committee
+    )
+    truncated = criteria_text[:_SUBMISSION_TRUNCATE_CHARS]
+    return f"""당신은 공모전 공고문(모집요강)에서 실제 심사 평가항목을 추출하는 보조입니다.
+아래 [공고문 내용]을 읽고, 이 공모전의 평가항목을 최대 {_RUBRIC_EXTRACTION_MAX_ITEMS}개까지
+추출하세요.
+
+규칙:
+- 공고문에 명시된 평가항목을 최우선으로 사용하세요. 배점(가중치)이 공고문에 있으면 그대로
+  쓰고, 없으면 전체 100점을 항목 수로 균등 배분하세요(모든 항목의 max_score 합은 반드시
+  100이어야 합니다).
+- 아래 [기본 4범주]에 자연스럽게 대응되면 criterion_id를 새로 만들지 말고 그 criterion_id를
+  그대로 재사용하세요.
+- 기본 4범주 어디에도 안 맞는 공고문만의 고유 평가축(예: 팀 구성, 지속가능성, 파급효과)이
+  있을 때만 새 criterion_id(영문 snake_case)를 만드세요.
+- 반드시 아래 [참여 위원 목록]에 있는 persona_id 중 하나에만 primary_persona_id를
+  배정하세요. 새 위원을 만들지 마세요.
+- primary_perspective_id는 반드시 그 위원의 평가관점(perspective_id) 목록 중 하나를
+  그대로 쓰세요. 목록에 없는 값을 지어내지 마세요.
+- 필요하면 secondary_persona_id를 다른 위원 한 명으로 추가할 수 있습니다(선택, 없으면 null).
+- 공고문에서 평가항목 자체를 찾을 수 없으면 "criteria": []로 응답하세요.
+
+[기본 4범주 — 참고용, 그대로 재사용 가능]
+{default_axis_lines}
+
+[참여 위원 목록]
+{persona_lines}
+
+[공고문 내용]
+{truncated}
+
+다음 JSON 형식으로만 응답하세요:
+{{"criteria": [
+  {{"criterion_id": "...", "criterion_name": "...", "max_score": 25, "required": true,
+    "primary_persona_id": "...", "primary_perspective_id": "...", "secondary_persona_id": null}}
+]}}"""
+
+
+def _call_rubric_extraction_llm(prompt: str) -> str:
+    profile = (settings.LLM_PROFILE or "dev").lower()
+    model = settings.QUALITY_LLM_REVIEWER_MODEL if profile == "quality" else settings.DEV_LLM_REVIEWER_MODEL
+    client = OpenAI(api_key=settings.OPENAI_API_KEY, max_retries=1)
+    resp = client.chat.completions.create(
+        model=model,
+        messages=[{"role": "user", "content": prompt}],
+        response_format={"type": "json_object"},
+    )
+    return resp.choices[0].message.content
+
+
+async def _get_or_build_rubric_mapping(project: dict, project_id: str, domain: str, base_mapping: dict) -> dict:
+    """domain=="competition"이고 공고문(criteria 문서)이 색인돼 있으면 그걸로 동적
+    rubric을 추출해 project에 캐시하고 반환한다. 그 외(다른 domain, 공고문 없음,
+    추출/검증 실패)엔 base_mapping(정적 템플릿)을 그대로 반환한다 — 이 함수는 절대
+    예외를 밖으로 던지지 않는다(analyze_project()가 rubric 유무로 흐름을 막지 않게
+    하기 위함, "추출 실패 시 정적 템플릿 폴백" 팀 요구사항)."""
+    if domain != "competition":
+        return base_mapping
+
+    cached = project.get("dynamic_rubric_mapping")
+    if cached:
+        logger.info(
+            "[rubric] project_id=%s 캐시된 동적 rubric 재사용 criteria=%d개 source_document_id=%s",
+            project_id,
+            len(cached.get("rubric", [])),
+            cached.get("meta", {}).get("source_document_id"),
+        )
+        return cached
+
+    documents = await document_repo.find_by_project_id(project_id)
+    criteria_docs = [d for d in documents if d.get("document_role") == "criteria" and d.get("parsed_text")]
+    if not criteria_docs:
+        logger.info(
+            "[rubric] project_id=%s 공고문(criteria) 문서가 없어 정적 템플릿으로 진행합니다.",
+            project_id,
+        )
+        return base_mapping
+    criteria_doc = criteria_docs[0]
+
+    try:
+        persona_cards = {pid: get_persona_card(pid) for pid in base_mapping["committee"]}
+        prompt = _build_rubric_extraction_prompt(criteria_doc["parsed_text"], base_mapping, persona_cards)
+        raw = await run_in_threadpool(_call_rubric_extraction_llm, prompt)
+        parsed = json.loads(raw)
+        extracted_items = parsed.get("criteria")
+        if not isinstance(extracted_items, list):
+            raise ValueError(f"'criteria' 필드가 리스트가 아닙니다: {parsed!r}")
+        dynamic_mapping = build_dynamic_rubric_mapping(
+            base_mapping=base_mapping,
+            extracted_items=extracted_items,
+            source_document_id=str(criteria_doc["_id"]),
+            persona_cards=persona_cards,
+        )
+    except Exception as e:
+        logger.warning(
+            "[rubric] project_id=%s 동적 rubric 추출 실패(%s) — 정적 템플릿으로 폴백합니다.",
+            project_id,
+            e,
+        )
+        return base_mapping
+
+    logger.info(
+        "[rubric] project_id=%s 공고문에서 동적 rubric 추출 성공 criteria=%d개 "
+        "source_document_id=%s total_max_score=%s",
+        project_id,
+        len(dynamic_mapping["rubric"]),
+        dynamic_mapping["meta"]["source_document_id"],
+        dynamic_mapping["total_max_score"],
+    )
+    await project_repo.update_project(project_id, {"dynamic_rubric_mapping": dynamic_mapping})
+    return dynamic_mapping
 
 
 # 가은/Claude(2026-07-17): 위원별 역할 기반 검색 "배선 교체"(위 이전 버전 주석 참고)를
@@ -688,17 +838,30 @@ async def analyze_project(
     authorization: Optional[str] = Header(None, alias="authorization"),
 ):
     user_email = get_current_user(authorization)
+    _analyze_started = time.time()
 
     project = await project_repo.find_by_id(project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없습니다.")
     domain = project["doc_type"]
+    logger.info("[analyze] === 시작 === project_id=%s domain=%s user=%s", project_id, domain, user_email)
 
     target_doc, submission = await _load_target_submission(project_id)
+    logger.info(
+        "[analyze] 평가 대상 문서 확정: %s (%d자)", submission["document_name"], len(submission["text"])
+    )
 
-    mapping = _load_rubric_mapping(domain)
+    base_mapping = _load_rubric_mapping(domain)
+    mapping = await _get_or_build_rubric_mapping(project, project_id, domain, base_mapping)
     rubric = build_rubric(mapping)
     full_committee = mapping["committee"]
+    logger.info(
+        "[analyze] rubric 확정: source=%s criteria=%d개 total_max_score=%s source_document_id=%s",
+        "dynamic(공고문 자동추출)" if mapping.get("meta", {}).get("dynamic") else "static(정적 템플릿)",
+        len(rubric["criteria"]),
+        rubric["total_max_score"],
+        rubric["source_document_id"],
+    )
 
     # 가은/Claude(2026-07-16): STEP4 멘토 선택 화면(mentor-candidates) 연동 — 사용자가
     # 2~4명을 골라 보내면 그 목록만 회의에 참여시킨다. run_meeting()은
@@ -716,6 +879,7 @@ async def analyze_project(
             detail=f"committee는 {full_committee} 중 2~4명이어야 합니다.",
         )
     effective_mapping = {**mapping, "committee": committee}
+    logger.info("[analyze] 참여 위원 확정: %s (%d/%d명)", committee, len(committee), len(full_committee))
 
     meeting_id = f"MTG-{project_id}-{uuid.uuid4().hex[:8]}"
     llm_call = _build_real_llm_call(meeting_id)
@@ -732,6 +896,11 @@ async def analyze_project(
     # PersonaRoleMappingError를 던진다 — competition만 우선 지원되는 지금 상태를 그대로
     # 유지한다(아래에서 잡지 않고 그대로 올려 500으로 드러나게 둔다. RoleMappingConfig로
     # 조용히 완화하는 건 role_mapping.py 팀 정책이라 여기서 임의로 넣지 않는다).
+    logger.info(
+        "[analyze] RAG-003~005 근거 검색 시작 project_id=%s meeting_id=%s (위원 x 기준 조합별 role 기반 검색)",
+        project_id,
+        meeting_id,
+    )
     evidence_service = MeetingEvidenceOrchestrationService(
         role_retrieval_service=_role_retrieval_service,
         evidence_linking_service=_evidence_linking_service,
@@ -762,6 +931,11 @@ async def analyze_project(
         )
         _similar_response = await run_in_threadpool(_similar_case_service.search, _similar_request)
         similar_success_cases = _similar_response.model_dump(mode="json")
+        logger.info(
+            "[analyze] RAG-006 유사 성공 사례 검색 성공 meeting_id=%s 결과=%d건",
+            meeting_id,
+            similar_success_cases.get("total_results", 0),
+        )
     except Exception as e:
         logger.warning(f"RAG-006 similar_success_cases 검색 실패, None으로 진행: {e}")
         similar_success_cases = None
@@ -826,6 +1000,12 @@ async def analyze_project(
     # 이 단계(리뷰+채점)가 실패하면 progress_token을 바로 지우고 예외를 그대로 올린다
     # (기존과 동일). 성공하면 지우지 않는다 — 아래 백그라운드 작업(위원장 종합)이 끝날
     # 때까지 폴링 엔트리를 살려둬야 "결과 정리" 화면이 chair_done을 볼 수 있다.
+    logger.info(
+        "[analyze] LangGraph 실행 시작 meeting_id=%s (위원 리뷰 %d명 + 채점, 위원장 종합은 백그라운드)",
+        meeting_id,
+        len(committee),
+    )
+    _meeting_started = time.time()
     try:
         document = await run_in_threadpool(
             run_meeting,
@@ -844,9 +1024,21 @@ async def analyze_project(
             include_chair=False,
         )
     except Exception:
+        logger.exception(
+            "[analyze] LangGraph 실행 실패 meeting_id=%s elapsed=%.1fs",
+            meeting_id,
+            time.time() - _meeting_started,
+        )
         if progress_token:
             _analyze_progress.pop(progress_token, None)
         raise
+    logger.info(
+        "[analyze] LangGraph 실행 완료 meeting_id=%s elapsed=%.1fs reviewer_results=%d개 status=%s",
+        meeting_id,
+        time.time() - _meeting_started,
+        len(document["reviewer_results"]),
+        document["status"],
+    )
 
     # MTG-005: 회의 결과 저장(리뷰+채점만 끝난 상태, chair_summary=None). committee/
     # submission/retrieved_evidence도 이제 진짜 값이라 reevaluate_reviewer()가 재구성
@@ -876,6 +1068,13 @@ async def analyze_project(
         schema_version="2.2.0",
     )
     meeting_doc_id = await meeting_repo.create(meeting)
+    logger.info(
+        "[analyze] === 저장 완료 === meeting_doc_id=%s meeting_id=%s elapsed=%.1fs "
+        "(위원장 종합은 백그라운드에서 이어서 진행)",
+        meeting_doc_id,
+        meeting_id,
+        time.time() - _analyze_started,
+    )
 
     # 가은/Claude(2026-07-17, 경이 확인): 위원 재실행 없이 chair 노드만 백그라운드에서
     # 마저 돌리고 끝나면 Mongo 문서를 patch한다 - HTTP 응답은 여기서 기다리지 않고
@@ -909,6 +1108,8 @@ async def _synthesize_chair_background(
     돌리고 끝나면 Mongo meetings 문서를 patch한다(가은/Claude 2026-07-17, 경이 확인).
     실패해도 이미 반환된 리뷰 결과 자체는 유효하므로 예외를 삼키고 status만 "failed"로
     남긴다 - 사용자는 "결과 정리" 화면에서 안내를 보고 새로고침하면 된다."""
+    _chair_started = time.time()
+    logger.info("[analyze] 위원장 종합(백그라운드) 시작 meeting_doc_id=%s", meeting_doc_id)
     try:
         chair_summary, top_revisions = await run_in_threadpool(
             run_chair_phase,
@@ -926,8 +1127,18 @@ async def _synthesize_chair_background(
                 **_analyze_progress.get(progress_token, {}),
                 "chair_done": True,
             }
+        logger.info(
+            "[analyze] === 위원장 종합(백그라운드) 완료 === meeting_doc_id=%s elapsed=%.1fs top_revisions=%d개",
+            meeting_doc_id,
+            time.time() - _chair_started,
+            len(top_revisions or []),
+        )
     except Exception:
-        logger.exception("[CHAIR_BACKGROUND_FAILED] meeting_doc_id=%s", meeting_doc_id)
+        logger.exception(
+            "[analyze] 위원장 종합(백그라운드) 실패 meeting_doc_id=%s elapsed=%.1fs",
+            meeting_doc_id,
+            time.time() - _chair_started,
+        )
         await meeting_repo.update_result_by_id(meeting_doc_id, {"status": "failed"})
     finally:
         if progress_token:
