@@ -235,6 +235,14 @@ async def fetch_url(
                 source_type="url",
                 document_role="criteria",
                 parsed_text=merged_page_content.text,
+                # 가은/Claude(2026-07-18): 실측(sotong.go.kr) — 평가기준이 본문이 아니라
+                # HWP 요강 파일에만 있는 공고가 실제로 있었다. 재접속 후에도(getDocuments())
+                # "직접 받아서 올려주세요" 안내를 다시 보여줄 수 있게 저장해둔다.
+                unsupported_attachments=[
+                    {"url": a.url, "file_name": a.file_name, "reason": a.reason}
+                    for a in result.unsupported_attachments
+                ]
+                or None,
             )
             document_id = await document_repo.create(document)
             try:
@@ -371,6 +379,7 @@ async def upload_document(
         updated_at=document.updated_at,
         document_role=document.document_role,
         conversion_metadata=document.conversion_metadata,
+        unsupported_attachments=document.unsupported_attachments,
     )
 
 
@@ -400,6 +409,7 @@ async def get_documents(
             updated_at=d["updated_at"],
             document_role=d.get("document_role", "target"),
             conversion_metadata=d.get("conversion_metadata"),
+            unsupported_attachments=d.get("unsupported_attachments"),
         )
         for d in documents
     ]
@@ -425,4 +435,25 @@ async def get_document_status(
         "original_filename": document["original_filename"],
         "status": document["status"],
         "updated_at": document["updated_at"],
+    }
+
+
+# DOC-006: 문서 미리보기
+@router.get("/{project_id}/{document_id}/preview")
+async def preview_document(
+    project_id: str,
+    document_id: str,
+    authorization: Optional[str] = Header(None, alias="authorization"),
+):
+    user_email = get_current_user(authorization)
+    await verify_project_owner(project_id, user_email)
+
+    document = await document_repo.find_by_id(document_id)
+    if not document:
+        raise HTTPException(status_code=404, detail="문서를 찾을 수 없습니다")
+
+    return {
+        "original_filename": document["original_filename"],
+        "parsed_text": document.get("parsed_text"),
+        "status": document["status"],
     }

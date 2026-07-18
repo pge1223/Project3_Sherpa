@@ -43,7 +43,7 @@ export default function ProjectListPage() {
       <StepSidebar activeIndex={0} />
 
       <main style={styles.main}>
-        <div style={styles.stepLabel}>STEP 1 / 7</div>
+        <div style={styles.stepLabel}>STEP 1 / 5</div>
         <div style={styles.header}>
           <h1 style={styles.title}>내 프로젝트</h1>
           <button style={styles.newButton} onClick={() => navigate('/projects/new')}>

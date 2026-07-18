@@ -2,14 +2,16 @@
 Static HTML Page Parser
 ========================
 정적 HTML 페이지에서 제목/본문을 청킹 가능한 구조로 추출한다.
-JavaScript로 클라이언트 렌더링되는 SPA 페이지는 지원하지 않으며,
-의심되는 경우 확정 오류가 아닌 경고(is_js_rendered_suspected)만 남긴다.
+is_js_rendered_suspected가 True면 url_loader.py가 headless_renderer.py(Playwright)로
+다시 렌더링해서 재시도한다(2026-07-18 추가) — 이 함수 자체는 여전히 순수 정적 파싱만
+한다(휴리스틱 판정 + 파싱 로직을 분리 유지).
 """
 
 from dataclasses import dataclass, field
 
 from bs4 import BeautifulSoup
 
+from ai.rag.loaders.config import LOADING_PLACEHOLDER_PATTERNS
 from ai.rag.loaders.schemas import WebContentBlock, WebBlockType
 
 _NOISE_TAGS = ("script", "style", "noscript", "nav", "header", "footer", "aside", "iframe", "svg")
@@ -124,8 +126,13 @@ def _detect_js_rendered_suspected(soup: BeautifulSoup, raw_html: str) -> bool:
     - #app/#root/#__next 등 SPA 루트 컨테이너가 있는데 텍스트가 거의 없음
     - <script> 태그 수는 많은데(10개 초과) 본문 텍스트가 거의 없음(500자 미만)
     - 원본 HTML 크기(5000자 초과)에 비해 본문 텍스트가 지나치게 적음(200자 미만)
+    - 본문에 "로딩 중..." 같은 placeholder 문구가 있음 (2026-07-18 추가 — sotong.go.kr
+      실측: 메뉴 등 주변 텍스트는 충분해서 위 텍스트-길이 기준은 통과하지만, 정작 본문
+      영역만 AJAX로 나중에 채워지는 페이지를 놓치는 걸 확인함. 전체 SPA가 아니라 페이지
+      일부 영역만 비동기로 채워지는 흔한 패턴이라 별도 신호로 둔다.)
     """
-    body_text_length = len(soup.get_text(strip=True))
+    body_text = soup.get_text(strip=True)
+    body_text_length = len(body_text)
     script_count = len(soup.find_all("script"))
 
     for root_id in _SPA_ROOT_IDS:
@@ -137,6 +144,10 @@ def _detect_js_rendered_suspected(soup: BeautifulSoup, raw_html: str) -> bool:
         return True
 
     if len(raw_html) > 5000 and body_text_length < 200:
+        return True
+
+    lowered_body_text = body_text.lower()
+    if any(pattern.lower() in lowered_body_text for pattern in LOADING_PLACEHOLDER_PATTERNS):
         return True
 
     return False

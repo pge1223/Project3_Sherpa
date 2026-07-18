@@ -170,7 +170,7 @@ export default function MentorFeedbackChatPage() {
   if (!result) {
     return (
       <div style={styles.page}>
-        <StepSidebar projectId={projectId} activeIndex={5} />
+        <StepSidebar projectId={projectId} activeIndex={3} />
         <main style={styles.main}>
           <p style={styles.emptyText}>
             이 프로젝트의 분석 결과를 찾을 수 없습니다. 먼저 피드백 진행 단계를 완료해주세요.
@@ -188,7 +188,7 @@ export default function MentorFeedbackChatPage() {
       <StepSidebar projectId={projectId} activeIndex={5} />
 
       <main style={styles.main}>
-        <div style={styles.stepLabel}>STEP 6 / 7</div>
+        <div style={styles.stepLabel}>STEP 4 / 5</div>
         <h1 style={styles.title}>대화형 피드백</h1>
 
         <div style={styles.videoBox}>

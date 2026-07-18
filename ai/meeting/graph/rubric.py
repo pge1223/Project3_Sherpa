@@ -14,6 +14,9 @@ def build_rubric(mapping: dict[str, Any]) -> dict[str, Any]:
     """rubric_mapping_*.json의 rubric[] 배열을 v2 rubric 객체로 변환한다.
 
     default_supplementary_perspectives는 채점 대상이 아니므로 포함하지 않는다.
+    source_document_id는 mapping["meta"]에 값이 있으면(공고문에서 동적으로 추출된
+    rubric, build_dynamic_rubric_mapping() 참고) 그 값을 쓰고, 없으면(정적 템플릿)
+    None이다.
     """
     criteria = [
         {
@@ -27,9 +30,100 @@ def build_rubric(mapping: dict[str, Any]) -> dict[str, Any]:
     domain = mapping["meta"]["domain"]
     return {
         "rubric_id": f"RUBRIC-{domain.upper()}",
-        "source_document_id": None,
+        "source_document_id": mapping.get("meta", {}).get("source_document_id"),
         "total_max_score": mapping["total_max_score"],
         "criteria": criteria,
+    }
+
+
+# 가은/Claude(2026-07-18): PER-002 동적 rubric — 공고문(criteria 문서)에서 LLM으로
+# 추출한 평가항목을 rubric_mapping 형태로 병합한다. 경이 리뷰(팀 승인 답변, 아래 조건
+# 그대로 반영):
+#   - 새 persona를 만들지 않고 base_mapping["committee"](고정 4인)에만 배정한다.
+#   - 배점 합계는 LLM 출력을 신뢰하지 않고 항상 서버에서 재계산한다
+#     (weights.total_max_score()가 rubric["total_max_score"]와 criteria 배점 합이
+#     다르면 예외를 던지므로, 애초에 항상 일치하게 만든다).
+#   - criterion_id 중복은 거부한다.
+#   - primary_persona_id/secondary_persona_id는 committee 소속이어야 하고,
+#     primary_perspective_id는 그 persona의 실제 evaluation_perspectives에 있는
+#     값이어야 한다(persona_cards.json — LLM이 존재하지 않는 관점을 지어내는 걸 막는
+#     화이트리스트 검증).
+# 검증 실패 시 ValueError를 던진다 — 호출부(backend/app/api/routes/meetings.py)가
+# 잡아서 정적 템플릿(base_mapping)으로 폴백한다.
+def build_dynamic_rubric_mapping(
+    base_mapping: dict[str, Any],
+    extracted_items: list[dict[str, Any]],
+    source_document_id: str,
+    persona_cards: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """base_mapping(정적 템플릿)의 committee/default_supplementary_perspectives는
+    그대로 두고, rubric[]만 extracted_items로 교체한 새 mapping을 반환한다."""
+    committee = set(base_mapping["committee"])
+    if not extracted_items:
+        raise ValueError("추출된 평가항목이 비어 있습니다.")
+
+    perspective_whitelist: dict[str, set[str]] = {
+        pid: {p["perspective_id"] for p in persona_cards.get(pid, {}).get("evaluation_perspectives", [])}
+        for pid in committee
+    }
+
+    seen_ids: set[str] = set()
+    normalized: list[dict[str, Any]] = []
+    for item in extracted_items:
+        criterion_id = item.get("criterion_id")
+        criterion_name = item.get("criterion_name")
+        max_score = item.get("max_score")
+        primary_persona_id = item.get("primary_persona_id")
+        primary_perspective_id = item.get("primary_perspective_id")
+        secondary_persona_id = item.get("secondary_persona_id")
+
+        if not isinstance(criterion_id, str) or not criterion_id:
+            raise ValueError(f"criterion_id가 올바르지 않습니다: {item!r}")
+        if criterion_id in seen_ids:
+            raise ValueError(f"criterion_id가 중복되었습니다: {criterion_id!r}")
+        seen_ids.add(criterion_id)
+
+        if not isinstance(criterion_name, str) or not criterion_name:
+            raise ValueError(f"criterion_name이 올바르지 않습니다: {item!r}")
+        if not isinstance(max_score, (int, float)) or max_score <= 0:
+            raise ValueError(f"max_score가 올바르지 않습니다: {item!r}")
+
+        if primary_persona_id not in committee:
+            raise ValueError(
+                f"primary_persona_id({primary_persona_id!r})가 committee({sorted(committee)})에 없습니다."
+            )
+        if secondary_persona_id is not None and secondary_persona_id not in committee:
+            raise ValueError(
+                f"secondary_persona_id({secondary_persona_id!r})가 committee({sorted(committee)})에 없습니다."
+            )
+        if primary_perspective_id not in perspective_whitelist.get(primary_persona_id, set()):
+            raise ValueError(
+                f"primary_perspective_id({primary_perspective_id!r})가 {primary_persona_id!r}의 "
+                f"evaluation_perspectives에 없습니다."
+            )
+
+        normalized.append(
+            {
+                "criterion_id": criterion_id,
+                "criterion_name": criterion_name,
+                "max_score": max_score,
+                "required": bool(item.get("required", True)),
+                "source": "notice",
+                "weight_origin": "notice_extracted",
+                "weight_origin_note": "공고문에서 LLM으로 자동 추출한 평가항목입니다.",
+                "primary_persona_id": primary_persona_id,
+                "primary_perspective_id": primary_perspective_id,
+                "secondary_persona_id": secondary_persona_id,
+            }
+        )
+
+    total_max_score = sum(item["max_score"] for item in normalized)
+
+    return {
+        **base_mapping,
+        "meta": {**base_mapping["meta"], "source_document_id": source_document_id, "dynamic": True},
+        "total_max_score": total_max_score,
+        "rubric": normalized,
     }
 
 

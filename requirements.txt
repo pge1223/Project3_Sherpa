@@ -15,6 +15,7 @@ python-dotenv
 python-jose[cryptography]
 bcrypt
 email-validator
+reportlab  # RPT-005: 평가 결과 PDF 내보내기
 
 # scripts/export_sherpa_raw_data.py (1회성 데이터 export)
 sshtunnel
@@ -28,6 +29,14 @@ python-docx
 python-pptx
 beautifulsoup4
 lxml
+pillow
+easyocr  # 이미지 OCR(PR #6) — requirements.txt에 빠져있어서 로컬 환경마다 조용히
+         # ImportError로 OCR이 비활성화돼 있었음(2026-07-18 실측, 가은/Claude). torch를
+         # 이미 물고 있어 추가 용량은 opencv-python-headless 등 부속 패키지 정도.
+playwright  # JS/AJAX 렌더링 페이지 폴백(ai/rag/loaders/headless_renderer.py, 2026-07-18
+            # 추가). pip 설치 후 브라우저 바이너리를 별도로 받아야 한다:
+            #   playwright install chromium
+            # (최초 1회, ~300MB 다운로드 — 로컬 개발 환경 + NCP 배포 이미지 둘 다 필요)
 
 # ai/rag (용준) - 임베딩/Chroma 벡터 저장 (RAG-002)
 numpy
