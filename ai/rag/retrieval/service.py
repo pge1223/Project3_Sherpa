@@ -5,13 +5,23 @@ RAG Indexing Service (Integration Layer)
 단일 진입점. LangGraph/FastAPI/MongoDB와 무관하게 단독 호출 가능하다.
 """
 
+import logging
+import time
 from typing import Optional
 
 from ai.rag.chunking.schemas import ChunkingResult
 from ai.rag.domain.schemas import IndexingContext
 from ai.rag.embedding.kure_embedder import KUREEmbedder
 from ai.rag.retrieval.chroma_store import ChromaVectorStore
+from ai.rag.retrieval.diagnostics import StageWatchdog
+from ai.rag.retrieval.exceptions import EmbeddingStageError, VectorStoreStageError
 from ai.rag.retrieval.schemas import IndexingResult, IndexingSummary, SearchResult
+
+logger = logging.getLogger(__name__)
+
+# 2026-07-18, fetch-url 색인 hang 조사(용준/Claude): 이 임계값을 넘기면 StageWatchdog가
+# 그 시점의 전체 스레드 스택을 로그에 남긴다(요청 자체를 취소/타임아웃시키지는 않음).
+_STAGE_STUCK_THRESHOLD_SECONDS = 30.0
 
 
 class RAGIndexingService:
@@ -19,14 +29,70 @@ class RAGIndexingService:
         self._embedder = embedder
         self._vector_store = vector_store
 
+    @property
+    def embedder(self) -> KUREEmbedder:
+        """documents.py의 싱글턴 KUREEmbedder를 다른 모듈(예: meetings.py)이 재사용할 수
+        있도록 노출한다 — KUREEmbedder(SentenceTransformer 로딩 비용 큼)를 프로세스당
+        한 번만 로딩하기 위함(2026-07-18, 중복 로딩 제거 조사 참고)."""
+        return self._embedder
+
+    @property
+    def vector_store(self) -> ChromaVectorStore:
+        """documents.py의 싱글턴 ChromaVectorStore(및 그 내부 chromadb client)를 다른
+        모듈이 재사용할 수 있도록 노출한다 — 같은 CHROMA_PERSIST_DIR을 가리키는 별도의
+        chromadb.PersistentClient를 프로세스 안에 여러 개 만들지 않기 위함."""
+        return self._vector_store
+
     def index_chunking_result(
         self,
         chunking_result: ChunkingResult,
         context: IndexingContext,
     ) -> IndexingResult:
-        """ChunkingResult -> 임베딩 -> Chroma upsert -> stale record 삭제 -> IndexingResult."""
-        embedding_result = self._embedder.embed_chunking_result(chunking_result, context)
-        return self._vector_store.upsert_embedding_result(embedding_result, context)
+        """ChunkingResult -> 임베딩 -> Chroma upsert -> stale record 삭제 -> IndexingResult.
+
+        각 단계(embed/chroma_upsert) 시작·종료를 elapsed_ms와 함께 로그로 남기고,
+        30초 넘게 멈추면 StageWatchdog가 스레드 스택을 덤프한다. 단계별 실패는
+        EmbeddingStageError/VectorStoreStageError로 감싸 다시 던져(raise ... from exc)
+        호출부가 어느 단계에서 실패했는지 구분할 수 있게 한다."""
+        document_id = context.document_id
+        project_id = context.project_id
+        logger.info(
+            "rag.indexing.start document_id=%s project_id=%s chunk_count=%d",
+            document_id, project_id, chunking_result.chunk_count,
+        )
+
+        t0 = time.monotonic()
+        try:
+            with StageWatchdog("embed", document_id, _STAGE_STUCK_THRESHOLD_SECONDS):
+                embedding_result = self._embedder.embed_chunking_result(chunking_result, context)
+        except Exception as exc:
+            elapsed_ms = (time.monotonic() - t0) * 1000
+            logger.exception(
+                "rag.indexing.embed_failed document_id=%s elapsed_ms=%.0f", document_id, elapsed_ms
+            )
+            raise EmbeddingStageError("embed", document_id, str(exc)) from exc
+        embed_elapsed_ms = (time.monotonic() - t0) * 1000
+        logger.info(
+            "rag.indexing.embed_done document_id=%s elapsed_ms=%.0f embedded_count=%d failed_count=%d",
+            document_id, embed_elapsed_ms, embedding_result.embedding_count, len(embedding_result.failed_chunk_ids),
+        )
+
+        t1 = time.monotonic()
+        try:
+            with StageWatchdog("chroma_upsert", document_id, _STAGE_STUCK_THRESHOLD_SECONDS):
+                result = self._vector_store.upsert_embedding_result(embedding_result, context)
+        except Exception as exc:
+            elapsed_ms = (time.monotonic() - t1) * 1000
+            logger.exception(
+                "rag.indexing.store_failed document_id=%s elapsed_ms=%.0f", document_id, elapsed_ms
+            )
+            raise VectorStoreStageError("chroma_upsert", document_id, str(exc)) from exc
+        store_elapsed_ms = (time.monotonic() - t1) * 1000
+        logger.info(
+            "rag.indexing.store_done document_id=%s elapsed_ms=%.0f status=%s stored_count=%d",
+            document_id, store_elapsed_ms, result.status, result.stored_record_count,
+        )
+        return result
 
     def index_chunking_result_with_summary(
         self,

@@ -10,6 +10,8 @@ NCP 배포는 chromadb.HttpClient(host=..., port=...)를 그대로 넘기면 되
 어느 쪽이든 chromadb.ClientAPI 인터페이스로만 사용한다 (특정 client 생성 방식에 결합되지 않음).
 """
 
+import logging
+import time
 from typing import Optional
 
 import chromadb
@@ -19,6 +21,8 @@ from ai.rag.embedding.schemas import EmbeddingResult
 from ai.rag.retrieval.config import DISTANCE_METRIC, RETRIEVAL_SCHEMA_VERSION, DEFAULT_TOP_K
 from ai.rag.retrieval.metadata import sanitize_metadata_for_chroma, restore_metadata
 from ai.rag.retrieval.schemas import IndexingResult, IndexingStatus, SearchResult
+
+logger = logging.getLogger(__name__)
 
 
 def build_record_id(project_id: str, chunk_id: str) -> str:
@@ -42,6 +46,14 @@ class ChromaVectorStore:
         self._embedding_dimension = embedding_dimension
         self._embedding_version = embedding_version
         self._collection = self._get_or_create_collection()
+
+    @property
+    def client(self) -> chromadb.ClientAPI:
+        """이 ChromaVectorStore가 쓰는 chromadb client를 노출한다 — 같은
+        CHROMA_PERSIST_DIR을 가리키는 별도의 chromadb.PersistentClient를 프로세스 안에
+        중복 생성하지 않고 재사용하기 위함(2026-07-18, documents.py/meetings.py 중복
+        PersistentClient+KUREEmbedder 조사 참고)."""
+        return self._client
 
     def _get_or_create_collection(self):
         collection = self._client.get_or_create_collection(
@@ -88,8 +100,14 @@ class ChromaVectorStore:
             )
 
         warnings = list(embedding_result.warnings)
+        document_id = embedding_result.document_id
 
+        t0 = time.monotonic()
         previous_ids = self._list_record_ids(embedding_result.project_id, embedding_result.document_id)
+        logger.info(
+            "rag.chroma.list_previous_ids_done document_id=%s elapsed_ms=%.0f count=%d",
+            document_id, (time.monotonic() - t0) * 1000, len(previous_ids),
+        )
 
         new_record_ids: list[str] = []
         if embedding_result.embedded_chunks:
@@ -100,14 +118,29 @@ class ChromaVectorStore:
                 embeddings.append(chunk.embedding)
                 documents.append(chunk.content)
                 metadatas.append(sanitize_metadata_for_chroma(chunk.metadata))
+            t1 = time.monotonic()
             self._collection.upsert(ids=ids, embeddings=embeddings, documents=documents, metadatas=metadatas)
+            logger.info(
+                "rag.chroma.upsert_done document_id=%s elapsed_ms=%.0f count=%d",
+                document_id, (time.monotonic() - t1) * 1000, len(ids),
+            )
             new_record_ids = ids
 
         stale_ids = [rid for rid in previous_ids if rid not in set(new_record_ids)]
         if stale_ids:
+            t2 = time.monotonic()
             self._collection.delete(ids=stale_ids)
+            logger.info(
+                "rag.chroma.delete_stale_done document_id=%s elapsed_ms=%.0f count=%d",
+                document_id, (time.monotonic() - t2) * 1000, len(stale_ids),
+            )
 
+        t3 = time.monotonic()
         stored_count = len(self._list_record_ids(embedding_result.project_id, embedding_result.document_id))
+        logger.info(
+            "rag.chroma.list_stored_ids_done document_id=%s elapsed_ms=%.0f count=%d",
+            document_id, (time.monotonic() - t3) * 1000, stored_count,
+        )
 
         embedded_count = embedding_result.embedding_count
         failed_count = len(embedding_result.failed_chunk_ids)
