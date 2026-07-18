@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://review-board.local/contracts/review_output.schema.json",
   "title": "AI Review Board Output",
-  "$comment": "v2.1.0 (팀 승인·적용). v2.0.0에서 선택 필드 similar_success_cases(RAG-006 유사사례, reference_only) 추가 + schema_version enum화(하위호환). 개정 배경: review_output.v2.1.proposal.md. v2.0.0 배경: review_output.v2.proposal.md",
+  "$comment": "v2.2.0 (팀 승인·적용, 가은/경이 확인). v2.1.0에서 chair_summary/top_revisions를 top-level required에서 빼고 nullable로 완화 — 위원장 종합을 backend가 리뷰+채점 이후 백그라운드로 늦게 돌릴 수 있게 되면서, 그 사이엔 null인 문서(status=synthesizing)가 정상 상태가 됐다(document_id/title이 이미 nullable인 것과 같은 패턴). 선택 필드 완화라 하위 호환. v2.1.0에서 선택 필드 similar_success_cases(RAG-006 유사사례, reference_only) 추가 + schema_version enum화(하위호환). 개정 배경: review_output.v2.1.proposal.md. v2.0.0 배경: review_output.v2.proposal.md",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -14,13 +14,11 @@
     "rubric",
     "reviewer_results",
     "score_result",
-    "chair_summary",
-    "top_revisions",
     "evidence",
     "media_script"
   ],
   "properties": {
-    "schema_version": { "type": "string", "enum": ["2.0.0", "2.1.0"] },
+    "schema_version": { "type": "string", "enum": ["2.0.0", "2.1.0", "2.2.0"] },
     "meta": { "$ref": "#/$defs/meta" },
     "meeting_id": { "type": "string", "minLength": 1 },
     "project_id": { "type": "string", "minLength": 1 },
@@ -37,8 +35,8 @@
     "rubric": { "$ref": "#/$defs/rubric" },
     "reviewer_results": { "type": "array", "items": { "$ref": "#/$defs/reviewerResult" } },
     "score_result": { "$ref": "#/$defs/scoreResult" },
-    "chair_summary": { "$ref": "#/$defs/chairSummary" },
-    "top_revisions": { "type": "array", "maxItems": 5, "items": { "$ref": "#/$defs/revision" } },
+    "chair_summary": { "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/chairSummary" }] },
+    "top_revisions": { "type": ["array", "null"], "maxItems": 5, "items": { "$ref": "#/$defs/revision" } },
     "evidence": { "type": "array", "items": { "$ref": "#/$defs/evidence" } },
     "media_script": { "type": "array", "items": { "$ref": "#/$defs/mediaLine" } },
     "similar_success_cases": {
