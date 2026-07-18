@@ -96,6 +96,7 @@ import asyncio
 import io
 import json
 import logging
+import re
 import sys
 import time
 import uuid
@@ -603,6 +604,53 @@ def _render_history_lines(history: list[dict] | None) -> str:
     )
 
 
+# 가은/Claude(2026-07-19): "의장이 질문할 때마다 KPI 얘기만 계속 한다" 문제 대응 —
+# _build_followup_prompt()가 매번 top_revisions 전체를 그대로(1순위부터) 넣어주다 보니,
+# 실제로 top_revisions[0]이 KPI 관련 항목이면 무슨 질문을 하든 모델이 거기로 돌아가는
+# 경향이 실측 확인됐다. "반복하지 말라"는 지시문만으론 배경자료 자체가 매번 같은 걸
+# 못 막는다 — 이미 이전 답변에서 실질적으로 다룬 항목은 순서를 뒤로 미뤄서(완전히
+# 빼지는 않음 — 위원장이 필요하면 여전히 참고할 수 있어야 함) "가장 먼저 보이는 항목"이
+# 매번 안 겹치게 한다.
+_KOREAN_STOPWORDS = {"및", "등", "이", "가", "을", "를", "의", "에", "와", "과", "은", "는", "그", "이런", "관련"}
+_ALREADY_MENTIONED_OVERLAP_RATIO = 0.4
+
+
+def _keywords(text: str) -> set[str]:
+    tokens = re.split(r"[\s,·/()\[\]:\-]+", text or "")
+    return {t for t in tokens if len(t) >= 2 and t not in _KOREAN_STOPWORDS}
+
+
+def _reorder_unmentioned_revisions_first(top_revisions: list | None, history: list[dict] | None) -> list | None:
+    """top_revisions 중 이전 대화 답변에서 이미 실질적으로 다룬 것으로 보이는 항목을
+    뒤로 미룬다. 제목(title)이 위원장 답변에 토씨 그대로 나오는 경우는 드물어서(자연어
+    패러프레이즈) 정확 문자열 매칭 대신, title의 핵심 단어가 이전 답변 전체와 일정 비율
+    (기본 40%) 이상 겹치면 "이미 언급됨"으로 본다.
+
+    prior_text를 토큰화해서 title의 키워드와 "정확히 같은 토큰"인지 비교하지 않고,
+    각 키워드가 prior_text 안에 "부분 문자열로" 나오는지를 본다 — 한국어는 조사가
+    단어에 바로 붙어서("KPI를", "구체화하고") 토큰 경계로 자르면 원형 키워드와 정확히
+    일치하지 않는 경우가 흔하기 때문이다(실측: "구체화" 키워드가 실제 답변의
+    "구체화하고"엔 부분 문자열로 있지만 토큰으로 자르면 "구체화하고" != "구체화").
+    """
+    if not top_revisions or not history:
+        return top_revisions
+
+    prior_text = " ".join(h.get("answer", "") for h in history if isinstance(h, dict))
+    if not prior_text:
+        return top_revisions
+
+    def _already_mentioned(item: dict) -> bool:
+        title_keywords = _keywords(item.get("title") or "")
+        if not title_keywords:
+            return False
+        matched = sum(1 for kw in title_keywords if kw in prior_text)
+        return matched / len(title_keywords) >= _ALREADY_MENTIONED_OVERLAP_RATIO
+
+    unmentioned = [r for r in top_revisions if not _already_mentioned(r)]
+    mentioned = [r for r in top_revisions if _already_mentioned(r)]
+    return unmentioned + mentioned
+
+
 # 가은/Claude(2026-07-17): STEP7 "대화형 피드백" 후속 질문 프롬프트. 새 그래프 노드를
 # 만드는 대신, 경이의 chair_prompt.txt 도입부("당신은 AI Review Board의
 # 위원장(review_chair)입니다...")를 그대로 재사용해 _build_real_llm_call()의
@@ -624,15 +672,19 @@ def _build_followup_prompt(
         )
         or "(없음)"
     )
+    # 가은/Claude(2026-07-19): 이미 대화에서 다룬 우선순위 항목을 뒤로 미뤄서, 매번 같은
+    # (1순위) 항목만 반복 인용되는 걸 줄인다 — 위 _reorder_unmentioned_revisions_first 참고.
+    reordered_revisions = _reorder_unmentioned_revisions_first(top_revisions, history)
     return f"""당신은 AI Review Board의 위원장(review_chair)입니다. 이 회의는 이미 끝났고
 아래는 그 결과입니다. 사용자가 결과에 대해 후속 질문을 하면, 이미 나온 위원 의견과
 위원장 종합만 근거로 답하세요. 문서나 위원 발언에 없는 새로운 사실·점수를 지어내지
 마세요.
 
 [위원장 종합]/[수정 우선순위]는 배경 참고 자료일 뿐입니다 — 그대로 옮겨 쓰지 말고, 이번
-질문의 핵심에 초점을 맞춰 답하세요. [이전 대화]에서 이미 한 말을 토씨 그대로 반복하지
-말고, 후속 질문이면 앞서 답한 내용에서 한 걸음 더 들어가서 답하세요. 2~4문장으로
-간결하게 답하세요.
+질문의 핵심에 초점을 맞춰 답하세요. [수정 우선순위]는 이미 [이전 대화]에서 다룬 항목이
+있으면 뒤쪽에 배치되어 있습니다 — 앞쪽 항목(아직 안 다룬 것)을 우선적으로 참고하세요.
+[이전 대화]에서 이미 한 말을 토씨 그대로 반복하지 말고, 후속 질문이면 앞서 답한
+내용에서 한 걸음 더 들어가서 답하세요. 2~4문장으로 간결하게 답하세요.
 
 [검토 대상 문서 요약]
 {truncated}
@@ -644,7 +696,7 @@ def _build_followup_prompt(
 {json.dumps(chair_summary, ensure_ascii=False) if chair_summary else "(없음)"}
 
 [수정 우선순위]
-{json.dumps(top_revisions, ensure_ascii=False) if top_revisions else "(없음)"}
+{json.dumps(reordered_revisions, ensure_ascii=False) if reordered_revisions else "(없음)"}
 
 [이전 대화]
 {_render_history_lines(history)}
