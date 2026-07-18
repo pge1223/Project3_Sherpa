@@ -22,6 +22,7 @@ def assemble_meeting_graph(
     llm_call: LLMCall,
     checkpointer: Any | None = None,
     evidence_callback=None,
+    include_chair: bool = True,
 ):
     """committee(참여 위원 persona_id 목록)에 맞춰 회의 그래프를 조립하고 컴파일한다.
 
@@ -35,18 +36,28 @@ def assemble_meeting_graph(
     evidence_callback이 주어지면 reviewer 노드가 의견 생성 후 (persona_id, criterion_id,
     review_item)로 호출한다(RAG-004 근거 연결 + RAG-005 최종 판정, backend 주입). 콜백은
     Callable이라 이 그래프는 ai/rag를 직접 import하지 않는다.
+
+    가은/Claude(2026-07-17, 경이 확인): include_chair=False면 chair 노드/엣지를 아예 넣지
+    않고 score -> END로 끝낸다 — 위원장 종합을 별도로 늦게(백그라운드) 돌리기 위해
+    backend가 리뷰+채점만 먼저 받아야 할 때 쓴다(backend/app/api/routes/meetings.py
+    analyze_project() 참고). chair를 나중에 실행할 땐 이 그래프를 다시 부르지 않고
+    run.py의 run_chair_phase()가 make_chair_node()를 직접 호출한다(위원 재실행 없음).
     """
     graph = StateGraph(MeetingState)
 
     for persona_id in committee:
         graph.add_node(f"reviewer__{persona_id}", make_reviewer_node(persona_id, llm_call, evidence_callback))
     graph.add_node("score", score_node)
-    graph.add_node("chair", make_chair_node(llm_call))
 
     for persona_id in committee:
         graph.add_edge(START, f"reviewer__{persona_id}")
         graph.add_edge(f"reviewer__{persona_id}", "score")
-    graph.add_edge("score", "chair")
-    graph.add_edge("chair", END)
+
+    if include_chair:
+        graph.add_node("chair", make_chair_node(llm_call))
+        graph.add_edge("score", "chair")
+        graph.add_edge("chair", END)
+    else:
+        graph.add_edge("score", END)
 
     return graph.compile(checkpointer=checkpointer)

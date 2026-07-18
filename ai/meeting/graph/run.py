@@ -13,6 +13,7 @@ from typing import Any, Callable
 
 from .build import assemble_meeting_graph
 from .llm import LLMCall
+from .nodes.chair import make_chair_node
 from .rubric import build_rubric
 from .state import MeetingState, initial_state
 
@@ -90,13 +91,18 @@ def assemble_document(
         {**v2_result, "persona_id": persona_id}
         for persona_id, v2_result in final_state["reviewer_results"].items()
     ]
+    # 가은/Claude(2026-07-17, 경이 확인): 위원장 종합을 backend가 백그라운드로 늦게
+    # 돌릴 수 있게 되면서(run_meeting(include_chair=False)), chair_summary가 아직 없는
+    # 문서도 조립해야 한다 — 이럴 때는 항상 "completed"가 아니라 스키마에 이미 있던
+    # "synthesizing"(review_output.schema.json)으로 표시한다.
+    status = "completed" if final_state["chair_summary"] is not None else "synthesizing"
     return {
-        "schema_version": "2.1.0",
+        "schema_version": "2.2.0",
         "meeting_id": meeting_id,
         "project_id": project_id,
         "document_id": document_id,
         "title": title,
-        "status": "completed",
+        "status": status,
         "domain": domain,
         "rubric": final_state["rubric"],
         "reviewer_results": reviewer_results,
@@ -123,8 +129,15 @@ def run_meeting(
     evidence_context: list[dict[str, Any]] | None = None,
     evidence_callback: Callable[[str, str, dict], dict] | None = None,
     similar_success_cases: dict[str, Any] | None = None,
+    include_chair: bool = True,
 ) -> dict[str, Any]:
     """회의 1회를 처음부터 끝까지 실행하고 review_output.schema.json v2 문서를 반환한다.
+
+    가은/Claude(2026-07-17, 경이 확인): include_chair=False면 chair 노드 없이 그래프를
+    돌려 리뷰+채점까지만 실행하고 즉시 반환한다(chair_summary/top_revisions는 None,
+    status는 "synthesizing") — backend가 위원장 종합을 별도 백그라운드 작업으로 늦게
+    돌리기 위한 것. 위원장은 이 함수를 다시 부르지 않고 run_chair_phase()로 따로
+    실행한다(위원 재실행 없음).
 
     domain은 rubric_mapping.meta.domain에서 그대로 가져온다 — 호출부가 rubric_mapping과
     다른 domain을 따로 넘길 이유가 없다(둘이 어긋나면 그 자체가 버그다).
@@ -149,7 +162,9 @@ def run_meeting(
     rubric = build_rubric(rubric_mapping)
     committee = list(rubric_mapping["committee"])
 
-    graph = assemble_meeting_graph(committee, llm_call, evidence_callback=evidence_callback)
+    graph = assemble_meeting_graph(
+        committee, llm_call, evidence_callback=evidence_callback, include_chair=include_chair
+    )
     state = initial_state(
         meeting_id=meeting_id,
         domain=domain,
@@ -175,3 +190,28 @@ def run_meeting(
         final_state=final_state,
         similar_success_cases=similar_success_cases,
     )
+
+
+def run_chair_phase(
+    *,
+    reviewer_results: list[dict[str, Any]],
+    rubric: dict[str, Any],
+    evidence: list[dict[str, Any]],
+    llm_call: LLMCall,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """이미 끝난 reviewer_results로 chair 노드만 실행한다(위원 재실행 없음).
+
+    가은/Claude(2026-07-17, 경이 확인): run_meeting(include_chair=False)로 리뷰+채점만
+    먼저 받은 뒤, backend가 위원장 종합을 백그라운드에서 늦게 돌릴 때 쓴다. 그래프를
+    다시 조립하지 않고 make_chair_node()가 만드는 순수 함수를 직접 호출한다 — chair
+    노드는 state["reviewer_results"]/state["rubric"]/state["evidence"]만 읽으므로
+    그래프 전체(reviewer 노드 포함)를 다시 돌 이유가 없다.
+
+    reviewer_results는 assemble_document()가 만드는 리스트 형태(각 항목에 persona_id
+    포함)를 그대로 받아 chair_node가 기대하는 {persona_id: v2_result} 딕셔너리로
+    변환한다.
+    """
+    reviewer_results_by_id = {r["persona_id"]: r for r in reviewer_results}
+    chair_node = make_chair_node(llm_call)
+    output = chair_node({"reviewer_results": reviewer_results_by_id, "rubric": rubric, "evidence": evidence})
+    return output["chair_summary"], output["top_revisions"]

@@ -8,7 +8,7 @@ from .llm import make_openai_llm_call
 from .reevaluate import assemble_reevaluation_graph, reevaluation_state
 from .rerun import rerun_reviewer
 from .rubric import build_rubric, build_routing
-from .run import run_meeting
+from .run import run_chair_phase, run_meeting
 from .state import MeetingState, MeetingStage, initial_state
 
 __all__ = [
@@ -22,5 +22,6 @@ __all__ = [
     "initial_state",
     "make_openai_llm_call",
     "rerun_reviewer",
+    "run_chair_phase",
     "run_meeting",
 ]

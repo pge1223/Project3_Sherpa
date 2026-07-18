@@ -16,14 +16,16 @@ import { useNavigate } from 'react-router-dom'
 // (/feedback-chat, MentorFeedbackChatPage)을 새로 만든 뒤 사용자 요청으로 영상
 // (CommitteeVideoStage)도 이 화면 상단으로 옮겨왔다 — /simulation 라우트는 없앴고,
 // 영상+대화를 한 화면에서 같이 보여준다.
+// 가은/Claude(2026-07-17): "공모전 분석"·"멘토 선택"·"피드백 진행" 세 단계가 전부
+// MentorSelectionPage 한 화면(같은 route)으로 합쳐졌다 — 사이드바도 한 행으로
+// 정리(7단계 -> 5단계). 이전엔 "공모전 분석"/"멘토 선택"도 이미 같은 route를
+// 가리키는 중복 행이었다.
 export function buildSteps(projectId) {
   const uploadRoute = projectId ? `/projects/new?projectId=${projectId}` : '/projects/new'
   return [
     { title: '내 프로젝트', subtitle: '프로젝트 목록', route: '/projects' },
     { title: '공모전 정보 입력 · 문서 첨부', subtitle: '기본 정보 & 기획서 업로드', route: uploadRoute },
-    { title: '공모전 분석', subtitle: '전문가 멘토 추천', route: `/projects/${projectId}/analysis` },
-    { title: '멘토 선택', subtitle: '2~4명 선택', route: `/projects/${projectId}/analysis` },
-    { title: '피드백 진행', subtitle: '검토 중', route: `/projects/${projectId}/progress` },
+    { title: '공모전 분석 · 멘토링 시작', subtitle: '멘토 추천 및 선택, 피드백 검토', route: `/projects/${projectId}/analysis` },
     { title: '대화형 피드백', subtitle: '추가 질문', route: `/projects/${projectId}/feedback-chat` },
     { title: '결과 정리', subtitle: '최종 리포트', route: `/projects/${projectId}` },
   ]

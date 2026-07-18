@@ -196,7 +196,7 @@ export default function DocumentUploadPage() {
       <StepSidebar projectId={projectId} activeIndex={1} />
 
       <main style={styles.main}>
-        <div style={styles.stepLabel}>STEP 2 / 7</div>
+        <div style={styles.stepLabel}>STEP 2 / 5</div>
         <h1 style={styles.title}>공모전 정보 입력 · 문서 첨부</h1>
 
         {loadingExisting && <p style={styles.mutedNotice}>이전에 진행하던 프로젝트를 불러오는 중...</p>}

@@ -144,6 +144,7 @@ if str(_MEETING_DIR) not in sys.path:
 from graph import (  # noqa: E402
     build_rubric,
     rerun_reviewer,
+    run_chair_phase,
     run_meeting,
 )
 # from graph import (
@@ -709,8 +710,11 @@ async def analyze_project(
     #     "media_script": [],
     # }
     #
-    # run_meeting()이 그래프 조립부터 v2 문서 조립까지 다 해준다. 내부 graph.stream()도
-    # 동기 함수라 threadpool로 감싸는 건 그대로 유지.
+    # 가은/Claude(2026-07-17, 경이 확인): 위원장 종합을 백그라운드로 미루기로 함 —
+    # run_meeting()이 이제 리뷰+채점만 끝내고(include_chair=False) 바로 리턴한다.
+    # 이 단계(리뷰+채점)가 실패하면 progress_token을 바로 지우고 예외를 그대로 올린다
+    # (기존과 동일). 성공하면 지우지 않는다 — 아래 백그라운드 작업(위원장 종합)이 끝날
+    # 때까지 폴링 엔트리를 살려둬야 "결과 정리" 화면이 chair_done을 볼 수 있다.
     try:
         document = await run_in_threadpool(
             run_meeting,
@@ -724,16 +728,16 @@ async def analyze_project(
             llm_call=llm_call,
             similar_success_cases=similar_success_cases,
             on_progress=on_progress,
+            include_chair=False,
         )
-    finally:
-        # 성공/실패 상관없이 여기서 바로 지운다 — 프론트는 마지막 폴링 결과가 아니라
-        # POST 응답 자체(성공 시 document, 실패 시 에러)로 완료를 판단하므로, 폴링
-        # 엔트리를 끝까지 남겨둘 이유가 없다. 안 지우면 요청마다 dict가 계속 쌓인다.
+    except Exception:
         if progress_token:
             _analyze_progress.pop(progress_token, None)
+        raise
 
-    # MTG-005: 회의 결과 저장. committee/submission/retrieved_evidence도 이제 진짜 값이라
-    # reevaluate_reviewer()가 재구성 없이 그대로 이어받을 수 있다.
+    # MTG-005: 회의 결과 저장(리뷰+채점만 끝난 상태, chair_summary=None). committee/
+    # submission/retrieved_evidence도 이제 진짜 값이라 reevaluate_reviewer()가 재구성
+    # 없이 그대로 이어받을 수 있다.
     meeting = MeetingModel(
         project_id=project_id,
         user_email=user_email,
@@ -756,11 +760,65 @@ async def analyze_project(
         # 있었다(캐시된 회의를 다시 불러오면 영상 대본이 사라지는 문제) - document(=
         # run_meeting()의 반환값)에 이미 채워진 값을 그대로 쓰도록 수정.
         media_script=document["media_script"],
-        schema_version="2.1.0",
+        schema_version="2.2.0",
     )
-    await meeting_repo.create(meeting)
+    meeting_doc_id = await meeting_repo.create(meeting)
+
+    # 가은/Claude(2026-07-17, 경이 확인): 위원 재실행 없이 chair 노드만 백그라운드에서
+    # 마저 돌리고 끝나면 Mongo 문서를 patch한다 - HTTP 응답은 여기서 기다리지 않고
+    # 바로 아래에서 document(리뷰+채점만 있는 버전)를 반환한다. 이 앱은 단일 프로세스
+    # 전제(_analyze_progress가 이미 그 전제 위에 있음, 위 주석 참고)라 별도 큐 없이
+    # asyncio.create_task로 충분하다.
+    asyncio.create_task(
+        _synthesize_chair_background(
+            meeting_doc_id=meeting_doc_id,
+            reviewer_results=document["reviewer_results"],
+            rubric=document["rubric"],
+            evidence=document["evidence"],
+            llm_call=llm_call,
+            progress_token=progress_token,
+        )
+    )
 
     return document
+
+
+async def _synthesize_chair_background(
+    *,
+    meeting_doc_id: str,
+    reviewer_results: list,
+    rubric: dict,
+    evidence: list,
+    llm_call,
+    progress_token: Optional[str],
+) -> None:
+    """analyze_project()가 리뷰+채점만 반환한 뒤, 위원장 종합을 이어서 백그라운드로
+    돌리고 끝나면 Mongo meetings 문서를 patch한다(가은/Claude 2026-07-17, 경이 확인).
+    실패해도 이미 반환된 리뷰 결과 자체는 유효하므로 예외를 삼키고 status만 "failed"로
+    남긴다 - 사용자는 "결과 정리" 화면에서 안내를 보고 새로고침하면 된다."""
+    try:
+        chair_summary, top_revisions = await run_in_threadpool(
+            run_chair_phase,
+            reviewer_results=reviewer_results,
+            rubric=rubric,
+            evidence=evidence,
+            llm_call=llm_call,
+        )
+        await meeting_repo.update_result_by_id(
+            meeting_doc_id,
+            {"chair_summary": chair_summary, "top_revisions": top_revisions, "status": "completed"},
+        )
+        if progress_token:
+            _analyze_progress[progress_token] = {
+                **_analyze_progress.get(progress_token, {}),
+                "chair_done": True,
+            }
+    except Exception:
+        logger.exception("[CHAIR_BACKGROUND_FAILED] meeting_doc_id=%s", meeting_doc_id)
+        await meeting_repo.update_result_by_id(meeting_doc_id, {"status": "failed"})
+    finally:
+        if progress_token:
+            _analyze_progress.pop(progress_token, None)
 
 
 @router.get("/{project_id}/analyze/progress", response_model=AnalyzeProgress)

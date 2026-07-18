@@ -1,7 +1,15 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { analyzeProject } from '../api/projectApi'
+import { analyzeProject, getProjectReport } from '../api/projectApi'
 import MeetingChat from '../components/meeting/MeetingChat'
+
+// 가은/Claude(2026-07-17, 경이와 조율): 위원장 종합이 이제 백그라운드에서 늦게 끝날 수
+// 있어서(analyzeProject()는 리뷰+채점만 끝나면 이미 resolve됨), 이 화면(결과 정리)에
+// 캐시된 결과의 chair_summary가 null이면 RPT-001(GET .../report)을 폴링해서 채운다.
+// 2초 간격 최대 60회(약 2분) — 그래도 안 끝나면 폴링을 멈추고 새로고침을 안내한다
+// (무한 폴링 방지).
+const CHAIR_POLL_INTERVAL_MS = 2000
+const CHAIR_POLL_MAX_ATTEMPTS = 60
 
 function downloadResultJson(result, projectId) {
   const blob = new Blob([JSON.stringify(result, null, 2)], { type: 'application/json' })
@@ -51,6 +59,40 @@ export default function ProjectDetailPage() {
       })
   }, [projectId])
 
+  const [chairPollExhausted, setChairPollExhausted] = useState(false)
+
+  useEffect(() => {
+    if (!result || result.chair_summary || result.status === 'failed') return
+
+    let attempts = 0
+    const timer = setInterval(() => {
+      attempts += 1
+      getProjectReport(projectId)
+        .then((report) => {
+          if (report && (report.chair_summary || report.status === 'failed')) {
+            setResult((prev) => ({
+              ...prev,
+              chair_summary: report.chair_summary,
+              top_revisions: report.top_revisions,
+              status: report.status,
+            }))
+            clearInterval(timer)
+          } else if (attempts >= CHAIR_POLL_MAX_ATTEMPTS) {
+            setChairPollExhausted(true)
+            clearInterval(timer)
+          }
+        })
+        .catch(() => {
+          if (attempts >= CHAIR_POLL_MAX_ATTEMPTS) {
+            setChairPollExhausted(true)
+            clearInterval(timer)
+          }
+        })
+    }, CHAIR_POLL_INTERVAL_MS)
+
+    return () => clearInterval(timer)
+  }, [result, projectId])
+
   return (
     <div style={styles.page}>
       <h1 style={styles.title}>프로젝트 상세: {projectId}</h1>
@@ -72,6 +114,16 @@ export default function ProjectDetailPage() {
           <button style={styles.simulationButton} onClick={() => navigate(`/projects/${projectId}/feedback-chat`)}>
             🎬 회의 영상 · 대화형 피드백으로 보기
           </button>
+
+          {!result.chair_summary && result.status !== 'failed' && !chairPollExhausted && (
+            <p style={styles.chairPending}>🧑‍⚖️ 위원장이 종합 중입니다... 잠시만 기다려주세요.</p>
+          )}
+          {!result.chair_summary && (result.status === 'failed' || chairPollExhausted) && (
+            <p style={styles.chairFailed}>
+              위원장 종합이 지연되고 있어요. 새로고침해서 다시 확인해주세요.
+            </p>
+          )}
+
           <MeetingChat result={result} />
           <details style={styles.card}>
             <summary style={styles.sectionTitle}>원본 JSON</summary>
@@ -103,6 +155,24 @@ const styles = {
     padding: '10px 14px',
     borderRadius: 8,
     display: 'inline-block',
+  },
+  chairPending: {
+    fontSize: 13,
+    color: '#2f6fb0',
+    background: '#e4f0fb',
+    padding: '10px 14px',
+    borderRadius: 8,
+    display: 'inline-block',
+    marginTop: 12,
+  },
+  chairFailed: {
+    fontSize: 13,
+    color: '#d64545',
+    background: '#fbe2e2',
+    padding: '10px 14px',
+    borderRadius: 8,
+    display: 'inline-block',
+    marginTop: 12,
   },
   card: {
     background: '#fff',
