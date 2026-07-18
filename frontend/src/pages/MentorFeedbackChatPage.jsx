@@ -111,6 +111,10 @@ export default function MentorFeedbackChatPage() {
   const [error, setError] = useState('')
   const historyRef = useRef([]) // [{question, answer}, ...] — /ask 호출마다 그대로 재전송
   const bottomRef = useRef(null)
+  // 재인/Claude(2026-07-17): /ask 답변이 오면 CommitteeVideoStage(재인님 파일)의 재생 큐에
+  // 밀어넣어서, 텍스트 버블은 한 번에 뜨더라도 아바타 영상은 이어서 한 명씩 순서대로
+  // 재생되게 한다(CommitteeVideoStage.jsx의 enqueueLines 참고).
+  const videoStageRef = useRef(null)
 
   useEffect(() => {
     const cached = sessionStorage.getItem(`analysis:${projectId}`)
@@ -143,6 +147,9 @@ export default function MentorFeedbackChatPage() {
       // 넘길 history는 화자별 답변을 한데 묶어 하나의 answer 문자열로 만든다.
       const combinedAnswer = answers.map((a) => `${a.display_name}: ${a.answer}`).join('\n')
       historyRef.current = [...historyRef.current, { question, answer: combinedAnswer }]
+      videoStageRef.current?.enqueueLines(
+        answers.map((a) => ({ speaker_id: a.persona_id, speaker_name: a.display_name, text: a.answer })),
+      )
       setMessages((prev) => [
         ...prev,
         ...answers.map((a) => ({
@@ -186,7 +193,7 @@ export default function MentorFeedbackChatPage() {
 
         <div style={styles.videoBox}>
           {Array.isArray(result.media_script) && result.media_script.length > 0 ? (
-            <CommitteeVideoStage mediaLines={result.media_script} />
+            <CommitteeVideoStage ref={videoStageRef} mediaLines={result.media_script} />
           ) : (
             <p style={styles.videoNotice}>
               이 회의는 아직 영상 대본(media_script)이 생성되지 않았습니다 — 위원 발언 없이

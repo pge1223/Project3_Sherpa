@@ -17,7 +17,9 @@ router = APIRouter(prefix="/media", tags=["media"])
 # 팀원마다 순차적으로 준비될 예정이라, 여기 없는 speaker_id는 프론트가
 # 립싱크 영상 생성을 시도하지 않고 무한루프 영상+TTS로 폴백한다
 # (media_stream.schema.md §2 참고 — 이것도 팀 동의 필요한 제안).
-AVAILABLE_SPEAKER_IDS = ["business_strategy"]
+# 재인/Claude(2026-07-17): 2번째 아바타(technical_feasibility) 영상 세트까지
+# musetalk_setup_v2.ipynb에서 제스처 포함 검증 완료 - 2명으로 확장.
+AVAILABLE_SPEAKER_IDS = ["business_strategy", "technical_feasibility"]
 
 
 @router.get("/available-speakers")
