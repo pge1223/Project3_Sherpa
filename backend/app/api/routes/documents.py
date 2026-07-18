@@ -77,7 +77,7 @@ def _get_indexing_service() -> RAGIndexingService:
 
 
 def _parse_chunk_and_index(
-    document_id: str, project_id: str, file_path: str, filename: str
+    document_id: str, project_id: str, file_path: str, filename: str, document_role: str = "target"
 ) -> tuple[int, str, dict]:
     """RAG-001~003: 파싱 -> 청킹 -> 임베딩 -> Chroma 저장까지 동기적으로 실행하고
     (색인된 청크 수, 원문 전체 텍스트, 변환 metadata)를 반환한다. CPU-bound라 호출부에서
@@ -122,6 +122,7 @@ def _parse_chunk_and_index(
             project_id=project_id,
             document_id=document_id,
             document_title=filename,
+            document_role=document_role,
         )
         summary = _get_indexing_service().index_chunking_result_with_summary(chunking_result, indexing_context)
         parsed_text = "\n\n".join(block.content for block in extraction.blocks)
@@ -149,6 +150,7 @@ def _chunk_and_index_webpage(
         project_id=project_id,
         document_id=document_id,
         document_title=title,
+        document_role="criteria",
     )
     summary = _get_indexing_service().index_chunking_result_with_summary(chunking_result, indexing_context)
     return summary.stored_count
@@ -324,7 +326,7 @@ async def upload_document(
     # RAG-001~003: 파싱 -> 청킹 -> 임베딩 -> Chroma 색인 (실패해도 업로드 자체는 성공으로 유지)
     try:
         stored_count, parsed_text, conversion_metadata = await run_in_threadpool(
-            _parse_chunk_and_index, result, project_id, file_path, file.filename
+            _parse_chunk_and_index, result, project_id, file_path, file.filename, document_role
         )
         document.status = "indexed" if stored_count > 0 else "indexed_empty"
         document.parsed_text = parsed_text
