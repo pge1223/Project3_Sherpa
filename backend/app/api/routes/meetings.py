@@ -161,6 +161,7 @@ if str(_MEETING_DIR) not in sys.path:
 from graph import (  # noqa: E402
     build_rubric,
     rerun_reviewer,
+    run_chair_phase,
     run_meeting,
 )
 # from graph import (
@@ -295,6 +296,15 @@ def _build_real_llm_call(meeting_id: str):
 #     return [{**v2_result, "persona_id": persona_id} for persona_id, v2_result in reviewer_results.items()]
 
 
+# 가은/Claude(2026-07-18): "source_document_id가 왜 항상 null이냐"는 질문에 대한 답 —
+# 버그가 아니라 지금 구조 자체가 그렇다. rubric은 업로드된 공고문에서 추출되는 게 아니라
+# domain(competition/government_support)별 정적 템플릿(rubric_mapping_{domain}.json)을
+# 그대로 쓴다(공고문 자동 추출은 용준 담당, notice_criteria 추출 자체가 미착수 —
+# meetings.py 상단 큰 주석의 [analyze_project() 실제 흐름] 3번 참고). 그래서 rubric.py의
+# build_rubric()이 source_document_id를 항상 None으로 채운다 — 공고문 URL을 아무리 잘
+# 수집해도 rubric 자체는 안 바뀐다. 반면 업로드된 공고문은 retrieved_evidence(RAG 검색)
+# 근거로는 쓰이므로, "루브릭이 안 먹었다"보다는 "애초에 루브릭에 반영되는 경로가 없다"가
+# 정확한 진단이다. 터미널에서 바로 확인할 수 있도록 로그를 남긴다.
 def _load_rubric_mapping(domain: str) -> dict:
     path = _PERSONAS_DIR / f"rubric_mapping_{domain}.json"
     if not path.exists():
@@ -302,7 +312,16 @@ def _load_rubric_mapping(domain: str) -> dict:
             status_code=400,
             detail=f"'{domain}' 도메인의 평가기준 템플릿(rubric_mapping_{domain}.json)이 아직 없습니다.",
         )
-    return json.loads(path.read_text(encoding="utf-8"))
+    mapping = json.loads(path.read_text(encoding="utf-8"))
+    logger.info(
+        "[rubric] domain=%s -> %s 정적 템플릿 로드 (공고문에서 자동 추출한 게 아니라 "
+        "도메인 고정 기준입니다 — source_document_id는 항상 null). criteria=%d개, committee=%s",
+        domain,
+        path.name,
+        len(mapping.get("rubric", [])),
+        mapping.get("committee"),
+    )
+    return mapping
 
 
 # 가은/Claude(2026-07-17): 위원별 역할 기반 검색 "배선 교체"(위 이전 버전 주석 참고)를
@@ -328,10 +347,60 @@ def _flatten_evidence_context(evidence_context: list[dict]) -> list[dict]:
     return list(evidence_by_chunk.values())
 
 
+# 가은/Claude(2026-07-18): "공고문 URL이 실제로 검색에 잡히는지" 확인용 로그 — 원래
+# _search_evidence_for_rubric()(role_id=None, 단순 semantic 검색)에 달아뒀던 진단
+# 로그인데, RAG-003/004/005 정식 연동(MeetingEvidenceOrchestrationService, 위 주석
+# 참고)으로 대체되면서 그 함수 자체가 없어졌다 — evidence_context를 만든 직후(호출부,
+# analyze_project())에서 persona_id/criterion_id별로 몇 건 잡혔는지, evidence_status
+# (RAG-005 사전 판정)까지 로그로 남기는 걸로 옮긴다.
+def _log_evidence_context(project_id: str, evidence_context: list[dict]) -> None:
+    total_hits = 0
+    for entry in evidence_context:
+        hits = entry.get("retrieved_evidence") or []
+        total_hits += len(hits)
+        hit_names = [
+            item.get("document_name") or item.get("source_filename") or "(제목 없음)" for item in hits
+        ]
+        logger.info(
+            "[evidence] persona=%s criterion=%s 검색결과=%d건 sufficiency=%s 출처=%s",
+            entry.get("persona_id"),
+            entry.get("criterion_id"),
+            len(hits),
+            (entry.get("sufficiency") or {}).get("evidence_status"),
+            hit_names or "(없음)",
+        )
+    if total_hits == 0:
+        logger.warning(
+            "[evidence] project_id=%s 전체 %d개 (persona, criterion) 조합에서 근거를 하나도 "
+            "못 찾았습니다 — 공고문/기획서가 색인(embedding)까지 끝났는지 documents 컬렉션의 "
+            "status를 확인하세요.",
+            project_id,
+            len(evidence_context),
+        )
+
+
 # 가은/Claude(2026-07-16): analyze_project()와 새 mentor-candidates 엔드포인트(STEP4
 # 멘토 추천 화면)가 둘 다 "document_role=target 첫 문서"를 필요로 해서 공용으로 뺐다.
 async def _load_target_submission(project_id: str) -> tuple[dict, dict]:
     documents = await document_repo.find_by_project_id(project_id)
+    # 가은/Claude(2026-07-18): "공모전 공고 URL 쪽이 색인이 안 된 것 같다" 진단용 —
+    # 이 프로젝트에 실제로 몇 개 문서가, 어떤 role/status로 올라와 있는지 분석 시작 시점에
+    # 터미널에서 바로 보이게 한다. status가 indexed가 아니면(uploaded/*_failed) 그 문서는
+    # RAG 검색에도 안 잡힌다.
+    logger.info(
+        "[documents] project_id=%s 문서 현황: %s",
+        project_id,
+        [
+            {
+                "role": d.get("document_role", "target"),
+                "name": d.get("original_filename"),
+                "status": d.get("status"),
+                "has_parsed_text": bool(d.get("parsed_text")),
+            }
+            for d in documents
+        ]
+        or "(문서 없음)",
+    )
     target_docs = [d for d in documents if d.get("document_role", "target") == "target" and d.get("parsed_text")]
     if not target_docs:
         raise HTTPException(
@@ -675,6 +744,7 @@ async def analyze_project(
         rubric_mapping=mapping,
         trace_id=meeting_id,
     )
+    _log_evidence_context(project_id, evidence_context)
     evidence_callback = evidence_service.create_evidence_callback(trace_id=meeting_id)
     # MeetingModel.retrieved_evidence(MTG-007 rerun_reviewer()용 flat 레거시 포맷)와
     # ask_committee()가 여전히 필요로 하는 flat 근거 — evidence_context를 chunk_id 기준으로
@@ -751,8 +821,11 @@ async def analyze_project(
     #     "media_script": [],
     # }
     #
-    # run_meeting()이 그래프 조립부터 v2 문서 조립까지 다 해준다. 내부 graph.stream()도
-    # 동기 함수라 threadpool로 감싸는 건 그대로 유지.
+    # 가은/Claude(2026-07-17, 경이 확인): 위원장 종합을 백그라운드로 미루기로 함 —
+    # run_meeting()이 이제 리뷰+채점만 끝내고(include_chair=False) 바로 리턴한다.
+    # 이 단계(리뷰+채점)가 실패하면 progress_token을 바로 지우고 예외를 그대로 올린다
+    # (기존과 동일). 성공하면 지우지 않는다 — 아래 백그라운드 작업(위원장 종합)이 끝날
+    # 때까지 폴링 엔트리를 살려둬야 "결과 정리" 화면이 chair_done을 볼 수 있다.
     try:
         document = await run_in_threadpool(
             run_meeting,
@@ -768,16 +841,16 @@ async def analyze_project(
             evidence_callback=evidence_callback,
             similar_success_cases=similar_success_cases,
             on_progress=on_progress,
+            include_chair=False,
         )
-    finally:
-        # 성공/실패 상관없이 여기서 바로 지운다 — 프론트는 마지막 폴링 결과가 아니라
-        # POST 응답 자체(성공 시 document, 실패 시 에러)로 완료를 판단하므로, 폴링
-        # 엔트리를 끝까지 남겨둘 이유가 없다. 안 지우면 요청마다 dict가 계속 쌓인다.
+    except Exception:
         if progress_token:
             _analyze_progress.pop(progress_token, None)
+        raise
 
-    # MTG-005: 회의 결과 저장. committee/submission/retrieved_evidence도 이제 진짜 값이라
-    # reevaluate_reviewer()가 재구성 없이 그대로 이어받을 수 있다.
+    # MTG-005: 회의 결과 저장(리뷰+채점만 끝난 상태, chair_summary=None). committee/
+    # submission/retrieved_evidence도 이제 진짜 값이라 reevaluate_reviewer()가 재구성
+    # 없이 그대로 이어받을 수 있다.
     meeting = MeetingModel(
         project_id=project_id,
         user_email=user_email,
@@ -800,11 +873,65 @@ async def analyze_project(
         # 있었다(캐시된 회의를 다시 불러오면 영상 대본이 사라지는 문제) - document(=
         # run_meeting()의 반환값)에 이미 채워진 값을 그대로 쓰도록 수정.
         media_script=document["media_script"],
-        schema_version="2.1.0",
+        schema_version="2.2.0",
     )
-    await meeting_repo.create(meeting)
+    meeting_doc_id = await meeting_repo.create(meeting)
+
+    # 가은/Claude(2026-07-17, 경이 확인): 위원 재실행 없이 chair 노드만 백그라운드에서
+    # 마저 돌리고 끝나면 Mongo 문서를 patch한다 - HTTP 응답은 여기서 기다리지 않고
+    # 바로 아래에서 document(리뷰+채점만 있는 버전)를 반환한다. 이 앱은 단일 프로세스
+    # 전제(_analyze_progress가 이미 그 전제 위에 있음, 위 주석 참고)라 별도 큐 없이
+    # asyncio.create_task로 충분하다.
+    asyncio.create_task(
+        _synthesize_chair_background(
+            meeting_doc_id=meeting_doc_id,
+            reviewer_results=document["reviewer_results"],
+            rubric=document["rubric"],
+            evidence=document["evidence"],
+            llm_call=llm_call,
+            progress_token=progress_token,
+        )
+    )
 
     return document
+
+
+async def _synthesize_chair_background(
+    *,
+    meeting_doc_id: str,
+    reviewer_results: list,
+    rubric: dict,
+    evidence: list,
+    llm_call,
+    progress_token: Optional[str],
+) -> None:
+    """analyze_project()가 리뷰+채점만 반환한 뒤, 위원장 종합을 이어서 백그라운드로
+    돌리고 끝나면 Mongo meetings 문서를 patch한다(가은/Claude 2026-07-17, 경이 확인).
+    실패해도 이미 반환된 리뷰 결과 자체는 유효하므로 예외를 삼키고 status만 "failed"로
+    남긴다 - 사용자는 "결과 정리" 화면에서 안내를 보고 새로고침하면 된다."""
+    try:
+        chair_summary, top_revisions = await run_in_threadpool(
+            run_chair_phase,
+            reviewer_results=reviewer_results,
+            rubric=rubric,
+            evidence=evidence,
+            llm_call=llm_call,
+        )
+        await meeting_repo.update_result_by_id(
+            meeting_doc_id,
+            {"chair_summary": chair_summary, "top_revisions": top_revisions, "status": "completed"},
+        )
+        if progress_token:
+            _analyze_progress[progress_token] = {
+                **_analyze_progress.get(progress_token, {}),
+                "chair_done": True,
+            }
+    except Exception:
+        logger.exception("[CHAIR_BACKGROUND_FAILED] meeting_doc_id=%s", meeting_doc_id)
+        await meeting_repo.update_result_by_id(meeting_doc_id, {"status": "failed"})
+    finally:
+        if progress_token:
+            _analyze_progress.pop(progress_token, None)
 
 
 @router.get("/{project_id}/analyze/progress", response_model=AnalyzeProgress)

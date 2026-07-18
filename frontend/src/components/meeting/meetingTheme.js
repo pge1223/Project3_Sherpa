@@ -67,13 +67,21 @@ export function buildTranscript(result) {
     return hasChairLine || !chairLine ? lines : [...lines, chairLine]
   }
 
-  const reviewerLines = (result.reviewer_results || []).map((r) => ({
-    personaId: r.persona_id,
-    speakerName: r.persona_name,
-    role: r.role,
-    text: r.summary,
-    emotion: null,
-  }))
+  // 가은/Claude(2026-07-17): 사용자 요청 — 발언 시작을 위원의 전반적 요약(summary)이
+  // 아니라 기준별 실행 가능한 제안(rubric_scores[].suggestions)으로 보여준다. 한
+  // 위원이 여러 기준을 검토하므로 배열의 배열이라, flatMap으로 위원당 하나의 배열로
+  // 모은 뒤 한 문단으로 이어붙인다. suggestions가 비어있는 예외 상황엔 summary로
+  // 폴백해 빈 말풍선을 막는다.
+  const reviewerLines = (result.reviewer_results || []).map((r) => {
+    const suggestions = (r.rubric_scores || []).flatMap((rs) => rs.suggestions || [])
+    return {
+      personaId: r.persona_id,
+      speakerName: r.persona_name,
+      role: r.role,
+      text: suggestions.length > 0 ? suggestions.join(' ') : r.summary,
+      emotion: null,
+    }
+  })
 
   return chairLine ? [...reviewerLines, chairLine] : reviewerLines
 }

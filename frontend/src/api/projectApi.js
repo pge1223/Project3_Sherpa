@@ -88,6 +88,21 @@ export async function askCommittee(projectId, question, history) {
   return data
 }
 
+// 가은/Claude(2026-07-17): "결과 정리"(ProjectDetailPage)가 위원장 종합(백그라운드로
+// 늦게 끝남)을 기다리는 동안 폴링용으로 쓴다 — RPT-001 기존 엔드포인트 재사용, 새
+// 엔드포인트 아님. 최신 Mongo 회의 기록을 그대로 반환하므로 백그라운드 작업이
+// chair_summary를 patch하면 다음 폴링에서 바로 보인다.
+export async function getProjectReport(projectId) {
+  const res = await fetch(`${API_BASE_URL}/projects/${projectId}/report`, {
+    headers: { ...authHeaders() },
+  })
+  const data = await res.json()
+  if (!res.ok) {
+    throw new Error(data.detail || '결과를 불러오지 못했습니다.')
+  }
+  return data
+}
+
 // STEP4 "공모전 분석" 화면 — 문서 성격 태그 + 추천 멘토 후보(도메인 고정 4명 + LLM이 붙인
 // fit_tag)를 가져온다. 실제 OpenAI 호출 1회(짧은 프롬프트라 수 초 내).
 export async function getMentorCandidates(projectId) {

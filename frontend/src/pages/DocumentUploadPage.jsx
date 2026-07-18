@@ -28,7 +28,13 @@ function UploadIcon() {
 export default function DocumentUploadPage() {
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
-  const continuingProjectId = searchParams.get('projectId')
+  // 가은/Claude(2026-07-18): StepSidebar가 projectId 없이 "/projects/null/..."류 경로를
+  // 만들던 버그(StepSidebar.jsx 주석 참고) 때문에 ?projectId=null이 실제 쿼리로 들어와
+  // ensureProject()가 진짜 프로젝트를 안 만들고 문자열 "null"을 그대로 써버려 업로드가
+  // POST /documents/null(500)로 깨지는 걸 실측했다 — 근본 원인(StepSidebar)은 고쳤지만,
+  // 이미 공유된 링크나 브라우저 히스토리에 그런 URL이 남아있을 수 있어 여기서도 방어한다.
+  const rawProjectId = searchParams.get('projectId')
+  const continuingProjectId = rawProjectId && rawProjectId !== 'null' && rawProjectId !== 'undefined' ? rawProjectId : null
 
   const [criteriaTab, setCriteriaTab] = useState('url')
   const [criteriaUrl, setCriteriaUrl] = useState('')
@@ -196,7 +202,7 @@ export default function DocumentUploadPage() {
       <StepSidebar projectId={projectId} activeIndex={1} />
 
       <main style={styles.main}>
-        <div style={styles.stepLabel}>STEP 2 / 7</div>
+        <div style={styles.stepLabel}>STEP 2 / 5</div>
         <h1 style={styles.title}>공모전 정보 입력 · 문서 첨부</h1>
 
         {loadingExisting && <p style={styles.mutedNotice}>이전에 진행하던 프로젝트를 불러오는 중...</p>}
