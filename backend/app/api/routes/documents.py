@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -196,31 +197,52 @@ def _chunk_and_index_webpage(
 # 실측됐다. 근본 hang 원인은 고쳐졌지만, "색인이 오래 걸리는 것 자체"와 "타임아웃이
 # 아예 없다"는 별개 문제라 — 색인을 백그라운드로 넘기고 타임아웃을 강제한다.
 # GET /{project_id}/{document_id}/status(기존 DOC-004 엔드포인트)를 프론트가 폴링해서
-# 완료 여부를 확인한다.
+# 완료 여부를 확인한다. 아래 상수는 그 백그라운드 색인의 최대 대기 시간(윤한/Claude
+# 2026-07-18) — 재발 시 요청이 무기한 걸려있지 않도록 하는 안전장치다.
 _WEBPAGE_INDEXING_TIMEOUT_SECONDS = 120
 
 
 async def _index_webpage_background(
-    *, document_id: str, project_id: str, url: str, title: str, cleaned: CleanedWebContent
+    *,
+    document_id: str,
+    project_id: str,
+    url: str,
+    title: str,
+    cleaned: CleanedWebContent,
 ) -> None:
     """색인을 백그라운드로 돌리고 끝나면 documents 컬렉션의 status를 patch한다
     (meetings.py의 _synthesize_chair_background()와 동일 패턴). asyncio.wait_for로
     타임아웃을 걸지만, run_in_threadpool로 넘긴 실제 스레드 자체를 강제 종료하지는
     못한다 — 진짜 hang이면 그 스레드는 백그라운드에 남아있게 되고, 여기선 "기다리는 걸
     포기하고 실패로 기록"까지만 보장한다(요청/폴링 쪽을 무한 대기에서 풀어주는 게 목적)."""
+    _index_started = time.time()
+    logger.info("[fetch-url] 색인(백그라운드) 시작 document_id=%s url=%s", document_id, url)
     try:
         stored_count = await asyncio.wait_for(
             run_in_threadpool(_chunk_and_index_webpage, document_id, project_id, url, title, cleaned),
             timeout=_WEBPAGE_INDEXING_TIMEOUT_SECONDS,
         )
         status_value = "indexed" if stored_count > 0 else "indexed_empty"
+        logger.info(
+            "[fetch-url] === 색인(백그라운드) 완료 === document_id=%s elapsed=%.1fs stored_count=%d",
+            document_id,
+            time.time() - _index_started,
+            stored_count,
+        )
     except asyncio.TimeoutError:
         logger.warning(
-            "공고문 색인 타임아웃: document_id=%s (%ds 초과)", document_id, _WEBPAGE_INDEXING_TIMEOUT_SECONDS
+            "[fetch-url] 색인(백그라운드) 타임아웃: document_id=%s (%ds 초과) elapsed=%.1fs",
+            document_id,
+            _WEBPAGE_INDEXING_TIMEOUT_SECONDS,
+            time.time() - _index_started,
         )
         status_value = "indexing_timeout"
     except Exception:
-        logger.exception("공고문 색인 중 오류가 발생했습니다: document_id=%s", document_id)
+        logger.exception(
+            "[fetch-url] 색인(백그라운드) 실패: document_id=%s elapsed=%.1fs",
+            document_id,
+            time.time() - _index_started,
+        )
         status_value = "indexing_failed"
     await document_repo.update_fields(document_id, {"status": status_value})
 
@@ -302,18 +324,24 @@ async def fetch_url(
         # 가은/Claude(2026-07-15, "다 이어버리자"): project_id가 있으면 공고문도 기획서
         # 업로드와 동일하게 색인 + documents 컬렉션 저장까지 잇는다. 없으면(과거 호출
         # 호환) 조회만 하고 끝낸다 — 프론트가 project_id를 꼭 보내도록 같이 바꿨다.
+        # 윤한/Claude(2026-07-18, INF-007): 색인을 이 요청 안에서 await하면 요청이 색인
+        # 소요 시간만큼(수십 초~) 붙잡혀 있었다 — status="indexing"으로 저장만 해두고
+        # asyncio.create_task()로 넘긴 뒤 즉시 응답한다(meetings.py의 위원장 종합 백그라운드
+        # 이관과 동일 패턴). 프론트는 document_status="indexing"이면 document_id로
+        # /{project_id}/{document_id}/status를 폴링해 최종 상태를 확인해야 한다.
         if request.project_id:
+            title = merged_page_content.title or request.url
             document = DocumentModel(
                 project_id=request.project_id,
                 user_email=user_email,
-                original_filename=merged_page_content.title or request.url,
+                original_filename=title,
                 stored_filename=request.url,
                 file_path=request.url,
                 file_size=merged_page_content.text_length,
                 mime_type="text/html",
+                status="indexing",
                 source_type="url",
                 document_role="criteria",
-                status="indexing",
                 parsed_text=merged_page_content.text,
                 # 가은/Claude(2026-07-18): 실측(sotong.go.kr) — 평가기준이 본문이 아니라
                 # HWP 요강 파일에만 있는 공고가 실제로 있었다. 재접속 후에도(getDocuments())
@@ -331,7 +359,7 @@ async def fetch_url(
                     document_id=document_id,
                     project_id=request.project_id,
                     url=request.url,
-                    title=merged_page_content.title or request.url,
+                    title=title,
                     cleaned=cleaned,
                 )
             )
