@@ -38,6 +38,7 @@ from ai.rag.chunking.config import (
     LIST_ITEM_MARKER_PATTERN,
     LIST_ITEM_MIN_MARKER_COUNT,
     TAIL_CHUNK_MIN_CHARS,
+    extract_whole_line_heading_title,
 )
 from ai.rag.chunking.schemas import (
     Chunk,
@@ -251,7 +252,13 @@ def _segment_into_logical_units(blocks: list[UnifiedBlock]) -> list[_LogicalUnit
 
         # 의사(pseudo) heading 감지: "□ 접수방법: ..." 형태의 단락도 section_title 후보로 인정.
         # 단, 본문 내용을 별도로 떼어내지 않고 그대로 body_blocks에 포함시킨다.
-        pseudo_title = _extract_pseudo_heading_title(block.content) if block.kind in ("paragraph", "list") else None
+        # "1) 개요"/"① 법제처 법령 학습"처럼 블록 전체가 통째로 짧은 제목인 경우(PDF에 흔함)는
+        # _extract_pseudo_heading_title()이 못 잡으므로 extract_whole_line_heading_title()로 보강한다.
+        pseudo_title = None
+        if block.kind in ("paragraph", "list"):
+            pseudo_title = _extract_pseudo_heading_title(block.content)
+            if pseudo_title is None:
+                pseudo_title = extract_whole_line_heading_title(block.content)
         if pseudo_title is not None:
             if current is not None:
                 units.append(current)
