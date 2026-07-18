@@ -110,9 +110,6 @@ from jose import jwt, JWTError
 from openai import OpenAI
 from starlette.concurrency import run_in_threadpool
 
-import chromadb
-
-from ai.rag.embedding.kure_embedder import KUREEmbedder
 from ai.rag.evidence_linking.service import EvidenceLinkingService
 from ai.rag.evidence_sufficiency.service import EvidenceSufficiencyService
 from ai.rag.orchestration import MeetingEvidenceOrchestrationService
@@ -188,16 +185,38 @@ _RECURSION_LIMIT = 12
 # RAGIndexingService 인스턴스를 그대로 주입해 KUREEmbedder를 두 번 로딩하지 않는다(RAG-006과
 # 동일 패턴). MeetingEvidenceOrchestrationService 자체는 검색 결과 캐시를 들고 있어 회의
 # 1회(요청 1건)마다 새로 만들어야 하므로 여기서 만들지 않는다(analyze_project() 참고).
-from app.api.routes.documents import _get_indexing_service  # noqa: E402
+from app.api.routes.documents import _get_chroma_client, _get_indexing_service  # noqa: E402
 
 _role_retrieval_service = RoleAwareRetrievalService(retrieval_service=_get_indexing_service())
 _evidence_linking_service = EvidenceLinkingService()
 _evidence_sufficiency_service = EvidenceSufficiencyService()
 
 # RAG-006: similar_success_cases 검색 서비스 (앱 시작 시 1회 초기화)
+# 용준/Claude(2026-07-18, fetch-url 색인 5분+ hang 조사): 여기서 별도로
+# chromadb.PersistentClient(path=str(Path(settings.CHROMA_PERSIST_DIR)))와 KUREEmbedder()를
+# 새로 만들고 있었다 — documents.py의 client는 path=settings.CHROMA_PERSIST_DIR("./chroma_db")
+# 그대로 identifier로 쓰는데, 여기 str(Path(...))는 pathlib이 "./" 접두사를 제거해
+# identifier가 "chroma_db"로 달라진다("./chroma_db" != "chroma_db"). chromadb는
+# PersistentClient(path=...)를 프로세스 전역 캐시(SharedSystemClient._identifier_to_system)에
+# identifier 문자열 그대로 key로 저장하므로, 이 둘은 완전히 별개의 System(=별개의 엔진/SQLite
+# 연결)이 되어 같은 물리 chroma_db 디렉터리에 서로 모른 채 동시 접근한다 — 이 구조적 결함
+# 자체는 재현 스크립트로 직접 확인했다(서로 다른 identifier 문자열 → 서로 다른 System).
+# Windows는 SQLite 파일 잠금이 POSIX와 달리 mandatory라 이런 상태에서 한쪽이 쓰기 중일 때
+# 다른 쪽이 파일을 열려고 하면 즉시 에러 대신 무기한 대기로 이어질 수 있다는 것이 보고된
+# 5분+ hang의 가장 유력한 원인이다(팀이 이미 scripts/verify_klawyer_rag_quality.py에서
+# SharedSystemClient 캐싱과 Windows 잠금 문제를 겪은 적이 있다는 주석을 남겨둔 것과 같은
+# 메커니즘). 다만 실제 5분 hang을 이 조건만으로 직접 재현하지는 못했다 — 스크립트 재현은
+# 초 단위로 끝났고, 실제 hang은 체크포인트/DDL 타이밍이 겹쳐야 하는 레이스로 추정된다.
+# 즉 "구조적 결함이 존재한다"는 확인된 사실이고, "이것이 보고된 hang의 원인이다"는 가장
+# 유력한 가설이지 인과관계가 재현으로 확정된 것은 아니다 — 그래도 chromadb 자체가 금지하는
+# 상태(같은 경로에 서로 다른 identifier로 열린 System 2개)라 고칠 근거는 충분하다.
+# KUREEmbedder()도 SentenceTransformer를 프로세스에 두 번 로딩하는 낭비였다. documents.py의
+# 싱글턴 client/embedder를 그대로 재사용해 중복 생성을 없앤다 — collection_name만 다르면
+# (similar_cases) 같은 client로도 얼마든지 별도 컬렉션을 만들 수 있다(ChromaVectorStore/
+# SimilarCaseRepository 둘 다 client를 주입받는 구조라 client 자체의 재사용에는 문제가 없다).
 _similar_case_config = SimilarCaseConfig()
-_chroma_client = chromadb.PersistentClient(path=str(Path(settings.CHROMA_PERSIST_DIR)))
-_kure_embedder = KUREEmbedder()
+_chroma_client = _get_chroma_client()
+_kure_embedder = _get_indexing_service().embedder
 _similar_case_repo = SimilarCaseRepository(
     client=_chroma_client,
     collection_name=_similar_case_config.collection_name,
