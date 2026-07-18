@@ -3,6 +3,8 @@ from typing import Optional
 
 from pydantic import BaseModel, field_validator
 
+from ai.rag.loaders.schemas import UrlExtractionResult
+
 
 class DocumentResponse(BaseModel):
     id: str
@@ -39,3 +41,15 @@ class FetchUrlRequest(BaseModel):
         if not v or not v.strip():
             raise ValueError("url은 빈 문자열일 수 없습니다")
         return v
+
+
+# 가은/Claude(2026-07-19, INF-007 — fetch-url 색인 백그라운드화): UrlExtractionResult는
+# ai/rag/loaders/schemas.py(용준 담당) 소유라 그 파일은 건드리지 않고, 백엔드 쪽에서
+# 상속으로 필드만 확장한다. 색인(Chroma 임베딩)이 더 이상 응답을 막지 않으므로 — 이
+# document_id/document_status로 GET /{project_id}/{document_id}/status(기존 DOC-004
+# 엔드포인트, 신규 아님)를 폴링해서 색인 완료 여부를 알 수 있다. project_id를 안 보낸
+# 호출(과거 호환, 조회만)이나 page_content가 없는 경우(직접 파일 링크 등)는 색인 자체가
+# 없으므로 둘 다 None으로 남는다.
+class FetchUrlResponse(UrlExtractionResult):
+    document_id: Optional[str] = None
+    document_status: Optional[str] = None

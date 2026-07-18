@@ -38,6 +38,9 @@ export async function getDocuments(projectId) {
 }
 
 // projectId가 있어야 공고문이 RAG 색인까지 되고 documents 컬렉션에 저장된다(document_role: 'criteria').
+// 가은/Claude(2026-07-19, INF-007): 색인(청킹+임베딩)이 더 이상 이 응답을 막지 않는다 —
+// project_id를 줬으면 응답에 document_id/document_status("indexing")가 같이 온다.
+// 색인 완료 여부는 getDocumentStatus()로 폴링해서 확인해야 한다.
 export async function fetchUrl(url, projectId) {
   const res = await fetch(`${API_BASE_URL}/documents/fetch-url`, {
     method: 'POST',
@@ -50,6 +53,21 @@ export async function fetchUrl(url, projectId) {
       ? data.detail.map((d) => d.msg).join(', ')
       : data.detail
     throw new Error(message || 'URL 문서를 가져오지 못했습니다.')
+  }
+  return data
+}
+
+// 가은/Claude(2026-07-19, INF-007): fetch-url이 색인을 백그라운드로 넘기면서 필요해짐 —
+// document.status가 "indexing"인 동안 짧은 간격으로 이 엔드포인트(기존 DOC-004)를
+// 폴링해서 "indexed"/"indexed_empty"/"indexing_failed"/"indexing_timeout"으로 바뀌는지
+// 확인한다. getDocuments()(문서 목록 전체 조회)보다 가벼워서 폴링용으로 이걸 쓴다.
+export async function getDocumentStatus(projectId, documentId) {
+  const res = await fetch(`${API_BASE_URL}/documents/${projectId}/${documentId}/status`, {
+    headers: { ...authHeaders() },
+  })
+  const data = await res.json()
+  if (!res.ok) {
+    throw new Error(data.detail || '문서 상태를 확인하지 못했습니다.')
   }
   return data
 }
