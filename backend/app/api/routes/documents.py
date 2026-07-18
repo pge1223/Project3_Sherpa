@@ -1,5 +1,6 @@
 import logging
 import os
+import threading
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -56,24 +57,56 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 _GENERIC_ERROR_MESSAGE = "URL 문서를 처리하는 중 오류가 발생했습니다."
 
 _indexing_service: RAGIndexingService | None = None
+# 가은/Claude(2026-07-15) 시점엔 없었던 락. 용준/Claude(2026-07-18, fetch-url 색인 hang
+# 조사): 이 함수는 meetings.py 모듈 임포트 시점(앱 시작, 단일 스레드)에 이미 강제
+# 호출되어 정상 상황에선 아래 if _indexing_service is None 체크가 레이스에 걸릴 일이
+# 없다 — 하지만 그건 "meetings.py가 지금 이 함수를 호출한다"는 우연에 기대는 것이라,
+# 나중에 그 강제 호출이 없어지면 여러 요청이 동시에 처음 호출할 때 KUREEmbedder(모델
+# 로딩 비용 큼)가 여러 번 생성되는 TOCTOU 레이스가 생긴다. 방어적으로 락을 건다
+# (락 경합은 최초 1회 초기화 이후엔 없음 — 매 요청마다 비용 없음).
+_indexing_service_lock = threading.Lock()
+
+
+def _canonical_chroma_persist_dir() -> str:
+    """chromadb.PersistentClient(path=...)의 캐시 키(SharedSystemClient._identifier_to_system)는
+    path 문자열을 있는 그대로 딕셔너리 key로 쓴다 — "./chroma_db"와 "chroma_db"처럼 같은
+    디렉터리를 가리켜도 문자열이 다르면 완전히 별개의 System(=별개의 SQLite/엔진 연결)이
+    두 개 생긴다. 실제로 meetings.py가 str(Path(settings.CHROMA_PERSIST_DIR))로 두 번째
+    PersistentClient를 만들고 있었던 게 그 사례였다(2026-07-18, fetch-url 색인 hang 조사
+    중 발견 — Windows는 SQLite 파일 잠금이 POSIX와 달리 mandatory라, 서로 모르는 두
+    엔진이 같은 물리 파일에 동시 접근하면 즉시 에러 대신 무기한 대기로 이어질 수 있다).
+    이 함수로 절대경로로 정규화해 항상 같은 identifier를 쓰도록 강제한다."""
+    return str(Path(settings.CHROMA_PERSIST_DIR).resolve())
 
 
 def _get_indexing_service() -> RAGIndexingService:
     """KUREEmbedder는 모델 로딩 비용이 커서, 첫 호출 시 한 번만 만들어 재사용한다
-    (앱 시작 시점에 매번 로딩하지 않도록 지연 초기화)."""
+    (앱 시작 시점에 매번 로딩하지 않도록 지연 초기화). meetings.py 등 다른 모듈은 이
+    싱글턴을 직접 재사용해야 한다 — 새로 chromadb.PersistentClient(path=...)나
+    KUREEmbedder()를 만들지 말 것 (아래 _get_chroma_client() 참고)."""
     global _indexing_service
     if _indexing_service is None:
-        embedder = KUREEmbedder()
-        client = chromadb.PersistentClient(path=settings.CHROMA_PERSIST_DIR)
-        vector_store = ChromaVectorStore(
-            client=client,
-            collection_name=DEFAULT_COLLECTION_NAME,
-            embedding_model=embedder.model_name,
-            embedding_dimension=embedder.embedding_dimension,
-            embedding_version=EMBEDDING_VERSION,
-        )
-        _indexing_service = RAGIndexingService(embedder, vector_store)
+        with _indexing_service_lock:
+            if _indexing_service is None:
+                embedder = KUREEmbedder()
+                client = chromadb.PersistentClient(path=_canonical_chroma_persist_dir())
+                vector_store = ChromaVectorStore(
+                    client=client,
+                    collection_name=DEFAULT_COLLECTION_NAME,
+                    embedding_model=embedder.model_name,
+                    embedding_dimension=embedder.embedding_dimension,
+                    embedding_version=EMBEDDING_VERSION,
+                )
+                _indexing_service = RAGIndexingService(embedder, vector_store)
     return _indexing_service
+
+
+def _get_chroma_client() -> chromadb.ClientAPI:
+    """documents.py 싱글턴이 쓰는 chromadb client를 그대로 반환한다. 같은
+    CHROMA_PERSIST_DIR을 가리키는 별도의 chromadb.PersistentClient를 프로세스 안에
+    또 만들지 않기 위함 — 다른 컬렉션(예: similar_cases)을 쓰더라도 client(=엔진 연결)
+    자체는 공유해야 한다(2026-07-18, meetings.py 중복 PersistentClient 조사 참고)."""
+    return _get_indexing_service().vector_store.client
 
 
 def _parse_chunk_and_index(
