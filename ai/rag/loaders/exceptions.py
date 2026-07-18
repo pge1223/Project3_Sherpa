@@ -37,3 +37,10 @@ class DownloadSizeLimitExceededError(LoaderError):
 class ContentTypeMismatchError(LoaderError):
     """선언된 형식(확장자/Content-Type)과 실제 파일 시그니처가 일치하지 않음"""
     pass
+
+
+class HeadlessRenderError(LoaderError):
+    """헤드리스 브라우저(Playwright) 렌더링 실패 — 타임아웃, 브라우저 미설치, 크래시 등.
+    url_loader.py는 이 예외를 잡아 정적 fetch 결과로 폴백하고 경고만 남긴다(요청 자체를
+    실패시키지 않음)."""
+    pass

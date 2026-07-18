@@ -52,6 +52,18 @@ def sample_pptx(fixtures_dir: Path) -> Path:
 
 
 @pytest.fixture
+def sample_jpeg(fixtures_dir: Path) -> Path:
+    """테스트용 JPEG 파일 경로 (공고 포스터 이미지 지원 테스트용)"""
+    return fixtures_dir / "sample_poster.jpg"
+
+
+@pytest.fixture
+def sample_png_icon(fixtures_dir: Path) -> Path:
+    """테스트용 작은 PNG 파일 경로 (로고/아이콘 노이즈 필터 테스트용, 10x10px)"""
+    return fixtures_dir / "sample_icon.png"
+
+
+@pytest.fixture
 def empty_pdf(fixtures_dir: Path) -> Path:
     """빈 PDF 파일 경로"""
     return fixtures_dir / "empty.pdf"
