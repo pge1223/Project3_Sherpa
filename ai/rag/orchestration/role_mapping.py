@@ -33,9 +33,13 @@ class PersonaRoleMappingError(ValueError):
 #
 # government_support(rubric_mapping_government_support.json)는 committee가
 # policy_fit/business_strategy/technical_feasibility/budget_execution으로 competition과
-# 다르다 — business_strategy·technical_feasibility는 겹치지만 policy_fit·budget_execution은
-# 대응하는 role_id를 팀이 아직 확정하지 않아 이 파일에 임의로 추가하지 않았다(추측 금지).
-# 확정되면 이 dict에 "government_support": {...} 항목을 추가하면 된다.
+# 다르다 — 팀이 확정한 매핑(2026-07-17):
+#   policy_fit             -> policy            (정책 목표, 공공성, 지원요건, 정책 부합성)
+#   business_strategy      -> planning          (사업 필요성 등 기획·사업 관점 criterion 기본)
+#   technical_feasibility  -> technology        (기술성 및 수행역량)
+#   budget_execution       -> budget_execution  (예산 편성, 집행계획, 정산, 위험 대응)
+# business_strategy는 criterion에 따라 성격이 갈려(사업 필요성 vs 사업화 가능성=시장·차별성)
+# feasibility criterion만 _CRITERION_OVERRIDES로 marketing으로 재배정한다.
 _DOMAIN_PERSONA_ROLE_MAPPING: dict[str, dict[str, str]] = {
     "competition": {
         "creativity_originality": "marketing",
@@ -43,13 +47,27 @@ _DOMAIN_PERSONA_ROLE_MAPPING: dict[str, dict[str, str]] = {
         "business_strategy": "finance",
         "presentation_completeness": "planning",
     },
+    "government_support": {
+        "policy_fit": "policy",
+        "business_strategy": "planning",
+        "technical_feasibility": "technology",
+        "budget_execution": "budget_execution",
+    },
 }
 
 # domain -> persona_id -> criterion_id -> role_id (1순위: criterion 단위 override).
 # 동일 persona가 성격이 다른 criterion을 맡게 되면(예: business_strategy가 재무성 criterion과
-# 정책부합성 criterion을 동시에 담당) 여기에 override를 추가한다. 지금은 그런 사례가
-# 실제로 없어 비워둔다 — 필요하지 않은 override 데이터를 임의로 만들지 않는다.
-_CRITERION_OVERRIDES: dict[str, dict[str, dict[str, str]]] = {}
+# 정책부합성 criterion을 동시에 담당) 여기에 override를 추가한다.
+# government_support의 business_strategy는 necessity(사업 필요성, 문제 정의 -> planning
+# 기본 매핑 그대로)와 feasibility(사업화 가능성, 시장·차별성 성격 -> marketing)를 동시에
+# 맡아 feasibility criterion만 override한다(rubric_mapping_government_support.json 기준).
+_CRITERION_OVERRIDES: dict[str, dict[str, dict[str, str]]] = {
+    "government_support": {
+        "business_strategy": {
+            "feasibility": "marketing",
+        },
+    },
+}
 
 
 @dataclass(frozen=True)

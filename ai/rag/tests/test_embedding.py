@@ -128,6 +128,29 @@ class TestEmbedChunkingResult:
         assert result.embedded_chunks == []
         assert result.warnings
 
+    def test_document_role_propagated_from_indexing_context_to_metadata(self, fake_kure_embedder):
+        """IndexingContext.document_role이 KUREEmbedder를 거쳐 EmbeddedChunk.metadata까지
+        실제로 전달되는지 확인한다(test_chroma_store.py는 EmbeddedChunk.metadata에 직접 값을
+        넣어 Chroma 왕복만 검증하므로, IndexingContext -> KUREEmbedder 구간은 여기서 검증)."""
+        chunks = [_make_chunk("c1", content="본문")]
+        context = IndexingContext(project_id="p1", document_id="doc-1", document_role="target")
+        result = fake_kure_embedder.embed_chunking_result(_make_chunking_result(chunks), context)
+        assert result.embedded_chunks[0].metadata["document_role"] == "target"
+
+    def test_document_role_none_by_default_and_dropped_from_chroma_metadata(self, fake_kure_embedder):
+        """document_role을 넘기지 않은 기존 호출은 metadata에 None으로 채워지고(하위 호환
+        유지), sanitize_metadata_for_chroma()가 None 값 키를 제거하므로 실제 Chroma 저장
+        직전 단계에서는 document_role 키 자체가 빠져야 한다."""
+        from ai.rag.retrieval.metadata import sanitize_metadata_for_chroma
+
+        chunks = [_make_chunk("c1", content="본문")]
+        context = IndexingContext(project_id="p1", document_id="doc-1")
+        result = fake_kure_embedder.embed_chunking_result(_make_chunking_result(chunks), context)
+
+        assert result.embedded_chunks[0].metadata["document_role"] is None
+        sanitized = sanitize_metadata_for_chroma(result.embedded_chunks[0].metadata)
+        assert "document_role" not in sanitized
+
     def test_zero_indexable_chunks(self, fake_kure_embedder):
         chunks = [_make_chunk("c1", indexable=False)]
         result = fake_kure_embedder.embed_chunking_result(_make_chunking_result(chunks), IndexingContext(project_id="p1", document_id="doc-1"))

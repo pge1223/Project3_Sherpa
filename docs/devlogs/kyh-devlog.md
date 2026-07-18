@@ -1,3 +1,28 @@
+[2026-07-17] AI Review Board 개발 일지
+
+한 일:
+- PRJ-004 프로젝트 cascade delete 구현
+  (Chroma 벡터 청크 + MongoDB 문서/회의 동시 삭제)
+- MeetingRepository.delete_by_id() 추가
+- RAG-003~005 MeetingEvidenceOrchestrationService 연결
+  (_search_evidence_for_rubric() → 오케스트레이션 서비스로 교체)
+- DOC-006 문서 원문/추출문 미리보기 엔드포인트 추가
+- RPT-005 평가 결과 PDF 내보내기 엔드포인트 추가 (reportlab)
+- NCP 서버 배포 완료
+
+결정/이유:
+- Chroma 삭제 → MongoDB 삭제 순서 유지 → 중간 실패 시 벡터만 날아가고 DB는 보존
+- reportlab CID 폰트(HYSMyeongJo-Medium) 사용 → 한글 깨짐 방지
+- MeetingEvidenceOrchestrationService 요청마다 새 인스턴스 생성 → 캐시 혼용 방지
+
+막힌 점:
+- meetings.py 머지 충돌 → git checkout origin/dev로 해결
+- meeting_repository.py 들여쓰기 오류 → 수정 후 재push
+
+다음 할 일:
+- 팀 추가 요청 대응
+- 홈서버 SSH 비번 변경 (qwer1234 → 새 비번)
+
 [2026-07-16] AI Review Board 개발 일지
 
 한 일:

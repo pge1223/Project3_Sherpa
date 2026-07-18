@@ -426,3 +426,24 @@ async def get_document_status(
         "status": document["status"],
         "updated_at": document["updated_at"],
     }
+
+
+# DOC-006: 문서 미리보기
+@router.get("/{project_id}/{document_id}/preview")
+async def preview_document(
+    project_id: str,
+    document_id: str,
+    authorization: Optional[str] = Header(None, alias="authorization"),
+):
+    user_email = get_current_user(authorization)
+    await verify_project_owner(project_id, user_email)
+
+    document = await document_repo.find_by_id(document_id)
+    if not document:
+        raise HTTPException(status_code=404, detail="문서를 찾을 수 없습니다")
+
+    return {
+        "original_filename": document["original_filename"],
+        "parsed_text": document.get("parsed_text"),
+        "status": document["status"],
+    }

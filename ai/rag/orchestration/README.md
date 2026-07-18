@@ -89,12 +89,33 @@ role_id = resolve_role_id(domain="competition", persona_id="business_strategy") 
 | `business_strategy` | `finance` | 수익 모델, 비용, 예산, 사업 리스크 |
 | `presentation_completeness` | `planning` | 문서 구조, 논리 연결, 일정, 지표, 완성도 |
 
-**government_support 등 다른 도메인은 아직 매핑이 없다.** `rubric_mapping_government_support.json`의
-committee(`policy_fit`/`business_strategy`/`technical_feasibility`/`budget_execution`)는
-competition과 달라(`policy_fit`/`budget_execution`은 대응하는 role_id가 불명확), 팀 확인
-없이 임의로 추가하지 않았다. `government_support` 도메인으로 `prepare_meeting_evidence()`를
-호출하면(매핑 없는 persona 발생 시) `PersonaRoleMappingError`가 발생한다 — 이 도메인을
-연동하려면 먼저 이 파일에 매핑을 확정해야 한다.
+**government_support** 도메인(`ai/meeting/personas/rubric_mapping_government_support.json`)도
+팀이 확정한 매핑을 쓴다(2026-07-17 확정). committee(`policy_fit`/`business_strategy`/
+`technical_feasibility`/`budget_execution`)는 competition과 달라 별도 role_id 2개
+(`policy`, `budget_execution`, `ai/rag/role_retrieval/roles.py`)를 추가했다:
+
+| persona_id | role_id | 의미 |
+|---|---|---|
+| `policy_fit` | `policy` | 정책 목표, 공공성, 지원요건, 정책 부합성 |
+| `business_strategy` | `planning` | 사업 필요성 등 기획·사업 관점 criterion 기본값 |
+| `technical_feasibility` | `technology` | 기술성 및 수행역량 |
+| `budget_execution` | `budget_execution` | 예산 편성, 집행계획, 정산, 위험 대응 |
+
+`business_strategy`는 criterion마다 성격이 달라(사업 필요성=문제 정의 vs 사업화
+가능성=시장·차별성) criterion 단위 override 하나를 추가했다:
+
+| domain | persona_id | criterion_id | role_id |
+|---|---|---|---|
+| `government_support` | `business_strategy` | `feasibility` | `marketing` |
+
+override가 없는 `business_strategy`의 다른 criterion(예: `necessity`)은 domain+persona
+기본 매핑인 `planning`을 그대로 쓴다. `execution_plan`은 primary(`budget_execution`)와
+secondary(`technical_feasibility`) 두 persona가 각각 `budget_execution`/`technology`로
+독립적으로 매핑된다.
+
+competition과 마찬가지로 strict 정책(매핑 누락 시 `PersonaRoleMappingError`)이 그대로
+적용되며, backend는 `RoleMappingConfig(allow_semantic_fallback=True)`를 넘기지 않고도
+`government_support` 도메인으로 `prepare_meeting_evidence()`를 바로 호출할 수 있다.
 
 기본 정책은 **strict**다 — 매핑이 없으면 `role_id=None`(semantic-only)으로 조용히
 넘어가지 않고 `PersonaRoleMappingError`를 던진다. 완화하려면 명시적으로:

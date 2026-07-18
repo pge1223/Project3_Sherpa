@@ -193,4 +193,5 @@ def _build_raw_metadata(
         "embedding_version": embedding_version,
         "indexable": chunk.indexable,
         "document_title": context.document_title,
+        "document_role": context.document_role,
     }

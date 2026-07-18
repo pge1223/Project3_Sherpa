@@ -1,5 +1,135 @@
 # kyj Devlog
 
+## 2026-07-18
+
+- 한 일
+  - HWPX 변환 문서의 실제 웹 분석 결과를 확인하고 RAG 검색 품질을 개선
+    - PDF에서 시각적 줄 단위로 분리된 문장을 공백으로 병합하고 불필요한 장식 기호 제거
+    - `•`, `◦`, `∙`, `·` 등의 글머리표는 삭제하지 않고 다음 본문과 결합해 목록 구조 보존
+    - `1) 개요`, `① 법제처 법령 학습`, `▢ 기대효과`와 같은 독립 제목 블록을 인식해
+      `section_title`로 상속
+    - 동일 `chunk_id`, 공백만 다른 동일 본문, 내용이 과도하게 겹치는 청크를 역할별 검색
+      결과 내부에서 제거
+    - 최종 점수가 비슷한 검색 후보에서는 서로 다른 섹션의 근거를 우선하도록 다양성 처리
+  - 청킹 결과가 실질적으로 변경된 점을 반영해 `chunking_v1`에서 `chunking_v2`로 갱신
+  - `IndexingContext.document_role` 선택 필드를 추가하고 임베딩·Chroma 메타데이터 전달 테스트 보강
+  - K-Lawyer HWPX 문서를 대상으로 실제 파싱·청킹·임베딩·Chroma 검색 검증 스크립트 추가
+  - 웹에서 HWPX 재업로드 및 분석 검증
+    - HWPX→PDF 변환과 Chroma 색인 정상 완료
+    - 총 10개 청크 중 8개에 섹션 제목 저장 확인
+    - 4개 평가항목 정상 채점 및 연결 근거 11건의 `sufficient` 판정 확인
+  - RAG 및 회의 테스트 전체 실행 결과 `828 passed, 3 skipped` 확인
+
+- 결정/이유
+  - 줄바꿈 정규화는 PDF에만 적용해 이미 문단 구조가 있는 DOCX/PPTX의 회귀 위험을 줄임
+  - 목록 마커와 장식 기호를 구분해 본문 가독성과 원문 구조를 함께 보존
+  - 검색 중복 제거 상태는 한 번의 `(persona, criterion)` 호출 안에서만 유지해 서로 다른 위원이
+    같은 근거를 사용하는 정상 흐름은 허용
+  - 청킹 변경 후 기존 청크와 새 청크가 같은 버전으로 섞이지 않도록 버전을 명시적으로 갱신
+
+- 막힌 점
+  - `시스템 요구사항 및 기능`처럼 제목만 들어 있는 짧은 청크가 상위 근거로 선택될 수 있음
+  - 일부 `▢` 제목이 변환 과정에서 제목과 본문으로 분리되어 `기대효과`가 이전 `사용예시`
+    섹션을 상속하는 사례가 남아 있음
+  - Backend의 문서 업로드·URL 색인 호출부가 아직 `document_role`을 `IndexingContext`로 전달하지
+    않아 실제 Chroma 메타데이터에는 값이 저장되지 않음
+
+- 다음 할 일
+  - Backend 담당자와 `document_role` 전달 연결 및 target/criteria 색인 테스트
+  - 제목만 있는 짧은 청크의 검색 제외 또는 다음 본문 청크와의 병합 방식 검토
+  - `기대효과` 등 HWPX 변환 문서의 섹션 경계 인식 보완
+  - `chunking_v1`로 저장된 기존 테스트 문서 재색인
+
+## 2026-07-17
+
+- 한 일
+  - RAG-003/004/005 회의 연동을 위한 `MeetingEvidenceOrchestrationService` 구현
+    - `(persona_id, criterion_id)`별 역할 기반 검색과 사전 충분성 판정 수행
+    - 위원 원본 평가를 근거 청크와 연결하고 최종 충분성 판정 결과를 callback으로 반환
+    - LangGraph가 `ai.rag`를 직접 import하지 않도록 `evidence_context`와 callback을 plain data
+      계약으로 제공
+  - `build_meeting_retrieved_evidence()`와 `to_linked_evidence_refs()` 실제 출력 샘플 및 통합 테스트 작성
+  - 프로젝트 삭제 시 `project_id`에 해당하는 Chroma 청크를 함께 제거하는 기능과 단위 테스트 추가
+  - RAG 검색 성능 측정 도구 구현
+    - Precision@K, Recall@K, MRR, nDCG 지표 제공
+    - JSON 평가셋 로더와 CLI 기반 baseline 리포트 생성 기능 추가
+  - `government_support` 도메인의 역할 매핑 보강
+    - `policy`, `budget_execution` 역할 프로필 추가
+    - `policy_fit`, `business_strategy`, `technical_feasibility`, `budget_execution` persona 매핑
+    - `business_strategy/feasibility`를 `marketing`으로 해석하는 criterion override 추가
+
+- 결정/이유
+  - 회의 그래프와 RAG 서비스의 결합도를 낮추기 위해 서비스 객체를 그래프 내부에서 생성하지 않고
+    Backend에서 결과와 callback을 주입하도록 설계
+  - 근거 부족 시 위원 전체가 아니라 해당 `(persona, criterion)`만 미채점하도록 게이팅 단위를 유지
+  - 미지원 도메인을 의미 기반 fallback으로 조용히 처리하지 않고 명시적 역할 매핑을 추가해 잘못된
+    역할 검색을 방지
+  - 검색 성능 개선 전후를 수치로 비교할 수 있도록 튜닝보다 평가 도구와 정답 평가셋 형식을 먼저 준비
+
+- 막힌 점
+  - 실제 Precision/Recall baseline을 만들려면 competition 문서와 사람이 확인한 정답 `chunk_id`
+    평가셋이 필요
+  - `government_support` 신규 role 키워드는 실제 운영 문서로 검색 품질을 추가 검증해야 함
+
+- 다음 할 일
+  - Backend `meetings.py`에서 오케스트레이션 서비스를 실제 `run_meeting()` 호출에 연결한 상태 확인
+  - 실제 문서 3~5개로 golden dataset을 작성하고 역할별 검색 baseline 측정
+  - semantic/role 가중치와 `top_k`, candidate multiplier 튜닝 실험
+
+## 2026-07-16
+
+- 한 일
+  - RAG 검색 결과를 회의 입력 계약으로 변환하는 어댑터 구현
+  - RAG-005 근거 충분성 판정 및 평가 안전 가드 추가
+    - `prompt_guard`, `allow_numeric_score`, `allow_definitive_judgment` 결과 제공
+    - 근거가 부족한 경우 숫자 점수와 단정적 판단을 차단할 수 있도록 구성
+  - HWP/HWPX 문서를 LibreOffice headless로 PDF 변환하는 모듈과 변환 메타데이터·예외 처리 추가
+  - RAG-006 유사 성공 사례 검색 기능 구현
+  - RAG-007 외부 시장·정책 자료 검색 기능 구현
+    - 공공데이터 API와 외부 자료를 별도 컬렉션에서 검색하고 출처·최신성 메타데이터 반환
+  - MongoDB 로컬 인증 및 Backend 환경변수·실행 경로 문제를 점검
+
+- 결정/이유
+  - 최종 평가 근거는 RAG-004가 연결한 `linked_evidence_refs`를 사용하고 RAG-003 검색 결과는
+    후보 근거와 prompt guard 구성에 활용
+  - RAG-006 결과는 평가 점수나 RAG-005 충분성 판정에 사용하지 않고 참고자료 블록으로 분리
+  - HWP/HWPX는 별도 텍스트 파서를 추가하기보다 PDF로 변환한 뒤 기존 PDF 파이프라인을 재사용
+
+- 막힌 점
+  - LibreOffice 실행 경로와 확장 기능 설치 상태가 개발자 PC마다 달라 팀 공통 설치 안내가 필요
+  - RAG-006 결과를 최종 반환 문서에 포함하려면 `review_output` v2.1.0 계약 변경이 필요
+
+- 다음 할 일
+  - LibreOffice 설치·환경변수·HWPX 변환 확인 절차를 팀에 공유
+  - 회의 그래프의 evidence callback과 충분성 게이팅 통합 테스트 확인
+  - RAG-006의 `similar_success_cases` v2.1.0 입출력 연결 상태 확인
+
+## 2026-07-15
+
+- 한 일
+  - KURE-v1 임베딩 모델과 Chroma 영속 벡터 저장소를 연결한 RAG 색인·검색 서비스 구현
+  - 심사위원 역할 프로필과 질의·criterion을 이용해 검색 결과를 재정렬하는 역할 기반 검색 구현
+  - 평가 의견 문장과 검색 청크를 연결해 원문 출처와 위치를 반환하는 근거 연결 기능 추가
+  - URL 공고문 수집 기능을 FastAPI 엔드포인트로 연결
+  - 임베딩·Chroma 저장·역할 검색·근거 연결 단위 테스트 및 통합 테스트 작성
+
+- 결정/이유
+  - 한국어 공고문과 사업계획서 검색에 적합한 KURE-v1을 기본 임베딩 모델로 사용
+  - Chroma 메타데이터에 `project_id`, `document_id`, `chunk_id`, 원문 위치를 저장해 프로젝트별
+    격리와 평가 근거 추적이 가능하도록 구성
+  - 역할 기반 재정렬은 기존 의미 검색을 대체하지 않고 semantic score와 role score를 결합하는
+    방식으로 적용
+
+- 막힌 점
+  - RAG 모듈만 구현된 상태에서는 실제 웹 분석에 자동 적용되지 않아 Backend 문서 업로드 및
+    회의 실행 경로의 연결 작업이 필요
+  - 실제 검색 품질을 판단할 정답 평가셋과 baseline 지표가 아직 없음
+
+- 다음 할 일
+  - RAG 검색 결과를 LangGraph 회의 입력 형식으로 변환하는 어댑터 설계
+  - 근거가 부족한 평가의 점수·단정 판단을 차단하는 안전장치 구현
+  - 실제 공고문과 사업계획서를 이용한 엔드투엔드 검증
+
 ## 2026-07-14
 
 - 한 일
