@@ -17,38 +17,80 @@ function LinkIcon() {
   )
 }
 
+// 가은/Claude(2026-07-18): URL 공고문에 HWP 첨부파일이 있어 자동으로 못 읽은 경우
+// (실측: sotong.go.kr — 평가기준이 본문이 아니라 HWP 요강 파일에만 있는 공고가 실제로
+// 있었음), 사용자가 그 파일을 원본 사이트에서 직접 받아 "파일 업로드" 탭(HWP 직접
+// 업로드는 LibreOffice 변환으로 이미 지원됨)으로 올릴 수 있게 다운로드 링크를 보여준다.
 export default function DocumentRow({ document }) {
+  const links = document.unsupportedLinks || []
   return (
-    <div style={styles.row}>
-      <div style={styles.left}>
-        {document.type === 'url' ? <LinkIcon /> : <FileIcon />}
-        <div>
-          <div style={styles.name}>{document.name}</div>
-          <div style={styles.meta}>{document.meta}</div>
+    <div style={styles.container}>
+      <div style={styles.row}>
+        <div style={styles.left}>
+          {document.type === 'url' ? <LinkIcon /> : <FileIcon />}
+          <div>
+            <div style={styles.name}>{document.name}</div>
+            <div style={styles.meta}>{document.meta}</div>
+          </div>
         </div>
+
+        {document.status === 'embedding' && (
+          <div style={styles.progressWrap}>
+            <div style={styles.progressTrack}>
+              <div style={{ ...styles.progressFill, width: `${document.progress}%` }} />
+            </div>
+            <span style={styles.progressLabel}>임베딩 중</span>
+          </div>
+        )}
+
+        {document.status === 'done' && <span style={styles.doneBadge}>✓ 완료</span>}
+        {document.status === 'warning' && <span style={styles.warningBadge}>⚠ 확인 필요</span>}
+        {document.status === 'error' && <span style={styles.errorBadge}>업로드 실패</span>}
       </div>
 
-      {document.status === 'embedding' && (
-        <div style={styles.progressWrap}>
-          <div style={styles.progressTrack}>
-            <div style={{ ...styles.progressFill, width: `${document.progress}%` }} />
-          </div>
-          <span style={styles.progressLabel}>임베딩 중</span>
+      {links.length > 0 && (
+        <div style={styles.linkList}>
+          {links.map((link, i) => (
+            <a
+              key={link.url}
+              href={link.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              style={styles.linkItem}
+            >
+              첨부파일 {i + 1} 받기 (HWP) ↗
+            </a>
+          ))}
         </div>
       )}
-
-      {document.status === 'done' && <span style={styles.doneBadge}>✓ 완료</span>}
-      {document.status === 'error' && <span style={styles.errorBadge}>업로드 실패</span>}
     </div>
   )
 }
 
 const styles = {
+  container: {
+    padding: '14px 4px',
+  },
   row: {
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'space-between',
-    padding: '14px 4px',
+  },
+  linkList: {
+    display: 'flex',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginTop: 8,
+    paddingLeft: 32,
+  },
+  linkItem: {
+    fontSize: 12,
+    fontWeight: 600,
+    color: '#7c4dff',
+    background: '#f0eefc',
+    padding: '4px 10px',
+    borderRadius: 999,
+    textDecoration: 'none',
   },
   left: {
     display: 'flex',
@@ -99,6 +141,14 @@ const styles = {
     fontWeight: 600,
     color: '#d64545',
     background: '#fbe2e2',
+    padding: '4px 10px',
+    borderRadius: 999,
+  },
+  warningBadge: {
+    fontSize: 12,
+    fontWeight: 600,
+    color: '#9a6400',
+    background: '#fdf1d6',
     padding: '4px 10px',
     borderRadius: 999,
   },

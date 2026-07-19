@@ -3,7 +3,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom'
 import DocumentRow from '../components/upload/DocumentRow'
 import { isAcceptedDocument, formatFileSize, ACCEPTED_DOCUMENT_EXTENSIONS } from '../utils/file'
 import { createProject, getProject } from '../api/projectApi'
-import { uploadDocument, fetchUrl, getDocuments } from '../api/documentApi'
+import { uploadDocument, fetchUrl, getDocuments, getDocumentStatus } from '../api/documentApi'
 import { DOC_TYPE_OPTIONS } from '../utils/docType'
 import StepSidebar from '../components/wizard/StepSidebar'
 
@@ -11,9 +11,78 @@ import StepSidebar from '../components/wizard/StepSidebar'
 // 인덱싱이 안 끝난 상태('uploaded')는 새로고침 시점엔 이미 끝나 있을 확률이 높지만,
 // 혹시 몰라 'embedding'으로 보수적으로 처리한다.
 function toRowStatus(backendStatus) {
-  if (backendStatus === 'indexed' || backendStatus === 'indexed_empty') return 'done'
+  if (backendStatus === 'indexed') return 'done'
+  // 가은/Claude(2026-07-18): "URL은 가져왔지만(HTTP 200) 색인할 청크가 0개"인 상태 —
+  // sotong.go.kr 공고 URL로 실측: 게시판 상세 링크가 잘못돼(파라미터 누락 등) 실제
+  // 공고 내용이 아닌 페이지가 와도 fetch 자체는 성공해서 예전엔 그냥 'done'(✓ 완료)으로
+  // 표시됐다 — 사용자가 "이렇게 떠서 안 되는지 안내가 있어야 한다"고 지적한 지점.
+  // done과 구분되는 warning 배지로 표시한다.
+  if (backendStatus === 'indexed_empty') return 'warning'
   if (backendStatus === 'indexing_failed' || backendStatus === 'conversion_failed') return 'error'
   return 'embedding'
+}
+
+// 가은/Claude(2026-07-18): fetch-url 응답의 text_length가 이 값보다 작으면 "본문을 거의
+// 못 찾았다"로 간주해 경고를 띄운다 — 실제 평가기준 공고문은 보통 최소 이 정도 분량은
+// 된다. 백엔드가 indexed_empty(청크 0개)로 판단하기 전에도(짧지만 청크는 생기는 애매한
+// 경우) 프론트에서 한 번 더 걸러준다.
+const _CRITERIA_MIN_TEXT_LENGTH = 300
+
+// 가은/Claude(2026-07-19, INF-007): fetch-url이 색인을 백그라운드로 넘기면서
+// document_status가 "indexing"으로 오면 폴링해야 한다 — 서버 타임아웃
+// (_WEBPAGE_INDEXING_TIMEOUT_SECONDS=120s, documents.py)보다 여유 있게 잡는다.
+const _DOCUMENT_STATUS_POLL_INTERVAL_MS = 2000
+const _DOCUMENT_STATUS_POLL_MAX_ATTEMPTS = 90 // 2s * 90 = 3분
+
+// 가은/Claude(2026-07-18): 백엔드가 이미 만들어주는 warnings(JS 렌더링 의심 등)를
+// 예전엔 완전히 버리고 있었다 — sotong.go.kr URL로 실측: 게시판 상세 링크가 실제 공고
+// 내용이 아닌 페이지(첨부 0개, 본문 몇 글자)를 가리켜도 fetch 자체는 200으로 성공해서
+// 그냥 "✓ 완료"로만 보였다. warnings 또는 본문이 사실상 비어 있으면 경고 배지 +
+// 구체적인 이유를 보여준다.
+// 가은/Claude(2026-07-19): fetch-url이 색인을 백그라운드로 넘기면서(INF-007) 이
+// 판정(본문 품질 평가)과 색인 성공/실패가 서로 다른 시점에 나오게 됐다 — 이 함수는
+// "본문이 쓸 만한가"만 판단하고, 색인 자체의 성공/실패/타임아웃은
+// handleFetchCriteriaUrl()/pollDocumentIndexing()이 별도로 처리한다.
+function assessCriteriaContent(result) {
+  const attachmentCount = result.attachments?.length || 0
+  const textLength = result.page_content?.text_length ?? 0
+  const looksEmpty = attachmentCount === 0 && textLength < _CRITERIA_MIN_TEXT_LENGTH
+  const unsupportedLinks = result.unsupported_attachments || []
+  // 가은/Claude(2026-07-18): url_loader.py의 _UNSUPPORTED_REASON과 같은 문자열 — HWP
+  // 미지원 경고는 unsupported_attachments가 하나라도 있으면 항상 warnings에 끼어 있어서,
+  // 이걸 그대로 "본문이 부실하다"는 신호로 썼더니 서울시 규제혁신 공모전(본문에
+  // 심사기준·배점까지 다 있던 케이스)에서도 "확인 필요"가 잘못 떴다(사용자 실측 지적,
+  // 2026-07-18) — HWP 경고는 따로 떼어서 다룬다.
+  const HWP_UNSUPPORTED_WARNING = 'HWP/HWPX 형식은 현재 미지원이며 다운로드/파싱하지 않습니다.'
+  const contentWarning = (result.warnings || []).find((w) => w !== HWP_UNSUPPORTED_WARNING)
+  // 가은/Claude(2026-07-18): 본문 길이만으로는 "심사기준이 이미 본문에 있는지"를 못
+  // 가른다 — 개인정보보호 공모전(1,112자, 요강 HWP만 언급)과 서울시 규제혁신 공모전
+  // (4,278자, 배점표까지 명시) 둘 다 300자는 훌쩍 넘어서 길이 기준만으론 둘을 구분 못
+  // 함. "배점/심사기준" 같은, 한국 공고문에서 심사기준 절에 거의 항상 쓰이는 표현이
+  // 본문에 있는지로 판단한다.
+  const CRITERIA_KEYWORDS = ['배점', '심사기준', '심사 기준', '평가기준', '평가 기준', '채점']
+  const hasCriteriaSignal = CRITERIA_KEYWORDS.some((k) => (result.page_content?.text || '').includes(k))
+
+  let status = 'done'
+  let meta = attachmentCount > 0 ? `첨부파일 ${attachmentCount}개 수집` : new URL(result.origin_url).hostname
+
+  if (contentWarning) {
+    status = 'warning'
+    meta = contentWarning
+  } else if (unsupportedLinks.length > 0 && !hasCriteriaSignal) {
+    status = 'warning'
+    meta =
+      `이 페이지에 HWP 첨부파일 ${unsupportedLinks.length}개가 있어 자동으로 읽지 못했습니다 — ` +
+      '평가기준이 그 안에만 있을 수 있어요. 아래에서 받아 "파일 업로드" 탭으로 직접 올려주세요.'
+  } else if (looksEmpty) {
+    status = 'warning'
+    meta = '이 페이지에서 공고 내용을 거의 찾지 못했습니다 — 실제 공고 상세 페이지 URL이 맞는지 확인해주세요.'
+  } else if (unsupportedLinks.length > 0) {
+    // 본문에 이미 심사기준이 있어 보이면(hasCriteriaSignal) 경고 대신 선택적 참고자료로만 안내한다.
+    meta += ` · HWP 첨부 ${unsupportedLinks.length}개는 자동으로 못 읽었어요(선택 — 필요하면 아래에서 받아 올리세요)`
+  }
+
+  return { status, meta, unsupportedLinks }
 }
 
 function UploadIcon() {
@@ -64,14 +133,35 @@ export default function DocumentUploadPage() {
         setTitle(project.title)
         setDocType(project.doc_type)
         setDocuments(
-          docs.map((d) => ({
-            id: d.id,
-            type: d.source_type === 'url' ? 'url' : 'file',
-            name: d.original_filename,
-            meta: formatFileSize(d.file_size),
-            status: toRowStatus(d.status),
-            progress: 100,
-          })),
+          docs.map((d) => {
+            const status = toRowStatus(d.status)
+            const unsupportedLinks = d.unsupported_attachments || []
+            let meta = formatFileSize(d.file_size)
+            // 가은/Claude(2026-07-18): 재로드 시점엔 본문 원문이 응답에 없어(DocumentResponse가
+            // parsed_text를 안 돌려줌) 키워드로 재판정할 수 없다 — 대신 backend status가
+            // 'indexed'(=색인된 청크가 실제로 있음)면 본문이 충분했다는 뜻이므로, 그때는
+            // HWP를 경고가 아니라 선택적 참고자료로만 보여준다(신규 fetch 로직과 동일 원칙 —
+            // 본문이 이미 충분하면 HWP 미확보를 경고로 취급하지 않는다).
+            if (status === 'warning') {
+              meta = unsupportedLinks.length > 0
+                ? `이 페이지에 HWP 첨부파일 ${unsupportedLinks.length}개가 있어 자동으로 읽지 못했습니다 — ` +
+                  '평가기준이 그 안에만 있을 수 있어요. 아래에서 받아 "파일 업로드" 탭으로 직접 올려주세요.'
+                : (d.source_type === 'url'
+                  ? '이 페이지에서 공고 내용을 거의 찾지 못했습니다 — 실제 공고 상세 페이지 URL이 맞는지 확인해주세요.'
+                  : meta)
+            } else if (unsupportedLinks.length > 0) {
+              meta += ` · HWP 첨부 ${unsupportedLinks.length}개는 자동으로 못 읽었어요(선택 — 필요하면 아래에서 받아 올리세요)`
+            }
+            return {
+              id: d.id,
+              type: d.source_type === 'url' ? 'url' : 'file',
+              name: d.original_filename,
+              meta,
+              status,
+              progress: 100,
+              unsupportedLinks,
+            }
+          }),
         )
       })
       .catch((err) => setAnalyzeError(err.message))
@@ -136,6 +226,45 @@ export default function DocumentUploadPage() {
     e.target.value = ''
   }
 
+  // 가은/Claude(2026-07-19, INF-007): document_status가 "indexing"인 동안 짧은 간격으로
+  // GET .../status(DOC-004)를 폴링한다. 색인이 최종적으로 성공(indexed/indexed_empty)하면
+  // 이미 계산해둔 본문 품질 평가(contentStatus/contentMeta)를 그대로 적용하고, 색인
+  // 자체가 실패/타임아웃이면 그걸 우선해서 error로 덮어쓴다 — "본문은 괜찮았는데 색인이
+  // 실패했다"와 "본문 자체가 부실하다"는 서로 다른 문제라 구분해서 보여준다.
+  function pollDocumentIndexing(pid, documentId, rowId, contentStatus, contentMeta) {
+    let attempts = 0
+    const timer = setInterval(async () => {
+      attempts += 1
+      try {
+        const statusResult = await getDocumentStatus(pid, documentId)
+        if (statusResult.status === 'indexing') {
+          if (attempts >= _DOCUMENT_STATUS_POLL_MAX_ATTEMPTS) {
+            clearInterval(timer)
+            updateDoc(rowId, {
+              status: 'error',
+              meta: '색인 상태 확인이 너무 오래 걸리고 있어요 — 새로고침해서 다시 확인해주세요.',
+            })
+          }
+          return
+        }
+        clearInterval(timer)
+        if (statusResult.status === 'indexing_failed') {
+          updateDoc(rowId, { status: 'error', meta: '공고문 색인 중 오류가 발생했습니다.' })
+        } else if (statusResult.status === 'indexing_timeout') {
+          updateDoc(rowId, {
+            status: 'error',
+            meta: '색인이 시간 내에 끝나지 않았습니다 — 다시 시도해주세요.',
+          })
+        } else {
+          updateDoc(rowId, { status: contentStatus, meta: contentMeta })
+        }
+      } catch (err) {
+        clearInterval(timer)
+        updateDoc(rowId, { status: 'error', meta: err.message })
+      }
+    }, _DOCUMENT_STATUS_POLL_INTERVAL_MS)
+  }
+
   async function handleFetchCriteriaUrl() {
     if (!criteriaUrl.trim()) {
       setCriteriaError('URL을 입력해주세요.')
@@ -148,9 +277,31 @@ export default function DocumentUploadPage() {
       const result = await fetchUrl(criteriaUrl.trim(), pid)
       const id = `url-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
       const title = result.page_content?.title || criteriaUrl.trim()
-      const attachmentCount = result.attachments?.length || 0
-      const meta = attachmentCount > 0 ? `첨부파일 ${attachmentCount}개 수집` : new URL(result.origin_url).hostname
-      setDocuments((prev) => [...prev, { id, type: 'url', name: title, meta, status: 'done' }])
+      const { status: contentStatus, meta: contentMeta, unsupportedLinks } = assessCriteriaContent(result)
+
+      if (result.document_status === 'indexing' && result.document_id) {
+        // 가은/Claude(2026-07-19, INF-007): 색인이 백그라운드로 도니 응답이 훨씬
+        // 빨리 온다(색인 완료까지 안 기다림) — 문서 행은 바로 추가하되 'embedding'
+        // 스피너로 보여주고, 폴링이 끝나면 위에서 이미 계산해둔 본문 품질 평가를 적용한다.
+        setDocuments((prev) => [
+          ...prev,
+          {
+            id,
+            type: 'url',
+            name: title,
+            meta: '공고문을 색인하는 중...',
+            status: 'embedding',
+            progress: 50,
+            unsupportedLinks,
+          },
+        ])
+        pollDocumentIndexing(pid, result.document_id, id, contentStatus, contentMeta)
+      } else {
+        setDocuments((prev) => [
+          ...prev,
+          { id, type: 'url', name: title, meta: contentMeta, status: contentStatus, unsupportedLinks },
+        ])
+      }
       setCriteriaUrl('')
     } catch (err) {
       setCriteriaError(err.message)

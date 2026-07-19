@@ -14,6 +14,11 @@ class DocumentModel:
         file_path: str,
         file_size: int,
         mime_type: str,
+        # status 값: "uploaded", "pending", "indexed", "indexed_empty", "indexing_failed",
+        # "conversion_failed" | 윤한/Claude(2026-07-18, INF-007 fetch-url 백그라운드화):
+        # "indexing"(색인 진행 중, fetch-url이 응답을 기다리지 않고 즉시 반환한 뒤 백그라운드
+        # 태스크가 색인을 마치면 indexed/indexed_empty로 patch) / "indexing_timeout"
+        # (백그라운드 색인이 asyncio.wait_for(timeout=120)에 걸려 중단된 경우) 추가.
         status: str = "uploaded",
         created_at: Optional[datetime] = None,
         updated_at: Optional[datetime] = None,
@@ -32,6 +37,13 @@ class DocumentModel:
         # INTEGRATION.md). build_conversion_metadata()가 만드는 DocumentConversionMetadata를
         # dict로 그대로 저장 — 새 컬럼 여러 개 대신 dict 하나로 묶음(가이드 3번 권장 사항).
         conversion_metadata: Optional[dict] = None,
+        # 가은/Claude(2026-07-18): URL 공고문 수집 시 발견됐지만 자동으로 못 읽은 첨부파일
+        # (지금은 HWP/HWPX만 해당, ai/rag/loaders/url_loader.py의 UnsupportedAttachment를
+        # {"url", "file_name", "reason"} dict로 그대로 저장) — 실측(sotong.go.kr): 평가
+        # 기준이 본문이 아니라 HWP 요강 파일에만 있는 공고가 실제로 있어서, 사용자가
+        # 그 파일을 직접 받아 "파일 업로드" 탭(HWP 직접 업로드는 LibreOffice 변환으로
+        # 이미 지원됨)으로 올릴 수 있게 링크를 남겨둔다.
+        unsupported_attachments: Optional[list[dict]] = None,
         _id: Optional[ObjectId] = None,
 
     ):
@@ -50,6 +62,7 @@ class DocumentModel:
         self.document_role = document_role
         self.parsed_text = parsed_text
         self.conversion_metadata = conversion_metadata
+        self.unsupported_attachments = unsupported_attachments
 
     def to_dict(self) -> dict:
         return {
@@ -67,4 +80,5 @@ class DocumentModel:
             "document_role": self.document_role,
             "parsed_text": self.parsed_text,
             "conversion_metadata": self.conversion_metadata,
+            "unsupported_attachments": self.unsupported_attachments,
         }

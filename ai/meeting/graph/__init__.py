@@ -7,7 +7,7 @@ from .build import assemble_meeting_graph
 from .llm import make_openai_llm_call
 from .reevaluate import assemble_reevaluation_graph, reevaluation_state
 from .rerun import rerun_reviewer
-from .rubric import build_rubric, build_routing
+from .rubric import build_dynamic_rubric_mapping, build_rubric, build_routing
 from .run import run_chair_phase, run_meeting
 from .state import MeetingState, MeetingStage, initial_state
 
@@ -17,6 +17,7 @@ __all__ = [
     "assemble_meeting_graph",
     "assemble_reevaluation_graph",
     "reevaluation_state",
+    "build_dynamic_rubric_mapping",
     "build_routing",
     "build_rubric",
     "initial_state",

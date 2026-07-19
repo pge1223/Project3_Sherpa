@@ -1,6 +1,8 @@
+import asyncio
 import logging
 import os
 import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -43,7 +45,7 @@ from app.repositories.project_repository import ProjectRepository
 from app.config import settings
 from app.models.document import DocumentModel
 from app.repositories.document_repository import DocumentRepository
-from app.schemas.document import DocumentResponse, FetchUrlRequest
+from app.schemas.document import DocumentResponse, FetchUrlRequest, FetchUrlResponse
 
 logger = logging.getLogger(__name__)
 
@@ -110,7 +112,7 @@ def _get_chroma_client() -> chromadb.ClientAPI:
 
 
 def _parse_chunk_and_index(
-    document_id: str, project_id: str, file_path: str, filename: str
+    document_id: str, project_id: str, file_path: str, filename: str, document_role: str = "target"
 ) -> tuple[int, str, dict]:
     """RAG-001~003: 파싱 -> 청킹 -> 임베딩 -> Chroma 저장까지 동기적으로 실행하고
     (색인된 청크 수, 원문 전체 텍스트, 변환 metadata)를 반환한다. CPU-bound라 호출부에서
@@ -155,6 +157,7 @@ def _parse_chunk_and_index(
             project_id=project_id,
             document_id=document_id,
             document_title=filename,
+            document_role=document_role,
         )
         summary = _get_indexing_service().index_chunking_result_with_summary(chunking_result, indexing_context)
         parsed_text = "\n\n".join(block.content for block in extraction.blocks)
@@ -182,9 +185,66 @@ def _chunk_and_index_webpage(
         project_id=project_id,
         document_id=document_id,
         document_title=title,
+        document_role="criteria",
     )
     summary = _get_indexing_service().index_chunking_result_with_summary(chunking_result, indexing_context)
     return summary.stored_count
+
+
+# 가은/Claude(2026-07-19, INF-007): 공고문 색인(청킹+임베딩+Chroma 저장)이 끝날 때까지
+# fetch-url 응답 자체를 막고 있었다 — 정상 케이스도 수 초~수십 초가 걸리고, 예전엔 hang
+# 버그(용준/Claude 2026-07-18, Chroma 이중 client 문제 — 지금은 고쳐짐)로 5분+ 무응답도
+# 실측됐다. 근본 hang 원인은 고쳐졌지만, "색인이 오래 걸리는 것 자체"와 "타임아웃이
+# 아예 없다"는 별개 문제라 — 색인을 백그라운드로 넘기고 타임아웃을 강제한다.
+# GET /{project_id}/{document_id}/status(기존 DOC-004 엔드포인트)를 프론트가 폴링해서
+# 완료 여부를 확인한다. 아래 상수는 그 백그라운드 색인의 최대 대기 시간(윤한/Claude
+# 2026-07-18) — 재발 시 요청이 무기한 걸려있지 않도록 하는 안전장치다.
+_WEBPAGE_INDEXING_TIMEOUT_SECONDS = 120
+
+
+async def _index_webpage_background(
+    *,
+    document_id: str,
+    project_id: str,
+    url: str,
+    title: str,
+    cleaned: CleanedWebContent,
+) -> None:
+    """색인을 백그라운드로 돌리고 끝나면 documents 컬렉션의 status를 patch한다
+    (meetings.py의 _synthesize_chair_background()와 동일 패턴). asyncio.wait_for로
+    타임아웃을 걸지만, run_in_threadpool로 넘긴 실제 스레드 자체를 강제 종료하지는
+    못한다 — 진짜 hang이면 그 스레드는 백그라운드에 남아있게 되고, 여기선 "기다리는 걸
+    포기하고 실패로 기록"까지만 보장한다(요청/폴링 쪽을 무한 대기에서 풀어주는 게 목적)."""
+    _index_started = time.time()
+    logger.info("[fetch-url] 색인(백그라운드) 시작 document_id=%s url=%s", document_id, url)
+    try:
+        stored_count = await asyncio.wait_for(
+            run_in_threadpool(_chunk_and_index_webpage, document_id, project_id, url, title, cleaned),
+            timeout=_WEBPAGE_INDEXING_TIMEOUT_SECONDS,
+        )
+        status_value = "indexed" if stored_count > 0 else "indexed_empty"
+        logger.info(
+            "[fetch-url] === 색인(백그라운드) 완료 === document_id=%s elapsed=%.1fs stored_count=%d",
+            document_id,
+            time.time() - _index_started,
+            stored_count,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "[fetch-url] 색인(백그라운드) 타임아웃: document_id=%s (%ds 초과) elapsed=%.1fs",
+            document_id,
+            _WEBPAGE_INDEXING_TIMEOUT_SECONDS,
+            time.time() - _index_started,
+        )
+        status_value = "indexing_timeout"
+    except Exception:
+        logger.exception(
+            "[fetch-url] 색인(백그라운드) 실패: document_id=%s elapsed=%.1fs",
+            document_id,
+            time.time() - _index_started,
+        )
+        status_value = "indexing_failed"
+    await document_repo.update_fields(document_id, {"status": status_value})
 
 
 # 가은/Claude (2026-07-15): 비회원 로그인은 Authorization 헤더 없이 그대로 들어온다 —
@@ -228,11 +288,16 @@ def _apply_cleaning(page_content: WebPageContent) -> tuple[WebPageContent, Clean
 
 
 # DOC-004: URL 문서 수집
-@router.post("/fetch-url", response_model=UrlExtractionResult)
+# 가은/Claude(2026-07-19, INF-007): 색인(청킹+임베딩)이 끝날 때까지 이 응답 자체를 막지
+# 않는다 — project_id가 있으면 document_id를 즉시 만들어 반환하고, 색인은
+# _index_webpage_background()로 넘긴다. 프론트는 응답에 담긴 page_content/attachments/
+# warnings로 문서 행을 바로 그리고, document_status가 "indexing"이면
+# GET /{project_id}/{document_id}/status(DOC-004, 기존 엔드포인트)를 폴링한다.
+@router.post("/fetch-url", response_model=FetchUrlResponse)
 async def fetch_url(
     request: FetchUrlRequest,
     authorization: Optional[str] = Header(None, alias="authorization"),
-) -> UrlExtractionResult:
+) -> FetchUrlResponse:
     user_email = get_current_user(authorization)
 
     try:
@@ -245,6 +310,9 @@ async def fetch_url(
         logger.exception("URL 문서 수집 중 예상하지 못한 오류가 발생했습니다: url=%s", request.url)
         raise InternalServerException(detail=_GENERIC_ERROR_MESSAGE)
 
+    document_id: Optional[str] = None
+    document_status: Optional[str] = None
+
     if result.page_content is not None:
         try:
             merged_page_content, cleaned = await run_in_threadpool(_apply_cleaning, result.page_content)
@@ -256,36 +324,47 @@ async def fetch_url(
         # 가은/Claude(2026-07-15, "다 이어버리자"): project_id가 있으면 공고문도 기획서
         # 업로드와 동일하게 색인 + documents 컬렉션 저장까지 잇는다. 없으면(과거 호출
         # 호환) 조회만 하고 끝낸다 — 프론트가 project_id를 꼭 보내도록 같이 바꿨다.
+        # 윤한/Claude(2026-07-18, INF-007): 색인을 이 요청 안에서 await하면 요청이 색인
+        # 소요 시간만큼(수십 초~) 붙잡혀 있었다 — status="indexing"으로 저장만 해두고
+        # asyncio.create_task()로 넘긴 뒤 즉시 응답한다(meetings.py의 위원장 종합 백그라운드
+        # 이관과 동일 패턴). 프론트는 document_status="indexing"이면 document_id로
+        # /{project_id}/{document_id}/status를 폴링해 최종 상태를 확인해야 한다.
         if request.project_id:
+            title = merged_page_content.title or request.url
             document = DocumentModel(
                 project_id=request.project_id,
                 user_email=user_email,
-                original_filename=merged_page_content.title or request.url,
+                original_filename=title,
                 stored_filename=request.url,
                 file_path=request.url,
                 file_size=merged_page_content.text_length,
                 mime_type="text/html",
+                status="indexing",
                 source_type="url",
                 document_role="criteria",
                 parsed_text=merged_page_content.text,
+                # 가은/Claude(2026-07-18): 실측(sotong.go.kr) — 평가기준이 본문이 아니라
+                # HWP 요강 파일에만 있는 공고가 실제로 있었다. 재접속 후에도(getDocuments())
+                # "직접 받아서 올려주세요" 안내를 다시 보여줄 수 있게 저장해둔다.
+                unsupported_attachments=[
+                    {"url": a.url, "file_name": a.file_name, "reason": a.reason}
+                    for a in result.unsupported_attachments
+                ]
+                or None,
             )
             document_id = await document_repo.create(document)
-            try:
-                stored_count = await run_in_threadpool(
-                    _chunk_and_index_webpage,
-                    document_id,
-                    request.project_id,
-                    request.url,
-                    merged_page_content.title or request.url,
-                    cleaned,
+            document_status = "indexing"
+            asyncio.create_task(
+                _index_webpage_background(
+                    document_id=document_id,
+                    project_id=request.project_id,
+                    url=request.url,
+                    title=title,
+                    cleaned=cleaned,
                 )
-                status_value = "indexed" if stored_count > 0 else "indexed_empty"
-            except Exception:
-                logger.exception("공고문 색인 중 오류가 발생했습니다: document_id=%s", document_id)
-                status_value = "indexing_failed"
-            await document_repo.update_fields(document_id, {"status": status_value})
+            )
 
-    return result
+    return FetchUrlResponse(**result.model_dump(), document_id=document_id, document_status=document_status)
 
 
 # DOC-001: 문서 업로드
@@ -357,7 +436,7 @@ async def upload_document(
     # RAG-001~003: 파싱 -> 청킹 -> 임베딩 -> Chroma 색인 (실패해도 업로드 자체는 성공으로 유지)
     try:
         stored_count, parsed_text, conversion_metadata = await run_in_threadpool(
-            _parse_chunk_and_index, result, project_id, file_path, file.filename
+            _parse_chunk_and_index, result, project_id, file_path, file.filename, document_role
         )
         document.status = "indexed" if stored_count > 0 else "indexed_empty"
         document.parsed_text = parsed_text
@@ -404,6 +483,7 @@ async def upload_document(
         updated_at=document.updated_at,
         document_role=document.document_role,
         conversion_metadata=document.conversion_metadata,
+        unsupported_attachments=document.unsupported_attachments,
     )
 
 
@@ -433,6 +513,7 @@ async def get_documents(
             updated_at=d["updated_at"],
             document_role=d.get("document_role", "target"),
             conversion_metadata=d.get("conversion_metadata"),
+            unsupported_attachments=d.get("unsupported_attachments"),
         )
         for d in documents
     ]

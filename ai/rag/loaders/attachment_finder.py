@@ -19,7 +19,11 @@ from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
 
-from ai.rag.loaders.config import MAX_ATTACHMENT_CANDIDATES, DOWNLOAD_LINK_PATTERNS
+from ai.rag.loaders.config import (
+    MAX_ATTACHMENT_CANDIDATES,
+    DOWNLOAD_LINK_PATTERNS,
+    MIN_IMAGE_ATTACHMENT_DIMENSION_PX,
+)
 from ai.rag.loaders.schemas import AttachmentLinkInfo, AttachmentFileType
 
 _EXTENSION_MAP = {
@@ -28,10 +32,17 @@ _EXTENSION_MAP = {
     "pptx": AttachmentFileType.PPTX,
     "hwp": AttachmentFileType.HWP,
     "hwpx": AttachmentFileType.HWPX,
+    # 가은/Claude(2026-07-18): 공고 포스터 이미지 지원(url_loader.py의 이미지->PDF
+    # 변환+OCR 재사용 경로) — jpg/jpeg는 같은 JPEG 형식으로 취급한다.
+    "jpg": AttachmentFileType.JPEG,
+    "jpeg": AttachmentFileType.JPEG,
+    "png": AttachmentFileType.PNG,
 }
 _KNOWN_EXTENSIONS = tuple(_EXTENSION_MAP.keys())
+_IMAGE_EXTENSIONS = ("jpg", "jpeg", "png")
 _EXTENSION_IN_TEXT_RE = re.compile(r"\.(" + "|".join(_KNOWN_EXTENSIONS) + r")\b", re.IGNORECASE)
 _IGNORED_HREF_PREFIXES = ("#", "javascript:", "mailto:", "tel:")
+_IGNORED_IMG_SRC_PREFIXES = ("data:",)
 
 
 def find_attachments(html_text: str, page_url: str) -> list[AttachmentLinkInfo]:
@@ -100,8 +111,87 @@ def find_attachments(html_text: str, page_url: str) -> list[AttachmentLinkInfo]:
             discovery_reasons=reasons,
         )
 
+    _find_image_candidates(soup, page_url, candidates)
+
     ordered = _prioritize(list(candidates.values()))
     return ordered[:MAX_ATTACHMENT_CANDIDATES]
+
+
+# 가은/Claude(2026-07-18): 공모전 공고가 <a href="...pdf">처럼 다운로드 링크가 아니라
+# <img src="포스터.jpg">로 페이지에 그냥 박혀 있는 경우가 많아서(실측: 정부기관 사이트) 추가.
+# <a href>는 "명시적으로 걸어둔 첨부"라는 신호가 확실하지만, <img>는 로고/아이콘/공유버튼처럼
+# 노이즈가 훨씬 많다 — 실측(sotong.go.kr)에서 width/height 속성 없는 img가 전부 통과돼
+# logo.png/닫기버튼.png 등 4개가 쓸데없이 OCR까지 태워진 걸 확인했다. 크기 필터만으론
+# 부족해서, "크기가 충분히 크다" 또는 "다운로드성 신호(부모 <a>가 첨부 패턴 링크, 또는
+# 자기 URL 자체가 다운로드 패턴)가 있다" 둘 중 하나는 있어야 후보로 삼도록 강화한다.
+# 트레이드오프: 크기 속성도 없고 다운로드 신호도 없는 "진짜 큰 콘텐츠 이미지"(반응형
+# lazy-load 등)는 여전히 놓칠 수 있다 — 노이즈 억제를 recall보다 우선한 선택.
+def _find_image_candidates(soup: BeautifulSoup, page_url: str, candidates: dict[str, AttachmentLinkInfo]) -> None:
+    for img_tag in soup.find_all("img", src=True):
+        src = img_tag["src"].strip()
+        if not src or src.lower().startswith(_IGNORED_IMG_SRC_PREFIXES):
+            continue
+
+        absolute_url = urljoin(page_url, src)
+        parsed = urlparse(absolute_url)
+        if parsed.scheme not in ("http", "https"):
+            continue
+        if absolute_url in candidates:
+            continue  # <a href>로 이미 잡힌 링크(썸네일이 첨부 링크를 감싸는 흔한 패턴)
+
+        extension = _extension_from_path(parsed.path)
+        if extension not in _IMAGE_EXTENSIONS:
+            continue  # img 태그는 확장자가 이미지로 확정될 때만 후보로 삼는다(오탐 방지)
+
+        if _looks_like_small_icon(img_tag):
+            continue
+        if not _has_attachment_signal(img_tag, absolute_url):
+            continue
+
+        anchor_text = img_tag.get("alt") or None
+        candidates[absolute_url] = AttachmentLinkInfo(
+            url=absolute_url,
+            file_name=_guess_file_name(parsed.path, anchor_text, extension),
+            extension=_EXTENSION_MAP[extension],
+            anchor_text=anchor_text,
+            discovery_reasons=["img_src_extension"],
+        )
+
+
+def _looks_like_small_icon(img_tag) -> bool:
+    width = _parse_px_attr(img_tag.get("width"))
+    height = _parse_px_attr(img_tag.get("height"))
+    if width is None or height is None:
+        return False  # 크기 정보가 없으면 이 필터만으론 판단 보류 (_has_attachment_signal이 이어받음)
+    return width < MIN_IMAGE_ATTACHMENT_DIMENSION_PX and height < MIN_IMAGE_ATTACHMENT_DIMENSION_PX
+
+
+def _has_attachment_signal(img_tag, absolute_url: str) -> bool:
+    """명시적 크기(=충분히 큼, _looks_like_small_icon을 이미 통과)가 있으면 그 자체로
+    충분한 신호로 본다. 크기 정보가 아예 없으면(레이지로딩 등 흔함), 부모 <a> 링크나
+    자기 URL에 다운로드성 패턴이 있을 때만 통과시킨다 — 로고/아이콘류는 보통 이런 신호가
+    없다."""
+    width = _parse_px_attr(img_tag.get("width"))
+    height = _parse_px_attr(img_tag.get("height"))
+    if width is not None and height is not None:
+        return True
+
+    parent_link = img_tag.find_parent("a")
+    if parent_link is not None:
+        href = (parent_link.get("href") or "").lower()
+        if any(pattern in href for pattern in DOWNLOAD_LINK_PATTERNS):
+            return True
+        if _extension_from_path(urlparse(href).path) in _KNOWN_EXTENSIONS:
+            return True
+
+    return any(pattern in absolute_url.lower() for pattern in DOWNLOAD_LINK_PATTERNS)
+
+
+def _parse_px_attr(value: str | None) -> int | None:
+    if not value:
+        return None
+    digits = "".join(ch for ch in value if ch.isdigit())
+    return int(digits) if digits else None
 
 
 def extension_from_url(url: str) -> str:

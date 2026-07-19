@@ -321,9 +321,11 @@ def _run_simple(mapping, **kwargs):
     )
 
 
-def test_run_meeting_emits_v2_1_0_and_passes_similar_success_cases():
+def test_run_meeting_emits_latest_schema_and_passes_similar_success_cases():
     mapping = json.loads(COMPETITION_MAPPING_PATH.read_text(encoding="utf-8"))
-    validator = jsonschema.Draft202012Validator(json.loads(SCHEMA_PATH.read_text(encoding="utf-8")))
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    validator = jsonschema.Draft202012Validator(schema)
+    latest_version = schema["properties"]["schema_version"]["enum"][-1]  # 계약 최신 버전
 
     cases = {
         "results": [
@@ -343,7 +345,7 @@ def test_run_meeting_emits_v2_1_0_and_passes_similar_success_cases():
     # RAG-006 결과가 있을 때: 그대로 pass-through
     doc = _run_simple(mapping, similar_success_cases=cases)
     validator.validate(doc)
-    assert doc["schema_version"] == "2.1.0"
+    assert doc["schema_version"] == latest_version  # 계약 버전이 올라가도 최신값을 발행
     assert doc["similar_success_cases"] == cases
     # 평가 결과엔 영향 없음(4항목 전부 채점되어 총점 80)
     assert doc["score_result"]["total_score"] == 80
