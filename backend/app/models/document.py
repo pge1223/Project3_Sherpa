@@ -14,6 +14,11 @@ class DocumentModel:
         file_path: str,
         file_size: int,
         mime_type: str,
+        # status 값: "uploaded", "pending", "indexed", "indexed_empty", "indexing_failed",
+        # "conversion_failed" | 윤한/Claude(2026-07-18, INF-007 fetch-url 백그라운드화):
+        # "indexing"(색인 진행 중, fetch-url이 응답을 기다리지 않고 즉시 반환한 뒤 백그라운드
+        # 태스크가 색인을 마치면 indexed/indexed_empty로 patch) / "indexing_timeout"
+        # (백그라운드 색인이 asyncio.wait_for(timeout=120)에 걸려 중단된 경우) 추가.
         status: str = "uploaded",
         created_at: Optional[datetime] = None,
         updated_at: Optional[datetime] = None,
