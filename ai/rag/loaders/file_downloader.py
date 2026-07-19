@@ -284,16 +284,26 @@ def _sanitize_filename(name: str) -> str:
 _CFBF_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"  # OLE 복합 문서 (구버전 HWP/DOC/XLS 등)
 
 
+_PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+
+
 def sniff_file_signature(path: Path) -> str:
     """
     매직바이트로 실제 파일 형식을 판별한다 (확장자/Content-Type을 신뢰하지 않음).
-    Returns: "pdf" | "docx" | "pptx" | "hwpx" | "hwp_legacy" | "zip_unknown" | "unknown"
+    Returns: "pdf" | "docx" | "pptx" | "hwpx" | "hwp_legacy" | "jpeg" | "png" | "zip_unknown" | "unknown"
     """
     with open(path, "rb") as f:
         header = f.read(8)
 
     if header.startswith(b"%PDF-"):
         return "pdf"
+
+    # 가은/Claude(2026-07-18): 공고 포스터가 이미지 한 장으로 올라오는 경우(url_loader.py의
+    # 이미지->PDF 변환+OCR 재사용 경로)를 위해 추가.
+    if header.startswith(b"\xff\xd8\xff"):
+        return "jpeg"
+    if header == _PNG_MAGIC:
+        return "png"
 
     if header == _CFBF_MAGIC:
         # 확장자 없는 다운로드 링크가 실제로는 구버전(.hwp) 문서인 경우를 식별하기 위함

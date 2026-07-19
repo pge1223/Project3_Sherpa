@@ -1,3 +1,18 @@
+## 2026-07-18
+
+### 작업 내용
+- INF-007 fetch-url 색인 백그라운드화
+  - asyncio.create_task()로 색인 백그라운드 이관
+  - 즉시 응답 반환 (status="indexing")
+  - 타임아웃 120초 → indexing_timeout 상태 저장
+  - _index_webpage_background() 함수 추가
+- ai/rag/loaders/schemas.py → 가은님 FetchUrlResponse 서브클래스 방식 채택
+- dev 머지 후 NCP 서버 배포 완료
+
+### 참고
+- 충돌 해결: 가은님 폴링 작업과 documents.py 동일 파일 수정으로 충돌 발생 → 수동 해결
+- 용준님 RAG 영역(schemas.py) additive 변경 확인 완료
+
 [2026-07-17] AI Review Board 개발 일지
 
 한 일:

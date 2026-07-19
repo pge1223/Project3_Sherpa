@@ -157,6 +157,67 @@ def test_html_page_with_multiple_attachments(mock_requests, sample_pdf, sample_d
     assert result.unsupported_attachments[0].url.endswith("legacy.hwp")
 
 
+# ---------------------------------------------------------------------------
+# url_loader: 이미지 첨부(공고 포스터) -> 1페이지 PDF 변환 -> 기존 PDF+OCR 경로 재사용
+# 가은/Claude(2026-07-18): sotong.go.kr 실측 검증 완료(회의록 참고) — <a href="...jpg">로
+# 걸린 포스터가 실제로 다운로드되어 1페이지 PDF로 변환되고, 그 결과를 extract_document()가
+# 그대로 파싱한다. EasyOCR 모델 로딩은 수초~수십초가 걸리고 최초 1회는 모델을 다운로드하므로
+# (개발 환경마다 설치 여부가 다를 수 있음), OCR이 실제로 사용 가능한 환경에서만 돈다 —
+# 없으면 스킵한다(test_parsers.py의 기존 ocr_engine 픽스처와 동일 컨벤션).
+# ---------------------------------------------------------------------------
+
+def test_image_attachment_is_converted_to_pdf_and_parsed(mock_requests, sample_jpeg, ocr_engine):
+    if ocr_engine is None:
+        pytest.skip("EasyOCR 모델 설치 필요")
+
+    page_url = "http://example.test/notice/poster-page"
+    html = '<html><body><a href="/files/poster.jpg">공고 포스터</a></body></html>'
+    mock_requests.get(page_url, text=html, headers={"Content-Type": "text/html"})
+    mock_requests.get(
+        "http://example.test/files/poster.jpg",
+        content=sample_jpeg.read_bytes(),
+        headers={"Content-Type": "image/jpeg"},
+    )
+
+    result = url_loader.load_from_url(page_url)
+
+    assert not result.failed_attachments
+    assert not result.unsupported_attachments
+    assert len(result.attachments) == 1
+    extraction = result.attachments[0].extraction
+    # 변환된 PDF를 그대로 파싱한 것이므로 file_type은 pdf로 나온다(원본이 이미지였다는
+    # 사실은 attachment_url/file_name으로만 알 수 있음).
+    assert extraction.file_type.value == "pdf"
+    assert any(b.block_type.value == "image" for b in extraction.blocks)
+
+
+def test_image_conversion_failure_reported_as_failed_attachment(mock_requests):
+    """다운로드는 됐지만 매직바이트가 jpeg/png인데 실제로는 손상된 경우 —
+    IMAGE_CONVERSION_FAILED로 실패 처리되고 예외가 밖으로 새지 않아야 한다."""
+    page_url = "http://example.test/notice/broken-image"
+    html = '<html><body><a href="/files/broken.jpg">포스터</a></body></html>'
+    mock_requests.get(page_url, text=html, headers={"Content-Type": "text/html"})
+    # JPEG 매직바이트(\xff\xd8\xff)는 맞지만 이어지는 내용이 손상된 이미지
+    mock_requests.get(
+        "http://example.test/files/broken.jpg",
+        content=b"\xff\xd8\xff" + b"\x00" * 50,
+        headers={"Content-Type": "image/jpeg"},
+    )
+
+    result = url_loader.load_from_url(page_url)
+
+    assert not result.attachments
+    assert len(result.failed_attachments) == 1
+    assert result.failed_attachments[0].error_code == "IMAGE_CONVERSION_FAILED"
+
+
+def test_convert_image_to_pdf_produces_valid_pdf(tmp_path, sample_jpeg):
+    pdf_path = tmp_path / "out.pdf"
+    url_loader._convert_image_to_pdf(sample_jpeg, pdf_path)
+    assert pdf_path.exists()
+    assert pdf_path.read_bytes().startswith(b"%PDF-")
+
+
 def test_js_rendered_page_produces_warning_not_error(mock_requests):
     page_url = "http://example.test/notice/spa"
     scripts = "".join(f'<script src="/bundle{i}.js"></script>' for i in range(15))
@@ -395,6 +456,75 @@ def test_find_attachments_ignores_plain_navigation_links():
 
 
 # ---------------------------------------------------------------------------
+# attachment_finder: <img> 태그 탐색(이미지 첨부 지원) + 노이즈 필터
+# 가은/Claude(2026-07-18): sotong.go.kr 실측 — 공모전 포스터가 <a href>가 아니라
+# <img src>로 페이지에 그냥 박혀 있는 경우가 흔해서 추가. 동시에 크기 속성 없는
+# 로고/아이콘(logo.png, 닫기버튼 아이콘 등)까지 같이 잡혀서 불필요하게 OCR이 도는 걸
+# 같은 세션에서 실측 확인 -> "크기 정보 있음" 또는 "다운로드성 신호(부모 <a>/자기 URL)"
+# 중 하나는 있어야 후보로 인정하도록 좁혔다. 아래 테스트는 그 필터 동작을 고정한다.
+# ---------------------------------------------------------------------------
+
+def test_find_attachments_img_with_large_size_attrs_is_candidate():
+    html = '<html><body><img src="/notice/poster.jpg" width="800" height="1000"></body></html>'
+    candidates = attachment_finder.find_attachments(html, "http://example.test/")
+    assert len(candidates) == 1
+    assert candidates[0].url == "http://example.test/notice/poster.jpg"
+    assert candidates[0].extension == AttachmentFileType.JPEG
+    assert "img_src_extension" in candidates[0].discovery_reasons
+
+
+def test_find_attachments_img_with_small_size_attrs_is_filtered():
+    html = '<html><body><img src="/icons/logo.png" width="40" height="40"></body></html>'
+    candidates = attachment_finder.find_attachments(html, "http://example.test/")
+    assert candidates == []
+
+
+def test_find_attachments_img_without_size_or_download_signal_is_filtered():
+    """실측 재현: sotong.go.kr의 logo.png/닫기버튼 아이콘처럼 width/height 속성이 아예
+    없고, 다운로드성 부모 링크나 URL 패턴도 없는 img는 후보에서 제외되어야 한다."""
+    html = '<html><body><img src="/assets/logo.png" alt="사이트 로고"></body></html>'
+    candidates = attachment_finder.find_attachments(html, "http://example.test/")
+    assert candidates == []
+
+
+def test_find_attachments_img_wrapped_in_download_link_is_candidate():
+    """크기 속성이 없어도, <a>가 다운로드성 링크로 감싸고 있으면(흔한 "포스터 클릭해서
+    다운로드" 패턴) 후보로 인정한다. <a href> 자체도 link_pattern으로 별도 후보가 되므로
+    (기존 동작) 총 2개 — img src로 잡힌 썸네일이 그중에 포함되는지만 확인한다."""
+    html = """
+    <html><body>
+      <a href="/board/fileDownload.do?atchId=1"><img src="/thumb/poster.jpg"></a>
+    </body></html>
+    """
+    candidates = attachment_finder.find_attachments(html, "http://example.test/")
+    urls = {c.url for c in candidates}
+    assert "http://example.test/thumb/poster.jpg" in urls
+
+
+def test_find_attachments_img_src_itself_has_download_pattern_is_candidate():
+    # 경로 자체가 이미지 확장자로 끝나야 먼저 통과되는 확장자 검사를 만족한다
+    # (쿼리스트링의 확장자는 여기서 보지 않음 — href의 link_pattern 케이스와 다른 경로).
+    html = '<html><body><img src="/common/fileDownload.jpg?fileId=1"></body></html>'
+    candidates = attachment_finder.find_attachments(html, "http://example.test/")
+    assert len(candidates) == 1
+
+
+def test_find_attachments_img_deduped_with_a_href_same_url():
+    """<a href="poster.jpg"><img src="poster.jpg"></a>처럼 같은 URL을 가리키면
+    하나의 후보로만 남아야 한다(이중 다운로드 방지)."""
+    html = '<html><body><a href="/files/poster.jpg"><img src="/files/poster.jpg"></a></body></html>'
+    candidates = attachment_finder.find_attachments(html, "http://example.test/")
+    assert len(candidates) == 1
+
+
+def test_find_attachments_img_non_image_extension_ignored():
+    """img src가 이미지 확장자가 아니면(추적 픽셀 등) 후보로 삼지 않는다."""
+    html = '<html><body><img src="/beacon/track.gif" width="1" height="1"></body></html>'
+    candidates = attachment_finder.find_attachments(html, "http://example.test/")
+    assert candidates == []
+
+
+# ---------------------------------------------------------------------------
 # html_parser 단위 테스트
 # ---------------------------------------------------------------------------
 
@@ -435,6 +565,18 @@ def test_sniff_file_signature_unknown(tmp_path):
     dest = tmp_path / "x.bin"
     dest.write_bytes(b"not a real document")
     assert file_downloader.sniff_file_signature(dest) == "unknown"
+
+
+def test_sniff_file_signature_jpeg(tmp_path, sample_jpeg):
+    dest = tmp_path / "x.bin"
+    dest.write_bytes(sample_jpeg.read_bytes())
+    assert file_downloader.sniff_file_signature(dest) == "jpeg"
+
+
+def test_sniff_file_signature_png(tmp_path, sample_png_icon):
+    dest = tmp_path / "x.bin"
+    dest.write_bytes(sample_png_icon.read_bytes())
+    assert file_downloader.sniff_file_signature(dest) == "png"
 
 
 def test_validate_url_or_raise_blocks_loopback():

@@ -25,6 +25,11 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers", "embedding_integration: 실제 KURE-v1 모델을 로딩하는 통합 테스트 (RUN_KURE_INTEGRATION=1로만 실행)"
     )
+    config.addinivalue_line(
+        "markers",
+        "url_integration: 실제 URL 네트워크 요청 + 실제 KURE-v1 모델을 사용하는 fetch-url 색인 통합 테스트 "
+        "(RUN_URL_INTEGRATION=1로만 실행)",
+    )
 
 
 @pytest.fixture
@@ -49,6 +54,18 @@ def sample_docx(fixtures_dir: Path) -> Path:
 def sample_pptx(fixtures_dir: Path) -> Path:
     """테스트용 PPTX 파일 경로"""
     return fixtures_dir / "sample.pptx"
+
+
+@pytest.fixture
+def sample_jpeg(fixtures_dir: Path) -> Path:
+    """테스트용 JPEG 파일 경로 (공고 포스터 이미지 지원 테스트용)"""
+    return fixtures_dir / "sample_poster.jpg"
+
+
+@pytest.fixture
+def sample_png_icon(fixtures_dir: Path) -> Path:
+    """테스트용 작은 PNG 파일 경로 (로고/아이콘 노이즈 필터 테스트용, 10x10px)"""
+    return fixtures_dir / "sample_icon.png"
 
 
 @pytest.fixture
