@@ -203,7 +203,12 @@ export default function ProjectListPage() {
                 deleting={deletingId === project.id}
                 onOpenChange={setOpenRowId}
                 onDelete={handleDelete}
-                onNavigate={(id) => navigate(`/projects/${id}`)}
+                // 가은/Claude(2026-07-21): 실측 요청 — "내 프로젝트"에서 프로젝트를
+                // 열면 board에서 올린 공고문·기획서·분석결과가 보여야 한다. 구
+                // ProjectDetailPage(/projects/:id)는 board와 무관한 레거시 화면이라
+                // 대신 /board로 이어서 하기(ReviewBoardPrototype.jsx의 ?projectId=
+                // 처리부 참고) 보낸다.
+                onNavigate={(id) => navigate(`/board?projectId=${id}`)}
               />
             ))}
         </div>

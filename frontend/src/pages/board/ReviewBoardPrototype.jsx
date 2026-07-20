@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   Link2, Upload, FileText, Sparkles,
   CheckCircle2, Circle, AlertCircle, Send, Award, Target, ShieldCheck,
@@ -12,6 +12,7 @@ import {
   getDocumentStatus,
   getAnnouncementAnalysis,
   deleteDocument,
+  getDocuments,
 } from "../../api/documentApi";
 import { analyzeProject, getAnalyzeProgress, getMentorCandidates } from "../../api/projectApi";
 import { isAcceptedDocument, formatFileSize, ACCEPTED_DOCUMENT_EXTENSIONS } from "../../utils/file";
@@ -49,6 +50,16 @@ const FLOW_BY_MODE = {
 const MIN_MENTORS = 2
 const MAX_MENTORS = 4
 const ANALYZE_POLL_INTERVAL_MS = 1000
+
+// 가은/Claude(2026-07-21): 실측 요청 — "내 프로젝트"에서 이전 프로젝트를 불러오면
+// board에서 올렸던 공고문·기획서가 안 보이던 문제. DocumentUploadPage.jsx의
+// toRowStatus()와 같은 취지(백엔드 status -> 화면 배지)지만, 재조회 시점엔 색인이
+// 이미 끝났을 확률이 높아 "진행 중" 상태를 굳이 추정하지 않고 done으로 본다.
+function _resumedDocStatus(backendStatus) {
+  if (backendStatus === 'indexed_empty') return 'warning'
+  if (backendStatus === 'indexing_failed' || backendStatus === 'conversion_failed' || backendStatus === 'indexing_timeout') return 'error'
+  return 'done'
+}
 
 function Shell({ children, active, mode, onNavigate, showNav }) {
   const flow = mode ? FLOW_BY_MODE[mode] : ["entry"];
@@ -707,8 +718,8 @@ function stageStatus(step, snapshot, mentorCount) {
  * MentorSelectionPage.jsx가 하던 getMentorCandidates → analyzeProject → getAnalyzeProgress
  * 폴링을 그대로 쓰되, 멘토 선택 화면 없이 추천 후보를 전부(최대 4명) 자동 선택한다.
  */
-function UploadAndAnalyzeScreen({ projectId, onFeedbackReady }) {
-  const [documents, setDocuments] = useState([])
+function UploadAndAnalyzeScreen({ projectId, onFeedbackReady, initialDocuments }) {
+  const [documents, setDocuments] = useState(() => initialDocuments || [])
   const [isDragging, setIsDragging] = useState(false)
   const [fileError, setFileError] = useState('')
   const fileInputRef = useRef(null)
@@ -927,9 +938,18 @@ function UploadAndAnalyzeScreen({ projectId, onFeedbackReady }) {
 /* ---------------------------- 페이지 진입점 ---------------------------- */
 export default function ReviewBoardPrototype() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  // 가은/Claude(2026-07-21): 실측 요청 — "내 프로젝트"에서 프로젝트를 불러오면 board에서
+  // 올렸던 공고문·기획서·분석결과가 안 보이던 문제(구 ProjectDetailPage로 가서 board와
+  // 완전히 무관한 화면을 보여줬음). ProjectListPage가 이제 /board?projectId=로 보낸다 —
+  // DocumentUploadPage.jsx의 ?projectId= "이어서 하기" 패턴과 동일.
+  const resumeProjectId = searchParams.get('projectId');
+  const [resuming, setResuming] = useState(!!resumeProjectId);
+  const [resumeError, setResumeError] = useState('');
   const [mode, setMode] = useState(null);
   const [stage, setStage] = useState("entry");
   const [projectId, setProjectId] = useState(null);
+  const [targetDocuments, setTargetDocuments] = useState(null);
   const [entryLoading, setEntryLoading] = useState(false);
   const [entryError, setEntryError] = useState('');
   // 가은/Claude(2026-07-20): 실측 버그 — URL로 실제 공고문을 수집해도 "공모전 분석"
@@ -979,8 +999,65 @@ export default function ReviewBoardPrototype() {
     navigate(`/projects/${pid}/feedback-chat`);
   }
 
+  // 가은/Claude(2026-07-21): ?projectId=가 있으면 기존 프로젝트를 불러와 이어서 한다.
+  // 기획서(target)가 이미 있으면 "기획서 업로드" 단계로, 공고문(criteria)만 있으면
+  // "공모전 분석" 단계로 보낸다(둘 다 있어도 분석 화면이 캐시로 즉시 뜨므로 거기서
+  // 시작). 아무 문서도 없으면 entry에 그대로 둔다.
+  useEffect(() => {
+    if (!resumeProjectId) return;
+    let cancelled = false;
+    setResuming(true);
+    setResumeError('');
+    getDocuments(resumeProjectId)
+      .then((docs) => {
+        if (cancelled) return;
+        projectIdRef.current = resumeProjectId;
+        setProjectId(resumeProjectId);
+        setMode('post');
+
+        const criteriaDocs = docs.filter((d) => d.document_role === 'criteria');
+        const targetDocs = docs.filter((d) => (d.document_role || 'target') === 'target');
+
+        setCriteriaDocuments(
+          criteriaDocs.map((d) => ({
+            id: d.id,
+            backendId: d.id,
+            name: d.original_filename,
+            meta: '이전에 등록한 문서',
+            status: _resumedDocStatus(d.status),
+          })),
+        );
+        setTargetDocuments(
+          targetDocs.map((d) => ({
+            id: d.id,
+            name: d.original_filename,
+            meta: formatFileSize(d.file_size),
+            status: _resumedDocStatus(d.status),
+          })),
+        );
+
+        if (targetDocs.length > 0) setStage('upload');
+        else if (criteriaDocs.length > 0) setStage('analysis');
+      })
+      .catch((err) => { if (!cancelled) setResumeError(err.message); })
+      .finally(() => { if (!cancelled) setResuming(false); });
+    return () => { cancelled = true; };
+  }, [resumeProjectId]);
+
+  if (resuming) {
+    return (
+      <Shell active={stage} mode={mode} onNavigate={setStage} showNav={false}>
+        <div style={{ maxWidth: 760, margin: "40px auto" }}>
+          <div className="badge purple mono">불러오는 중</div>
+          <h1 style={{ fontSize: 26, fontWeight: 700, margin: "12px 0 24px" }}>이전에 등록한 프로젝트를 불러오고 있어요...</h1>
+        </div>
+      </Shell>
+    );
+  }
+
   return (
     <Shell active={stage} mode={mode} onNavigate={setStage} showNav={stage !== "entry"}>
+      {resumeError && <p style={{ color: "var(--coral)", fontSize: 13, marginBottom: 16 }}>{resumeError}</p>}
       {stage === "entry" && (
         <EntryScreen
           onEnter={handleEnter}
@@ -998,7 +1075,7 @@ export default function ReviewBoardPrototype() {
       {stage === "ideation" && <IdeationScreen onNext={goNext} />}
       {stage === "ideation_result" && <IdeationResultScreen />}
       {stage === "upload" && (
-        <UploadAndAnalyzeScreen projectId={projectId} onFeedbackReady={handleFeedbackReady} />
+        <UploadAndAnalyzeScreen projectId={projectId} onFeedbackReady={handleFeedbackReady} initialDocuments={targetDocuments} />
       )}
     </Shell>
   );
