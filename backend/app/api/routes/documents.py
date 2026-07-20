@@ -529,6 +529,31 @@ async def get_documents(
     ]
 
 
+# 가은/Claude(2026-07-21): 실측 요청 — /board에서 URL/파일로 올린 공고문·평가기준
+# 문서를 잘못 올렸을 때 지울 수 있게. PRJ-004(프로젝트 전체 삭제, projects.py)와
+# 같은 순서(Chroma 벡터 청크 -> MongoDB 문서 레코드)를 문서 1건 단위로 좁힌 것 — 벡터
+# 삭제는 ChromaVectorStore.delete_document()를 직접 쓴다(RAGIndexingService는
+# delete_project만 감싸고 있어 서비스 계층에 새 메서드를 추가하는 대신 documents.py
+# 안에서 기존 _get_indexing_service() 싱글턴을 그대로 재사용).
+@router.delete("/{project_id}/{document_id}")
+async def delete_document(
+    project_id: str,
+    document_id: str,
+    authorization: Optional[str] = Header(None, alias="authorization"),
+):
+    user_email = get_current_user(authorization)
+    await verify_project_owner(project_id, user_email)
+
+    document = await document_repo.find_by_id(document_id)
+    if not document or document.get("project_id") != project_id:
+        raise HTTPException(status_code=404, detail="문서를 찾을 수 없습니다")
+
+    indexing_service = _get_indexing_service()
+    await run_in_threadpool(indexing_service.vector_store.delete_document, project_id, document_id)
+    await document_repo.delete_by_id(document_id)
+    return {"message": "문서가 삭제되었습니다"}
+
+
 # DOC-004: 문서 처리 상태 조회
 @router.get("/{project_id}/{document_id}/status")
 async def get_document_status(
@@ -662,12 +687,23 @@ async def get_announcement_analysis(
     authorization: Optional[str] = Header(None, alias="authorization"),
 ):
     user_email = get_current_user(authorization)
-    await verify_project_owner(project_id, user_email)
+    project = await verify_project_owner(project_id, user_email)
+
+    # 가은/Claude(2026-07-21): dynamic_rubric_mapping과 동일한 "프로젝트당 1회 계산 후
+    # 캐시" 패턴 — 재방문마다 다시 LLM을 부르지 않는다. 공고문을 나중에 추가/교체해도
+    # 자동으로는 무효화하지 않는다(캐시 기준: "이 프로젝트에서 한 번이라도 분석한 적
+    # 있는가") — 재분석이 필요하면 지금은 프로젝트를 새로 만들어야 한다.
+    cached = project.get("announcement_analysis_cache")
+    if cached:
+        logger.info("[announcement-analysis] project_id=%s 캐시된 분석 결과 재사용", project_id)
+        return AnnouncementAnalysisResponse(**cached)
 
     text, names = await _load_criteria_documents_text(project_id)
     if not text.strip():
         # 가은/Claude(2026-07-21): 공고문을 하나도 안 넣었으면 LLM을 호출하지 않는다 —
         # "정보 없음"을 지어내는 것보다 화면에서 그 상태 자체를 명시적으로 보여준다.
+        # has_announcement: false는 "아직 없음"이라 캐시하지 않는다 — 공고문을 나중에
+        # 추가하면 그때는 실제로 분석해야 하기 때문.
         return AnnouncementAnalysisResponse(has_announcement=False)
 
     prompt = _build_announcement_analysis_prompt(text)
@@ -714,7 +750,7 @@ async def get_announcement_analysis(
 
     announcement_title = str(parsed.get("announcement_title") or "").strip() if isinstance(parsed, dict) else ""
 
-    return AnnouncementAnalysisResponse(
+    result = AnnouncementAnalysisResponse(
         has_announcement=True,
         announcement_title=announcement_title,
         official_facts=official_facts,
@@ -723,3 +759,5 @@ async def get_announcement_analysis(
         has_similar_case_data=False,
         source_document_names=names,
     )
+    await project_repo.update_project(project_id, {"announcement_analysis_cache": result.model_dump()})
+    return result

@@ -24,6 +24,21 @@ export async function uploadDocument(projectId, file, sourceType = 'pdf', docume
   return data
 }
 
+// 가은/Claude(2026-07-21): 실측 요청 — /board에서 URL/파일로 잘못 올린 공고문·평가기준
+// 문서를 지울 수 있게. Chroma 벡터 청크까지 같이 정리되는 DELETE /documents/{project_id}
+// /{document_id}(신규)를 호출한다.
+export async function deleteDocument(projectId, documentId) {
+  const res = await fetch(`${API_BASE_URL}/documents/${projectId}/${documentId}`, {
+    method: 'DELETE',
+    headers: { ...authHeaders() },
+  })
+  const data = await res.json()
+  if (!res.ok) {
+    throw new Error(data.detail || '문서를 삭제하지 못했습니다.')
+  }
+  return data
+}
+
 // 가은/Claude(2026-07-16): StepSidebar에서 진행 중이던 프로젝트로 "이어서" 업로드 화면에
 // 돌아올 수 있게 하면서 필요해짐 — 이미 업로드된 문서 목록을 다시 불러와 화면에 채운다.
 export async function getDocuments(projectId) {
