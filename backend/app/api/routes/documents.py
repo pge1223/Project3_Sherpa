@@ -662,12 +662,23 @@ async def get_announcement_analysis(
     authorization: Optional[str] = Header(None, alias="authorization"),
 ):
     user_email = get_current_user(authorization)
-    await verify_project_owner(project_id, user_email)
+    project = await verify_project_owner(project_id, user_email)
+
+    # 가은/Claude(2026-07-21): dynamic_rubric_mapping과 동일한 "프로젝트당 1회 계산 후
+    # 캐시" 패턴 — 재방문마다 다시 LLM을 부르지 않는다. 공고문을 나중에 추가/교체해도
+    # 자동으로는 무효화하지 않는다(캐시 기준: "이 프로젝트에서 한 번이라도 분석한 적
+    # 있는가") — 재분석이 필요하면 지금은 프로젝트를 새로 만들어야 한다.
+    cached = project.get("announcement_analysis_cache")
+    if cached:
+        logger.info("[announcement-analysis] project_id=%s 캐시된 분석 결과 재사용", project_id)
+        return AnnouncementAnalysisResponse(**cached)
 
     text, names = await _load_criteria_documents_text(project_id)
     if not text.strip():
         # 가은/Claude(2026-07-21): 공고문을 하나도 안 넣었으면 LLM을 호출하지 않는다 —
         # "정보 없음"을 지어내는 것보다 화면에서 그 상태 자체를 명시적으로 보여준다.
+        # has_announcement: false는 "아직 없음"이라 캐시하지 않는다 — 공고문을 나중에
+        # 추가하면 그때는 실제로 분석해야 하기 때문.
         return AnnouncementAnalysisResponse(has_announcement=False)
 
     prompt = _build_announcement_analysis_prompt(text)
@@ -714,7 +725,7 @@ async def get_announcement_analysis(
 
     announcement_title = str(parsed.get("announcement_title") or "").strip() if isinstance(parsed, dict) else ""
 
-    return AnnouncementAnalysisResponse(
+    result = AnnouncementAnalysisResponse(
         has_announcement=True,
         announcement_title=announcement_title,
         official_facts=official_facts,
@@ -723,3 +734,5 @@ async def get_announcement_analysis(
         has_similar_case_data=False,
         source_document_names=names,
     )
+    await project_repo.update_project(project_id, {"announcement_analysis_cache": result.model_dump()})
+    return result

@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import {
   Link2, Upload, FileText, Sparkles,
   CheckCircle2, Circle, AlertCircle, Send, Award, Target, ShieldCheck,
-  ArrowRight, TrendingUp, ChevronDown, ChevronUp, Calendar,
+  ArrowRight, TrendingUp, ChevronDown, ChevronUp, Calendar, FolderOpen,
 } from "lucide-react";
 import { createProject } from "../../api/projectApi";
 import {
@@ -51,6 +51,7 @@ const ANALYZE_POLL_INTERVAL_MS = 1000
 
 function Shell({ children, active, mode, onNavigate, showNav }) {
   const flow = mode ? FLOW_BY_MODE[mode] : ["entry"];
+  const navigate = useNavigate();
 
   return (
     <div className="rb-root">
@@ -97,13 +98,21 @@ function Shell({ children, active, mode, onNavigate, showNav }) {
         .rb-root .card{ border-radius:16px; padding:20px; }
         .rb-root .progress-track{ height:8px; border-radius:999px; background:var(--bg-2); overflow:hidden; }
         .rb-root .progress-fill{ height:100%; border-radius:999px; background:linear-gradient(135deg, var(--purple), #8b6ef0); transition:width .5s ease; }
+        .rb-root .rb-my-projects{ position:fixed; top:20px; right:24px; z-index:10; display:flex; align-items:center; gap:6px; }
         @media (max-width: 780px){
+          .rb-root .rb-my-projects{ top:10px; right:12px; padding:8px 12px; font-size:12px; }
           .rb-root{ flex-direction:column; }
           .rb-root .navrail{ display:none; }
           .rb-root .main{ padding:20px; }
           .rb-grid-2{ grid-template-columns: 1fr !important; }
         }
       `}</style>
+
+      {/* 가은/Claude(2026-07-21): 기존 /projects 페이지(레거시 스타일 그대로 유지)로
+          돌아갈 수 있는 진입점 — 버튼 자체만 board 톤(glass/badge 스타일)으로 맞춘다. */}
+      <button className="rb-my-projects btn-ghost mono" onClick={() => navigate('/projects')}>
+        <FolderOpen size={14} /> 내 프로젝트
+      </button>
 
       {showNav && (
         <div className="navrail glass">
