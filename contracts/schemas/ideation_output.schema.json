@@ -1,0 +1,155 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://review-board.local/contracts/ideation_output.schema.json",
+  "title": "AI Review Board Ideation Meeting Output",
+  "$comment": "초안 v1.0.0 (용준/Claude, 2026-07-20) — 가은/경이 검토 전. '아이디어 발전 회의(ideation)' 모드 전용 계약이며 review_output.schema.json(v2.2.0, 심사형 회의)과는 완전히 분리된 별도 파일이다. 기존 계약에는 아무 필드도 추가하거나 변경하지 않았다. 배경: 심사형 그래프는 위원이 완전 병렬로 실행돼 서로의 발언을 못 읽지만(ai/meeting/graph/build.py), ideation 그래프(ai/meeting/graph/ideation_build.py)는 기획/개발 전문가가 순차로 실행되며 라운드를 반복하고 회의 중 사용자 질문으로 멈출 수 있어(status=awaiting_user) 기존 reviewerResult/chairSummary(점수 중심, additionalProperties:false) 구조로는 표현할 수 없다.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "meeting_id", "project_id", "status", "round", "max_round", "turns"],
+  "properties": {
+    "schema_version": { "type": "string", "enum": ["1.0.0"] },
+    "meeting_id": { "type": "string", "minLength": 1 },
+    "project_id": { "type": "string", "minLength": 1 },
+    "status": {
+      "type": "string",
+      "enum": ["in_progress", "awaiting_user", "completed", "failed"]
+    },
+    "round": { "type": "integer", "minimum": 1 },
+    "max_round": { "type": "integer", "minimum": 1 },
+    "turns": { "type": "array", "items": { "$ref": "#/$defs/meetingTurn" } },
+    "consensus": { "type": "array", "items": { "type": "string" } },
+    "unresolved_issues": { "type": "array", "items": { "type": "string" } },
+    "pending_question": { "type": ["string", "null"] },
+    "idea_proposal": { "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/ideaProposal" }] },
+    "error": { "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/error" }] }
+  },
+  "$defs": {
+    "evidenceRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["quote"],
+      "properties": {
+        "document_id": { "type": ["string", "null"] },
+        "document_name": { "type": ["string", "null"] },
+        "chunk_id": { "type": ["string", "null"] },
+        "page": { "type": ["integer", "null"], "minimum": 1 },
+        "section": { "type": ["string", "null"] },
+        "quote": { "type": "string" },
+        "relevance": { "type": ["string", "null"] }
+      }
+    },
+    "meetingTurn": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "speaker_id",
+        "speaker_name",
+        "role",
+        "round",
+        "topic",
+        "stance",
+        "summary",
+        "observations",
+        "proposals",
+        "risks",
+        "questions_for_expert",
+        "questions_for_user",
+        "evidence",
+        "unresolved_issues"
+      ],
+      "properties": {
+        "speaker_id": { "type": "string" },
+        "speaker_name": { "type": "string" },
+        "role": { "type": "string" },
+        "round": { "type": "integer", "minimum": 1 },
+        "topic": { "type": "string" },
+        "stance": {
+          "type": "string",
+          "enum": ["동의", "조건부_동의", "반박", "보완", "대안_제시", "사용자에게_질문"]
+        },
+        "summary": { "type": "string" },
+        "observations": { "type": "array", "items": { "type": "string" } },
+        "proposals": { "type": "array", "items": { "type": "string" } },
+        "risks": { "type": "array", "items": { "type": "string" } },
+        "questions_for_expert": { "type": "array", "items": { "type": "string" } },
+        "questions_for_user": { "type": "array", "items": { "type": "string" } },
+        "evidence": { "type": "array", "items": { "$ref": "#/$defs/evidenceRef" } },
+        "unresolved_issues": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "riskMitigation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["risk", "mitigation"],
+      "properties": {
+        "risk": { "type": "string" },
+        "mitigation": { "type": "string" }
+      }
+    },
+    "criteriaAlignment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["criterion", "response"],
+      "properties": {
+        "criterion": { "type": "string" },
+        "response": { "type": "string" }
+      }
+    },
+    "ideaProposal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "idea_name",
+        "one_line_pitch",
+        "problem_definition",
+        "target_users",
+        "core_value",
+        "solution",
+        "key_features",
+        "usage_scenario",
+        "differentiation",
+        "mvp_scope",
+        "tech_and_data",
+        "expected_impact",
+        "kpis",
+        "risks_and_mitigations",
+        "criteria_alignment",
+        "expert_consensus",
+        "unresolved_issues",
+        "user_decisions_needed",
+        "next_actions"
+      ],
+      "properties": {
+        "idea_name": { "type": "string" },
+        "one_line_pitch": { "type": "string" },
+        "problem_definition": { "type": "string" },
+        "target_users": { "type": "string" },
+        "core_value": { "type": "string" },
+        "solution": { "type": "string" },
+        "key_features": { "type": "array", "items": { "type": "string" } },
+        "usage_scenario": { "type": "string" },
+        "differentiation": { "type": "string" },
+        "mvp_scope": { "type": "array", "items": { "type": "string" } },
+        "tech_and_data": { "type": "string" },
+        "expected_impact": { "type": "string" },
+        "kpis": { "type": "array", "items": { "type": "string" } },
+        "risks_and_mitigations": { "type": "array", "items": { "$ref": "#/$defs/riskMitigation" } },
+        "criteria_alignment": { "type": "array", "items": { "$ref": "#/$defs/criteriaAlignment" } },
+        "expert_consensus": { "type": "array", "items": { "type": "string" } },
+        "unresolved_issues": { "type": "array", "items": { "type": "string" } },
+        "user_decisions_needed": { "type": "array", "items": { "type": "string" } },
+        "next_actions": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message"],
+      "properties": {
+        "code": { "type": "string" },
+        "message": { "type": "string" },
+        "details": { "type": ["object", "null"] }
+      }
+    }
+  }
+}

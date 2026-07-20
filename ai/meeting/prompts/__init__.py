@@ -4,6 +4,9 @@
 
 from .prompt_loader import (
     build_chair_prompt,
+    build_ideation_facilitator_prompt,
+    build_ideation_synthesis_prompt,
+    build_ideation_turn_prompt,
     build_reviewer_prompt,
     get_persona_card,
     load_persona_cards,
@@ -13,6 +16,9 @@ from .prompt_loader import (
 
 __all__ = [
     "build_chair_prompt",
+    "build_ideation_facilitator_prompt",
+    "build_ideation_synthesis_prompt",
+    "build_ideation_turn_prompt",
     "build_reviewer_prompt",
     "get_persona_card",
     "load_persona_cards",
