@@ -158,7 +158,27 @@ class TestFindExecutable:
             assert find_executable(None) == "/usr/bin/soffice"
 
     def test_none_when_nothing_found(self):
-        with patch("ai.rag.converters.hwp_pdf_converter.shutil.which", return_value=None):
+        with patch("ai.rag.converters.hwp_pdf_converter.shutil.which", return_value=None), patch(
+            "ai.rag.converters.hwp_pdf_converter._WINDOWS_DEFAULT_INSTALL_PATHS", ()
+        ):
+            assert find_executable(None) is None
+
+    def test_windows_default_install_path_used_as_last_resort(self, tmp_path):
+        """PATH에 없어도 흔한 Windows 기본 설치 경로에 실제 파일이 있으면 그걸 찾아야 한다
+        (winget/공식 인스톨러는 기본적으로 PATH에 soffice를 추가하지 않는다)."""
+        fake_default_install = tmp_path / "soffice.exe"
+        fake_default_install.write_text("")
+        with patch("ai.rag.converters.hwp_pdf_converter.shutil.which", return_value=None), patch(
+            "ai.rag.converters.hwp_pdf_converter._WINDOWS_DEFAULT_INSTALL_PATHS",
+            (str(fake_default_install),),
+        ):
+            assert find_executable(None) == str(fake_default_install)
+
+    def test_windows_default_install_path_skipped_when_missing(self, tmp_path):
+        with patch("ai.rag.converters.hwp_pdf_converter.shutil.which", return_value=None), patch(
+            "ai.rag.converters.hwp_pdf_converter._WINDOWS_DEFAULT_INSTALL_PATHS",
+            (str(tmp_path / "does_not_exist.exe"),),
+        ):
             assert find_executable(None) is None
 
 
@@ -197,7 +217,9 @@ class TestConvertValidation:
     def test_executable_not_found_raises_unavailable(self, tmp_path):
         source = _write_fake_hwp(tmp_path / "a.hwp")
         converter = HwpPdfConverter(config=_config(executable_path=None))
-        with patch("ai.rag.converters.hwp_pdf_converter.shutil.which", return_value=None):
+        with patch("ai.rag.converters.hwp_pdf_converter.shutil.which", return_value=None), patch(
+            "ai.rag.converters.hwp_pdf_converter._WINDOWS_DEFAULT_INSTALL_PATHS", ()
+        ):
             with pytest.raises(ConverterUnavailableError):
                 converter.convert(source)
 

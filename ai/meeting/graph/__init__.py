@@ -11,6 +11,12 @@ from .rubric import build_dynamic_rubric_mapping, build_rubric, build_routing
 from .run import run_chair_phase, run_meeting
 from .state import MeetingState, MeetingStage, initial_state
 
+# 용준/Claude(2026-07-20): "아이디어 발전 회의(ideation)" 모드 — 기존 심사형 회의(위 import들)와
+# 완전히 분리된 병렬 서브시스템. 기존 export는 하나도 건드리지 않았다.
+from .ideation_build import assemble_ideation_graph
+from .ideation_run import continue_ideation_meeting, start_ideation_meeting
+from .ideation_state import IdeationStage, IdeationState, initial_ideation_state, resume_ideation_state
+
 __all__ = [
     "MeetingState",
     "MeetingStage",
@@ -25,4 +31,11 @@ __all__ = [
     "rerun_reviewer",
     "run_chair_phase",
     "run_meeting",
+    "IdeationState",
+    "IdeationStage",
+    "assemble_ideation_graph",
+    "continue_ideation_meeting",
+    "initial_ideation_state",
+    "resume_ideation_state",
+    "start_ideation_meeting",
 ]
