@@ -17,7 +17,17 @@ router = APIRouter(prefix="/media", tags=["media"])
 # 팀원마다 순차적으로 준비될 예정이라, 여기 없는 speaker_id는 프론트가
 # 립싱크 영상 생성을 시도하지 않고 무한루프 영상+TTS로 폴백한다
 # (media_stream.schema.md §2 참고 — 이것도 팀 동의 필요한 제안).
-AVAILABLE_SPEAKER_IDS = ["business_strategy"]
+# 재인/Claude(2026-07-17): 2번째 아바타(technical_feasibility) 영상 세트까지
+# musetalk_setup_v2.ipynb에서 제스처 포함 검증 완료 - 2명으로 확장.
+# 재인/Claude(2026-07-18): persona_c/persona_d 2명 추가 - 4명으로 확장. 이 둘은 실제
+# 위원 persona_id가 아니라 CommitteeVideoStage.jsx의 AVATAR_SLOTS와 짝을 이루는
+# 얼굴·목소리 전용 식별자다(순서 기반 동적 배정 - 어떤 위원이든 먼저 말하는 순서대로
+# 이 슬롯을 빌려쓴다).
+# 재인/Claude(2026-07-19): 4명 전원 제스처 영상(_1/_2)까지 준비 완료 - 프론트가 매
+# 발화마다 gesture_index(0~2)를 직전 값 제외 랜덤으로 골라 보낸다(CommitteeVideoStage.jsx
+# pickGestureIndex 참고). 이 중계 라우터는 요청 JSON을 그대로 업스트림에 전달만 하므로
+# gesture_index를 포함해 별도 처리 불필요.
+AVAILABLE_SPEAKER_IDS = ["business_strategy", "technical_feasibility", "persona_c", "persona_d"]
 
 
 @router.get("/available-speakers")
@@ -48,7 +58,17 @@ async def media_stream(client_ws: WebSocket):
     print(f"[media] 업스트림 연결 시도: {upstream_url}", flush=True)
 
     try:
-        async with websockets.connect(upstream_url, max_size=None) as upstream_ws:
+        # 재인/Claude(2026-07-19): ping_interval=None으로 자동 핑퐁 keepalive를 껐다 -
+        # 원래는 20초마다 핑을 보내고 응답 없으면 연결을 끊는데, 코랩은 GIL 특성상
+        # GPU 추론(스레드)이 도는 동안 이벤트 루프가 핑에 응답할 틈을 못 얻는 경우가
+        # 실제로 있었다(위원 여러 명이 겹쳐서 코랩이 바빠질수록 심해짐). 이 "바쁨"을
+        # "죽음"으로 오판해서 아직 발화 중인 위원의 연결을 강제로 끊어버리는 버그를
+        # 실측 확인했다(발화 20~30초 넘는 위원에서 재현). 어차피 우리는 실제 데이터
+        # (영상 프레임/status/tts_end/done 메시지)가 계속 오는지로 연결 상태를 판단할
+        # 수 있어서 별도의 핑퐁 생존 확인이 필요 없다 - 진짜 연결이 끊기면(터널 끊김,
+        # 코랩 세션 종료 등) 데이터 자체가 안 오거나 TCP 레벨에서 결국 예외가 나서
+        # 여전히 감지된다.
+        async with websockets.connect(upstream_url, max_size=None, ping_interval=None) as upstream_ws:
             print("[media] 업스트림(Colab) 연결 성공", flush=True)
             # 1. 프론트가 보낸 요청(mediaLine)을 그대로 MuseTalk 서버로 전달
             request_text = await client_ws.receive_text()
