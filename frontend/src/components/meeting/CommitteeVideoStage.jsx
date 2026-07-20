@@ -84,6 +84,11 @@ const PAUSE_THRESHOLD = 0.15
 // 짧게 끝나면(즉 자연 종료가 더 빠르면) 이 값과 상관없이 자연 종료 시점에 넘어간다
 // - 이 값 때문에 지금보다 느려지는 경우는 없다(streamLine()의 timeGateOk 참고).
 const NEXT_AVATAR_MIN_GAP_MS = 2000
+// 재인/Claude(2026-07-19): 위원 1명당 코랩 PERSONA_MAP의 video_paths가 [rf, 제스처1,
+// 제스처2] 3개로 고정돼 있다는 전제(AVATAR_SLOTS와 마찬가지로 사람이 수동 동기화해야
+// 하는 값 - 영상 개수가 바뀌면 여기도 같이 고쳐야 함). 매 발화마다 이 중 하나를
+// 골라 gesture_index로 보내서 매번 같은 자세로만 말하지 않게 한다.
+const GESTURE_INDICES = [0, 1, 2]
 
 // 아바타 얼굴·목소리 자산(코랩 PERSONA_MAP에 등록된 ID) + 대기 루프 영상. 슬롯
 // 순서(0번=persona_a, 1번=persona_b, ...)가 "이번 회의에서 몇 번째로 등장하는
@@ -107,6 +112,13 @@ function lineDurationMs(text) {
   return Math.min(9000, Math.max(3200, (text || '').length * 90))
 }
 
+// 재인/Claude(2026-07-19): 위원 3명 이상 겹쳐서 발화하는 상황(대화형 피드백)에서
+// 화면이 어긋나는 버그를 조사하려고 임시로 추가 - 게이트/reveal/종료 시점을 전부
+// 타임스탬프와 함께 찍는다. 원인 확정되면 지우거나 필요한 것만 남길 것.
+function gateLog(...args) {
+  console.log('[CVS:gate]', new Date().toISOString().slice(11, 23), ...args)
+}
+
 // mediaLines(mediaLine 배열)를 순서대로 전부 재생한다. 아바타 창이 있는 위원은 그
 // 위원의 전용 창에 실제 스트리밍이 얹히고, 창이 없는 위원은 영상 없이 자막만 잠깐
 // 보여준다(텍스트 자체는 어차피 아래 채팅 목록에도 항상 보인다).
@@ -126,6 +138,9 @@ const CommitteeVideoStage = forwardRef(function CommitteeVideoStage({ mediaLines
   const monitorTimersRef = useRef({}) // speakerId -> intervalId
   const tokensRef = useRef({}) // speakerId -> 마지막으로 발급한 토큰 번호
   const activeCleanupsRef = useRef({}) // speakerId -> WebSocket을 닫는 함수
+  // speakerId -> 직전 발화에 썼던 gesture_index. 세션(컴포넌트 생존) 내내 유지 -
+  // 같은 위원이 매번 같은 자세로만 말하지 않도록, 다음 발화 땐 이 값만 제외하고 고른다.
+  const lastGestureIndexRef = useRef({})
   // holdForReading(아바타 창 없는 위원)은 위원별 자원이 없으니 별도의 단일 토큰으로 관리.
   const holdTokenRef = useRef(0)
   const holdTimerRef = useRef(null)
@@ -192,6 +207,16 @@ const CommitteeVideoStage = forwardRef(function CommitteeVideoStage({ mediaLines
   }
 
   useImperativeHandle(ref, () => ({ enqueueLines }), [])
+
+  // 직전에 이 위원이 썼던 gesture_index만 제외하고 나머지 중 랜덤으로 하나 고른다.
+  // 처음 발화(직전 값 없음)면 전체 후보 중에서 고른다.
+  function pickGestureIndex(speakerKey) {
+    const last = lastGestureIndexRef.current[speakerKey]
+    const options = GESTURE_INDICES.filter((i) => i !== last)
+    const choice = options[Math.floor(Math.random() * options.length)]
+    lastGestureIndexRef.current[speakerKey] = choice
+    return choice
+  }
 
   // 대기 루프는 마운트 시 딱 한 번만 세팅한다 - 이후로는 src도, play()도 다시
   // 건드리지 않는다(컴포넌트가 살아있는 내내 뒤에서 계속 돎).
@@ -335,7 +360,7 @@ const CommitteeVideoStage = forwardRef(function CommitteeVideoStage({ mediaLines
           // 아무 진행도 안 되는 상태로 멈춘다.
           clearInterval(monitorTimersRef.current[speakerKey])
           setStatusTextMap((prev) => ({ ...prev, [speakerKey]: '영상 스트림 오류 - 건너뜀' }))
-          finish()
+          finish('sourcebuffer-invalid')
           return
         }
         // 재인/Claude(2026-07-19): tts_end로 받은 "몇 초 지점부터 tail인지"를 실제
@@ -350,7 +375,9 @@ const CommitteeVideoStage = forwardRef(function CommitteeVideoStage({ mediaLines
           // owner 체크: 내가 지금도 게이트 주인일 때만 연다 - 이론상 내가 reveal된
           // 이후로 게이트 주인은 항상 나였어야 하지만(다음 위원은 내가 열어줘야만
           // 넘어갈 수 있으므로), 방어적으로 동일하게 체크한다.
-          if (transitionGateRef.current.owner === speakerKey) {
+          const ownerMatch = transitionGateRef.current.owner === speakerKey
+          gateLog('speechEndApplied', speakerKey, 'currentTime=', video.currentTime.toFixed(2), 'speechEndVideoTime=', speechEndVideoTime, 'ownerMatch=', ownerMatch, 'currentOwner=', transitionGateRef.current.owner)
+          if (ownerMatch) {
             transitionGateRef.current = { readyAt: Date.now() + NEXT_AVATAR_MIN_GAP_MS, forceReady: false, owner: speakerKey }
           }
         }
@@ -368,6 +395,7 @@ const CommitteeVideoStage = forwardRef(function CommitteeVideoStage({ mediaLines
                 // 앞서 있던(A 등) 늦게 끝나는 위원의 finish()가 이 게이트를 더 이상
                 // 못 건드리게 한다(finish()의 owner 체크 참고).
                 transitionGateRef.current = { readyAt: Infinity, forceReady: false, owner: speakerKey }
+                gateLog('REVEAL', speakerKey, 'ahead=', ahead.toFixed(2), 'newOwner=', speakerKey)
                 onReveal?.()
                 advanceQueueOnce() // 화면에 뜨기 시작한 순간, 다음 위원 요청을 미리 보내도록 큐 진행
               }
@@ -408,11 +436,54 @@ const CommitteeVideoStage = forwardRef(function CommitteeVideoStage({ mediaLines
         })
       }
 
-      function finish() {
+      function finish(reason) {
+        gateLog('finish', speakerKey, 'reason=', reason, 'revealed=', revealed, 'owner=', transitionGateRef.current.owner)
         video.removeEventListener('ended', onEnded)
         if (activeCleanupsRef.current[speakerKey] === closeWs) activeCleanupsRef.current[speakerKey] = null
-        setRevealedMap((prev) => (prev[speakerKey] ? { ...prev, [speakerKey]: false } : prev))
-        setSpeakingMap((prev) => (prev[speakerKey] ? { ...prev, [speakerKey]: false } : prev))
+        // 재인/Claude(2026-07-19): stream(립싱크)에서 idle(무한루프)로 돌아가는 순간,
+        // idle은 마운트 이후로 한 번도 안 건드리고 자기 시계대로 계속 돌고 있었기 때문에
+        // "지금 몇 프레임째인지"가 stream이 끝난 자세와 우연히 맞아떨어질 확률이 낮다 -
+        // 그래서 자세가 툭 튀어 보이는 이음매 문제가 있었다. stream의 tail은 코랩에서
+        // idle과 같은 원본 영상의 "루프 마지막 프레임"에서 끝나도록 만들어져 있어서
+        // (run_inference_sync의 tail 로직 참고), 그다음 자연스럽게 이어지는 지점은
+        // idle의 0번 프레임이다.
+        //
+        // 화면 전환(stream 숨기고 idle 보여주기)은 idle을 0번으로 옮기자마자 하지 않고,
+        // 브라우저가 "진짜로 다 옮겼다"고 확인해주는 seeked 이벤트를 기다렸다가 한다 -
+        // 그 사이엔 stream이 마지막 프레임에 멈춘 채로 계속 보이고 있어서(이미 재생이
+        // 끝난 상태) 화면이 비는 순간이 없다. seeked가 어떤 이유로든 안 오는 경우를
+        // 대비해 300ms 타임아웃도 안전장치로 둔다 - idle이 안 보이는 상태에서 벌어지는
+        // seek이라(opacity:0) 설령 그 순간 내부적으로 잠깐 프레임이 비어도 화면엔 안
+        // 보인다. play()를 다시 부르는 게 아니라 currentTime만 옮기는 거라 크롬
+        // 전력절약 정책(play() 거부) 재발 위험도 없다.
+        function revealIdleAndCleanup() {
+          setRevealedMap((prev) => (prev[speakerKey] ? { ...prev, [speakerKey]: false } : prev))
+          setSpeakingMap((prev) => (prev[speakerKey] ? { ...prev, [speakerKey]: false } : prev))
+        }
+        if (revealed) {
+          const idleVideo = videoRefs.current[speakerKey]?.idle
+          if (idleVideo) {
+            let swapDone = false
+            const doSwap = () => {
+              if (swapDone) return
+              swapDone = true
+              clearTimeout(swapTimeoutId)
+              idleVideo.removeEventListener('seeked', doSwap)
+              revealIdleAndCleanup()
+            }
+            const swapTimeoutId = setTimeout(doSwap, 300)
+            idleVideo.addEventListener('seeked', doSwap)
+            try {
+              idleVideo.currentTime = 0
+            } catch (e) {
+              doSwap() // seek 자체가 실패하면 기다릴 것 없이 바로 전환
+            }
+          } else {
+            revealIdleAndCleanup()
+          }
+        } else {
+          revealIdleAndCleanup()
+        }
         // 내가 화면을 넘겨받았던 적이 있다면(revealed) 이제 완전히 끝났으니 다음
         // 위원을 즉시 통과시킨다 - tts_end로 이미 +2초 타이머가 걸려있었더라도, 자연
         // 종료가 그보다 먼저 왔다는 뜻이므로 더 기다릴 이유가 없다(정확히 이게 tail이
@@ -434,19 +505,21 @@ const CommitteeVideoStage = forwardRef(function CommitteeVideoStage({ mediaLines
 
       function onEnded() {
         if (isStale()) return
-        finish()
+        finish('video-ended')
       }
       video.addEventListener('ended', onEnded)
       function onVideoError() {
         if (isStale()) return
         const err = video.error
         // MediaError.code: 1=ABORTED 2=NETWORK 3=DECODE 4=SRC_NOT_SUPPORTED
+        gateLog('video-error', speakerKey, 'code=', err && err.code, 'message=', err && err.message)
         console.error(
           `[CommitteeVideoStage] video error 이벤트 - code=${err && err.code} message="${err && err.message}"`,
         )
       }
       video.addEventListener('error', onVideoError)
 
+      gateLog('streamLine-start', speakerKey, 'gate=', { ...transitionGateRef.current })
       const ws = openMediaStreamSocket()
       function closeWs() {
         try {
@@ -472,6 +545,7 @@ const CommitteeVideoStage = forwardRef(function CommitteeVideoStage({ mediaLines
             order: line.order,
             text: line.text,
             emotion: line.emotion,
+            gesture_index: pickGestureIndex(speakerKey),
           }),
         )
       }
@@ -492,7 +566,8 @@ const CommitteeVideoStage = forwardRef(function CommitteeVideoStage({ mediaLines
             maybeEndStream()
           } else if (msg.type === 'error') {
             setStatusTextMap((prev) => ({ ...prev, [speakerKey]: '에러: ' + msg.message }))
-            finish()
+            gateLog('ws-error-message', speakerKey, msg.message)
+            finish('ws-error-message')
           }
         } else {
           if (!switched) switchToStream()
@@ -503,7 +578,8 @@ const CommitteeVideoStage = forwardRef(function CommitteeVideoStage({ mediaLines
       ws.onerror = () => {
         if (!isStale()) {
           setStatusTextMap((prev) => ({ ...prev, [speakerKey]: '연결 에러' }))
-          finish()
+          gateLog('ws-onerror', speakerKey)
+          finish('ws-onerror')
         }
       }
     })
@@ -549,6 +625,7 @@ const CommitteeVideoStage = forwardRef(function CommitteeVideoStage({ mediaLines
 
         setActiveBatch(batch)
         // 새 배치의 첫 위원은 기다릴 대상이 없으니 게이트를 즉시 통과 상태로 리셋.
+        gateLog('batch-start', 'speakers=', batch.map((l) => l.speaker_id), 'gateBefore=', { ...transitionGateRef.current })
         transitionGateRef.current = { readyAt: 0, forceReady: true, owner: null }
         for (let i = 0; i < batch.length; i++) {
           if (cancelled) return

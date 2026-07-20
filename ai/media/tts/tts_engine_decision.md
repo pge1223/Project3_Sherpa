@@ -55,7 +55,7 @@ ElevenLabs로 틀었다. (Zonos 관련 상세 진단은 `docs/devlogs/lji-devlog
 - OpenAI 대비 순수 TTS 속도가 확실히 빠름(1.5~2배) — 다만 실측 결과 **전체 체감 속도의 진짜 병목은 TTS가 아니라 MuseTalk 프레임 생성 자체**(전체 소요의 80%+)였다는 것도 같이 확인됨. TTS 교체만으로 큰 속도 개선을 기대하긴 어렵지만, 품질이 만족스럽고 어차피 개선되는 부분이라 채택
 - `eleven_flash_v2_5`(4~7.5배 더 빠름)가 있었지만 실제 립싱크 붙여서 들어보니 음질이 조금씩 깨져서 기각 — 속도보다 품질 우선
 - Zonos 계열은 로컬/무료라는 장점은 있지만 라이브러리 자체 버그가 많고(디바이스 mismatch, torchcodec 의존성) 한국어 지원 신뢰도가 낮아 채택 안 함 — 완전히 접은 건 아니고 보류 상태
-- 위원 아바타가 2명 → 4명으로 늘어나면서 보이스도 4개 필요 — Voice Library(Kelee K, Theo, Gihong, Han)에서 선택. 위원 B는 원래 Yohan Koo였다가 청취 피드백으로 Theo로 재변경
+- 위원 아바타가 2명 → 4명으로 늘어나면서 보이스도 4개 필요 — Voice Library(Kelee K, Harry, Gihong, Han)에서 선택. 위원 B는 Yohan Koo → Theo → Harry(Inciting, Soft and Steady) 순으로 재변경(2026-07-19)
 
 **비용 관련 참고:** OpenAI TTS와 달리 별도 유료 구독(월 $22, Creator 플랜)이 필요 — 팀 공유 계정이 아니라 재인 개인 결제로 우선 진행. 사용량이 늘면 플랜 상향 또는 팀 예산 논의 필요할 수 있음.
 

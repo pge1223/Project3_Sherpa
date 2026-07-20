@@ -13,10 +13,10 @@
     },
     "technical_feasibility": {
       "persona_slot": "persona_b",
-      "voice_id": "CxErO97xpQgQXYmapDKX",
-      "voice_name": "Theo - Warm, Smooth and Soft",
+      "voice_id": "fLvpMIGwcTmxzsUF4z1U",
+      "voice_name": "Harry - Inciting, Soft and Steady",
       "gender": "male",
-      "note": "위원 B. 처음엔 Yohan Koo로 골랐다가 청취 후 음질/톤 피드백으로 Theo로 재변경. 기존 OpenAI voice_id(cedar)에서 교체, 성별은 유지"
+      "note": "위원 B. Yohan Koo -> Theo -> Harry로 재변경(2026-07-19). 기존 OpenAI voice_id(cedar)에서 교체, 성별은 유지"
     },
     "persona_c": {
       "persona_slot": "persona_c",
