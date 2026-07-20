@@ -80,7 +80,7 @@ function Shell({ children, active, mode, onNavigate, showNav }) {
           --mono: 'JetBrains Mono', ui-monospace, monospace;
         }
         .rb-root{
-          min-height:100vh; width:100%;
+          position:relative; min-height:100vh; width:100%;
           background:
             radial-gradient(1100px 600px at 12% -10%, rgba(124,92,234,0.10), transparent 60%),
             radial-gradient(900px 500px at 100% 10%, rgba(22,163,122,0.07), transparent 55%),
@@ -110,7 +110,7 @@ function Shell({ children, active, mode, onNavigate, showNav }) {
         .rb-root .card{ border-radius:16px; padding:20px; }
         .rb-root .progress-track{ height:8px; border-radius:999px; background:var(--bg-2); overflow:hidden; }
         .rb-root .progress-fill{ height:100%; border-radius:999px; background:linear-gradient(135deg, var(--purple), #8b6ef0); transition:width .5s ease; }
-        .rb-root .rb-my-projects{ position:fixed; top:20px; right:24px; z-index:10; display:flex; align-items:center; gap:6px; }
+        .rb-root .rb-my-projects{ position:absolute; top:20px; right:24px; z-index:10; display:flex; align-items:center; gap:6px; }
         @media (max-width: 780px){
           .rb-root .rb-my-projects{ top:10px; right:12px; padding:8px 12px; font-size:12px; }
           .rb-root{ flex-direction:column; }
