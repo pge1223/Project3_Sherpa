@@ -71,3 +71,19 @@ export async function getDocumentStatus(projectId, documentId) {
   }
   return data
 }
+
+// 가은/Claude(2026-07-21): "공모전 분석" 화면(ReviewBoardPrototype.jsx) — 이미 수집된
+// criteria 문서(공고문)를 근거로 official_facts(공고문에 실제 있는 사실)/
+// strategic_analysis(AI 추론)/evidence를 분리해서 받는다. 공고문을 하나도 안 넣었으면
+// has_announcement: false만 오고 LLM은 호출되지 않는다(백엔드에서 지어내지 않음).
+export async function getAnnouncementAnalysis(projectId) {
+  const res = await fetch(`${API_BASE_URL}/documents/${projectId}/announcement-analysis`, {
+    method: 'POST',
+    headers: { ...authHeaders() },
+  })
+  const data = await res.json()
+  if (!res.ok) {
+    throw new Error(data.detail || '공고문 분석을 불러오지 못했습니다.')
+  }
+  return data
+}
