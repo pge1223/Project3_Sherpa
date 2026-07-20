@@ -34,8 +34,8 @@
    documents.py의 기존 RAGIndexingService 인스턴스를 재사용한다(KUREEmbedder 중복 로딩
    방지). **domain="government_support"는 role_mapping.py 매핑이 없어 500으로 막힌다**
    (아래 [아직 협의가 필요한 것] 참고).
-6. llm_call은 실제 OpenAI 호출이다(_build_real_llm_call). LLM_PROFILE=dev가 기본값이라
-   gpt-5-nano로 도는데, 값을 quality로 바꾸면 gpt-5-mini로 바뀐다(backend/.env). 호출
+6. llm_call은 실제 OpenAI 호출이다(_build_real_llm_call). LLM_PROFILE=dev/quality 둘 다
+   기본값은 gpt-4o-mini다(backend/app/config.py, backend/.env로 프로필별 개별 재정의 가능). 호출
    상한(_MAX_LLM_CALLS_PER_MEETING)과 recursion_limit을 걸어 루프/재시도 폭주를 막았다
    (이 세션에서 LangGraph e2e 테스트할 때 사용자가 명시적으로 요구한 안전장치와 동일).
 7. 결과는 MeetingModel/MeetingRepository(MTG-005)로 저장하는데, 이번엔 committee/
@@ -698,6 +698,11 @@ def _build_followup_prompt(
 아래는 그 결과입니다. 사용자가 결과에 대해 후속 질문을 하면, 이미 나온 위원 의견과
 위원장 종합만 근거로 답하세요. 문서나 위원 발언에 없는 새로운 사실·점수를 지어내지
 마세요.
+
+어느 위원도 언급하지 않았고 [평가 기준 rubric]에도 없는 평가 관점·조언(예: KPI 설정,
+정량 지표 도입 같은 일반적인 스타트업 조언)을 새로 제안하지 마세요 — 이 문서·이 회의와
+무관하게 들리는 흔한 조언이라면 특히 주의하세요. 반드시 [위원별 검토 요약]이나
+[위원장 종합]에 실제로 등장한 내용에서만 답을 구성하세요.
 
 [위원장 종합]/[수정 우선순위]는 배경 참고 자료일 뿐입니다 — 그대로 옮겨 쓰지 말고, 이번
 질문의 핵심에 초점을 맞춰 답하세요. [수정 우선순위]는 이미 [이전 대화]에서 다룬 항목이
