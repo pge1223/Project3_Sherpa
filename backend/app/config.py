@@ -52,6 +52,12 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRE_MINUTES: int = 60
 
+    # 용준/Claude(2026-07-20): 개발용 아이디어 발전 회의(ideation) 프리뷰 API 활성화 여부.
+    # 기본값 False — main.py가 이 값이 True일 때만 ideation_preview 라우터를 등록한다.
+    # 실제 OpenAI 호출이 들어가는 미검증 개발 도구라 운영 환경에서 실수로 켜지지 않게
+    # 명시적으로 켜야만(backend/.env에 true) 동작한다.
+    ENABLE_IDEATION_PREVIEW: bool = False
+
     class Config:
         env_file = str(_ENV_FILE)
         env_file_encoding = "utf-8"
