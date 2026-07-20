@@ -6,9 +6,15 @@ import {
   ArrowRight, TrendingUp,
 } from "lucide-react";
 import { createProject } from "../../api/projectApi";
-import { fetchUrl as fetchCriteriaUrl, uploadDocument } from "../../api/documentApi";
+import { fetchUrl as fetchCriteriaUrl, uploadDocument, getDocumentStatus } from "../../api/documentApi";
 import { analyzeProject, getAnalyzeProgress, getMentorCandidates } from "../../api/projectApi";
 import { isAcceptedDocument, formatFileSize, ACCEPTED_DOCUMENT_EXTENSIONS } from "../../utils/file";
+import { assessCriteriaContent } from "../../utils/criteriaAssessment";
+
+// 가은/Claude(2026-07-20, INF-007): fetch-url이 색인을 백그라운드로 넘기면서
+// document_status가 "indexing"으로 오면 폴링해야 한다 — DocumentUploadPage.jsx와 동일 값.
+const _DOCUMENT_STATUS_POLL_INTERVAL_MS = 2000
+const _DOCUMENT_STATUS_POLL_MAX_ATTEMPTS = 90 // 2s * 90 = 3분
 
 /* 가은/Claude(2026-07-20): "작성 전(주제 발굴)/작성 후(문서 피드백)" 2-모드
  * 신규 플로우. docs/REVIEW_BOARD_서비스_방향성_정리_20260720.md의 방향을
@@ -117,9 +123,112 @@ function Shell({ children, active, mode, onNavigate, showNav }) {
 }
 
 /* ---------------- 1. 진입화면 : 모드 선택 + 공고 입력 ---------------- */
-function EntryScreen({ onEnter, loading, error }) {
+/* 가은/Claude(2026-07-20): 실측 버그 — "공모전 공고 URL 입력하면 안 먹어" 제보.
+ * 원인은 이 화면 URL 입력창이 그냥 텍스트 필드였고, "분석 시작"을 눌러야만(그것도
+ * 조용히 실패를 삼키며) 한 번 fetchUrl을 시도했기 때문 — 실패해도 아무 표시가
+ * 없었다. DocumentUploadPage.jsx(/projects/new)의 "기준 문서·공고문" 로직(URL 탭 +
+ * 파일 업로드 탭, 전용 "가져오기" 버튼, 진행 상태·에러 표시, 색인 폴링)을 그대로
+ * 옮겨왔다.
+ */
+function EntryScreen({ onEnter, loading, error, projectId, ensureProject }) {
   const [mode, setMode] = useState(null);
-  const [input, setInput] = useState("");
+  const [criteriaTab, setCriteriaTab] = useState('url');
+  const [criteriaUrl, setCriteriaUrl] = useState('');
+  const [criteriaLoading, setCriteriaLoading] = useState(false);
+  const [criteriaError, setCriteriaError] = useState('');
+  const [isCriteriaDragging, setIsCriteriaDragging] = useState(false);
+  const [documents, setDocuments] = useState([]);
+  const criteriaFileInputRef = useRef(null);
+
+  function updateDoc(id, patch) {
+    setDocuments((prev) => prev.map((doc) => (doc.id === id ? { ...doc, ...patch } : doc)));
+  }
+
+  function pollDocumentIndexing(pid, documentId, rowId, contentStatus, contentMeta) {
+    let attempts = 0;
+    const timer = setInterval(async () => {
+      attempts += 1;
+      try {
+        const statusResult = await getDocumentStatus(pid, documentId);
+        if (statusResult.status === 'indexing') {
+          if (attempts >= _DOCUMENT_STATUS_POLL_MAX_ATTEMPTS) {
+            clearInterval(timer);
+            updateDoc(rowId, { status: 'error', meta: '색인 상태 확인이 너무 오래 걸리고 있어요 — 새로고침해서 다시 확인해주세요.' });
+          }
+          return;
+        }
+        clearInterval(timer);
+        if (statusResult.status === 'indexing_failed') {
+          updateDoc(rowId, { status: 'error', meta: '공고문 색인 중 오류가 발생했습니다.' });
+        } else if (statusResult.status === 'indexing_timeout') {
+          updateDoc(rowId, { status: 'error', meta: '색인이 시간 내에 끝나지 않았습니다 — 다시 시도해주세요.' });
+        } else {
+          updateDoc(rowId, { status: contentStatus, meta: contentMeta });
+        }
+      } catch (err) {
+        clearInterval(timer);
+        updateDoc(rowId, { status: 'error', meta: err.message });
+      }
+    }, _DOCUMENT_STATUS_POLL_INTERVAL_MS);
+  }
+
+  async function handleFetchCriteriaUrl() {
+    if (!criteriaUrl.trim()) {
+      setCriteriaError('URL을 입력해주세요.');
+      return;
+    }
+    setCriteriaError('');
+    setCriteriaLoading(true);
+    try {
+      const pid = await ensureProject();
+      const result = await fetchCriteriaUrl(criteriaUrl.trim(), pid);
+      const id = `url-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+      const title = result.page_content?.title || criteriaUrl.trim();
+      const { status: contentStatus, meta: contentMeta } = assessCriteriaContent(result);
+
+      if (result.document_status === 'indexing' && result.document_id) {
+        setDocuments((prev) => [...prev, { id, name: title, meta: '공고문을 색인하는 중...', status: 'embedding' }]);
+        pollDocumentIndexing(pid, result.document_id, id, contentStatus, contentMeta);
+      } else {
+        setDocuments((prev) => [...prev, { id, name: title, meta: contentMeta, status: contentStatus }]);
+      }
+      setCriteriaUrl('');
+    } catch (err) {
+      setCriteriaError(err.message);
+    } finally {
+      setCriteriaLoading(false);
+    }
+  }
+
+  async function uploadCriteriaFile(file) {
+    const id = `${file.name}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    setDocuments((prev) => [...prev, { id, name: file.name, meta: formatFileSize(file.size), status: 'embedding' }]);
+    try {
+      const pid = await ensureProject();
+      const doc = await uploadDocument(pid, file, 'pdf', 'criteria');
+      if (doc.status === 'conversion_failed') {
+        updateDoc(id, { status: 'error', meta: doc.conversion_metadata?.conversion_error || '문서를 변환하지 못했습니다.' });
+        return;
+      }
+      updateDoc(id, { status: 'done', meta: formatFileSize(file.size) });
+    } catch (err) {
+      updateDoc(id, { status: 'error', meta: err.message });
+    }
+  }
+
+  function addCriteriaFiles(fileList) {
+    const files = Array.from(fileList);
+    const accepted = files.filter(isAcceptedDocument);
+    const rejected = files.length - accepted.length;
+    setCriteriaError(rejected > 0 ? 'PDF, DOCX, PPTX, HWP, HWPX 파일만 업로드할 수 있습니다.' : '');
+    accepted.forEach(uploadCriteriaFile);
+  }
+
+  const criteriaDropHandlers = {
+    onDragOver: (e) => { e.preventDefault(); setIsCriteriaDragging(true); },
+    onDragLeave: (e) => { e.preventDefault(); setIsCriteriaDragging(false); },
+    onDrop: (e) => { e.preventDefault(); setIsCriteriaDragging(false); addCriteriaFiles(e.dataTransfer.files); },
+  };
 
   return (
     <div style={{ maxWidth: 760, margin: "40px auto" }}>
@@ -158,18 +267,91 @@ function EntryScreen({ onEnter, loading, error }) {
 
       <div className="card glass">
         <div style={{ fontSize: 13, color: "var(--text-1)", marginBottom: 10, display: "flex", alignItems: "center", gap: 6 }}>
-          <Link2 size={14} /> 공모전 공고 URL
+          <Link2 size={14} /> 공모전 공고 · 평가기준
           <span className="badge amber mono" style={{ marginLeft: 6 }}>선택 입력</span>
         </div>
-        <div style={{ display: "flex", gap: 10 }}>
-          <input
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            placeholder="https://... (없으면 비워두고 진행해도 됩니다)"
-            disabled={loading}
-            style={{ flex: 1, background: "var(--bg-1)", border: "1px solid var(--glass-border)", borderRadius: 10, padding: "11px 14px", color: "var(--text-0)", fontSize: 13 }}
-          />
+
+        <div style={{ display: "flex", gap: 4, background: "var(--bg-2)", borderRadius: 999, padding: 4, marginBottom: 14 }}>
+          {[['url', 'URL 입력'], ['file', '파일 업로드']].map(([key, label]) => (
+            <button
+              key={key}
+              onClick={() => setCriteriaTab(key)}
+              style={{
+                flex: 1, padding: '7px 0', borderRadius: 999, border: 'none', cursor: 'pointer',
+                fontSize: 13, fontWeight: 600, fontFamily: 'inherit',
+                background: criteriaTab === key ? 'var(--bg-1)' : 'transparent',
+                color: criteriaTab === key ? 'var(--purple)' : 'var(--text-2)',
+                boxShadow: criteriaTab === key ? '0 1px 4px rgba(28,26,46,0.1)' : 'none',
+              }}
+            >
+              {label}
+            </button>
+          ))}
         </div>
+
+        {criteriaTab === 'url' ? (
+          <div style={{ display: "flex", gap: 10 }}>
+            <input
+              value={criteriaUrl}
+              onChange={(e) => setCriteriaUrl(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && handleFetchCriteriaUrl()}
+              placeholder="https://example.com/공고문"
+              disabled={criteriaLoading}
+              style={{ flex: 1, background: "var(--bg-1)", border: "1px solid var(--glass-border)", borderRadius: 10, padding: "11px 14px", color: "var(--text-0)", fontSize: 13 }}
+            />
+            <button className="btn-ghost" onClick={handleFetchCriteriaUrl} disabled={criteriaLoading}>
+              {criteriaLoading ? '가져오는 중...' : '가져오기'}
+            </button>
+          </div>
+        ) : (
+          <div
+            style={{
+              border: `1.5px dashed ${isCriteriaDragging ? 'var(--purple)' : 'var(--glass-border)'}`,
+              borderRadius: 12, padding: '18px 16px', display: 'flex', alignItems: 'center',
+              justifyContent: 'space-between', background: isCriteriaDragging ? 'var(--purple-dim)' : 'var(--bg-1)',
+            }}
+            {...criteriaDropHandlers}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+              <Upload size={20} color="var(--purple)" />
+              <div>
+                <div style={{ fontSize: 14, fontWeight: 700 }}>{isCriteriaDragging ? '여기에 놓으세요' : '평가 기준 문서'}</div>
+                <div style={{ fontSize: 12, color: 'var(--text-2)' }}>PDF, DOCX, PPTX, HWP, HWPX</div>
+              </div>
+            </div>
+            <button className="btn-ghost" onClick={() => criteriaFileInputRef.current?.click()}>파일 선택</button>
+            <input
+              ref={criteriaFileInputRef}
+              type="file"
+              accept={ACCEPTED_DOCUMENT_EXTENSIONS.join(',')}
+              multiple
+              style={{ display: 'none' }}
+              onChange={(e) => { addCriteriaFiles(e.target.files); e.target.value = ''; }}
+            />
+          </div>
+        )}
+
+        {criteriaError && <p style={{ color: "var(--coral)", fontSize: 13, marginTop: 12 }}>{criteriaError}</p>}
+
+        {documents.length > 0 && (
+          <div style={{ marginTop: 14 }}>
+            {documents.map((doc, i) => (
+              <div key={doc.id} style={{
+                display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                padding: '10px 0', borderTop: i > 0 ? '1px solid var(--glass-border)' : 'none',
+              }}>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 13.5, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{doc.name}</div>
+                  <div style={{ fontSize: 12, color: 'var(--text-2)' }}>{doc.meta}</div>
+                </div>
+                {doc.status === 'embedding' && <span className="badge amber mono" style={{ flexShrink: 0, marginLeft: 10 }}>색인 중</span>}
+                {doc.status === 'done' && <span className="badge green mono" style={{ flexShrink: 0, marginLeft: 10 }}>✓ 완료</span>}
+                {doc.status === 'warning' && <span className="badge amber mono" style={{ flexShrink: 0, marginLeft: 10 }}>확인 필요</span>}
+                {doc.status === 'error' && <span className="badge coral mono" style={{ flexShrink: 0, marginLeft: 10 }}>실패</span>}
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       {error && <p style={{ color: "var(--coral)", fontSize: 13, marginTop: 12 }}>{error}</p>}
@@ -178,7 +360,7 @@ function EntryScreen({ onEnter, loading, error }) {
         className="btn-primary"
         style={{ marginTop: 24, width: "100%", opacity: mode ? 1 : 0.4, display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}
         disabled={!mode || loading}
-        onClick={() => onEnter(mode, input)}
+        onClick={() => onEnter(mode)}
       >
         {loading ? "준비하는 중..." : "분석 시작"} <ArrowRight size={15} />
       </button>
@@ -578,11 +760,21 @@ export default function ReviewBoardPrototype() {
     if (i < seq.length - 1) setStage(seq[i + 1]);
   };
 
-  // 가은/Claude(2026-07-20): "작성 후" 모드는 여기서 실제 프로젝트를 만든다(createProject).
-  // URL을 입력했으면 공고문·평가기준 문서로도 같이 수집한다(fetchUrl) — 실패해도(예:
-  // URL이 실제 공고 페이지가 아님) 정적 rubric 템플릿으로 계속 진행 가능하므로 분석 시작
-  // 자체를 막지는 않는다.
-  async function handleEnter(m, url) {
+  // 가은/Claude(2026-07-20): projectId가 아직 없으면(공고 URL/파일을 하나도 안 넣고
+  // 바로 "분석 시작"을 눌렀거나, EntryScreen의 URL/파일 액션이 이미 만들어뒀거나) 여기서
+  // 한 번 더 보장한다 — DocumentUploadPage.jsx의 ensureProject()와 동일한 "지연 생성"
+  // 패턴이라 URL/파일을 여러 번 넣어도 프로젝트가 중복 생성되지 않는다.
+  const projectIdRef = useRef(null);
+  projectIdRef.current = projectId;
+  async function ensureProject() {
+    if (projectIdRef.current) return projectIdRef.current;
+    const project = await createProject({ title: "새 공모전 프로젝트", doc_type: "competition" });
+    projectIdRef.current = project.id;
+    setProjectId(project.id);
+    return project.id;
+  }
+
+  async function handleEnter(m) {
     setMode(m);
     if (m !== "post") {
       setStage("analysis");
@@ -591,11 +783,7 @@ export default function ReviewBoardPrototype() {
     setEntryError("");
     setEntryLoading(true);
     try {
-      const project = await createProject({ title: "새 공모전 프로젝트", doc_type: "competition" });
-      setProjectId(project.id);
-      if (url && url.trim()) {
-        await fetchCriteriaUrl(url.trim(), project.id).catch(() => {});
-      }
+      await ensureProject();
       setStage("analysis");
     } catch (err) {
       setEntryError(err.message);
@@ -611,7 +799,13 @@ export default function ReviewBoardPrototype() {
   return (
     <Shell active={stage} mode={mode} onNavigate={setStage} showNav={stage !== "entry"}>
       {stage === "entry" && (
-        <EntryScreen onEnter={handleEnter} loading={entryLoading} error={entryError} />
+        <EntryScreen
+          onEnter={handleEnter}
+          loading={entryLoading}
+          error={entryError}
+          projectId={projectId}
+          ensureProject={ensureProject}
+        />
       )}
       {stage === "analysis" && <AnalysisScreen mode={mode} onNext={goNext} />}
       {stage === "ideation" && <IdeationScreen onNext={goNext} />}
