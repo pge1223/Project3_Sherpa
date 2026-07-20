@@ -11,6 +11,8 @@ import ReviewBoardPrototype from './pages/board/ReviewBoardPrototype'
 // 무관한 별도 경로. backend가 ENABLE_IDEATION_PREVIEW=false면 API가 404를 주지만, 화면
 // 자체는 항상 접근 가능하다(에러 메시지로 비활성화 여부를 확인하게 된다).
 import IdeationPreviewPage from './pages/IdeationPreviewPage'
+// 경이(테스트 전용): 버전 추적형 User RAG 실험 화면 — 새 디자인 톤에 맞춘 별도 섹션.
+import VersionTrackerTestPage from './pages/VersionTrackerTestPage'
 
 function App() {
   return (
@@ -28,6 +30,8 @@ function App() {
           그대로 둔다. */}
       <Route path="/board" element={<ReviewBoardPrototype />} />
       <Route path="/ideation-preview" element={<IdeationPreviewPage />} />
+      {/* 경이(테스트 전용) — /version-test 로 진입. 실험 검증 후 /board 프로젝트 리포트에 이어붙일 예정 */}
+      <Route path="/version-test" element={<VersionTrackerTestPage />} />
     </Routes>
   )
 }
