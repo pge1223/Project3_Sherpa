@@ -438,7 +438,7 @@ function AnalysisScreen({ mode, onNext, projectId }) {
     <div style={{ maxWidth: 820 }}>
       <div className="badge purple mono">{hasAnnouncement ? "공고문 분석 결과" : "공고문 미등록"}</div>
       <h1 style={{ fontSize: 26, fontWeight: 700, margin: "12px 0 24px" }}>
-        {hasAnnouncement ? "등록한 공고문을 확인하세요" : "등록된 공고문이 없어요"}
+        {hasAnnouncement ? (analysis?.announcement_title || "등록한 공고문을 확인하세요") : "등록된 공고문이 없어요"}
       </h1>
 
       {error && <p style={{ color: "var(--coral)", fontSize: 13, marginBottom: 16 }}>{error}</p>}

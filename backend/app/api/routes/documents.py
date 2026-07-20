@@ -598,6 +598,10 @@ async def _load_criteria_documents_text(project_id: str) -> tuple[str, list[str]
 def _build_announcement_analysis_prompt(text: str) -> str:
     truncated = text[:_ANNOUNCEMENT_TRUNCATE_CHARS]
     return f"""당신은 공모전·지원사업 공고문을 분석하는 보조입니다. 아래 공고문 원문을 읽고
+announcement_title은 이 공고의 정식 명칭(공모전/지원사업 이름)만 뽑으세요 — 페이지
+제목이나 게시판 메뉴명("공지사항", "보도자료" 등)이 아니라 본문에서 실제로 언급되는
+공식 명칭을 쓰세요. 명확한 명칭을 못 찾으면 빈 문자열로 두세요(지어내지 마세요).
+
 official_facts는 원문에 실제로 있는 내용만 담으세요 — 원문에 없는 정보는 절대
 지어내지 말고, 못 찾은 항목은 빈 배열이나 "미공개"로 남기세요. 특히 evaluation_criteria에
 배점이 원문에 없으면 반드시 ["배점 미공개"] 하나만 담으세요.
@@ -610,6 +614,7 @@ strategic_analysis는 원문을 근거로 한 당신의 추론(전략적 분석)
 
 다음 JSON 형식으로만 응답하세요:
 {{
+  "announcement_title": "...",
   "official_facts": {{
     "eligibility": ["..."],
     "deadline": "...",
@@ -707,8 +712,11 @@ async def get_announcement_analysis(
             )
         )
 
+    announcement_title = str(parsed.get("announcement_title") or "").strip() if isinstance(parsed, dict) else ""
+
     return AnnouncementAnalysisResponse(
         has_announcement=True,
+        announcement_title=announcement_title,
         official_facts=official_facts,
         strategic_analysis=strategic_analysis,
         evidence=evidence,

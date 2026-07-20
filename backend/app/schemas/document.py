@@ -87,6 +87,10 @@ class AnnouncementEvidence(BaseModel):
 # 항상 False로 고정하고, 프론트가 이 값을 보고 "자료 미확보" 상태를 표시한다.
 class AnnouncementAnalysisResponse(BaseModel):
     has_announcement: bool
+    # 가은/Claude(2026-07-21): 실측 요청 — 화면 제목에 실제 공모전명이 나오게. 페이지
+    # <title>은 "공지사항 - 부서명" 같은 사이트 boilerplate인 경우가 많아 신뢰 못 함
+    # (실측: 외교부 공고 사례) — 본문에서 LLM이 직접 뽑는다. 못 찾으면 빈 문자열.
+    announcement_title: str = ""
     official_facts: Optional[OfficialFacts] = None
     strategic_analysis: Optional[StrategicAnalysis] = None
     evidence: list[AnnouncementEvidence] = []
