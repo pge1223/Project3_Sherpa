@@ -28,10 +28,10 @@ class Settings(BaseSettings):
     # 발생한다. LLM_PROFILE=dev(기본값, 저렴한 모델)로 두면 실수로 눌러도 싸게 끝나고,
     # 진짜 품질 확인이 필요할 때만 quality로 바꾸도록 두 세트를 분리했다.
     LLM_PROFILE: str = "dev"
-    DEV_LLM_REVIEWER_MODEL: str = "gpt-5-nano"
-    DEV_LLM_CHAIR_MODEL: str = "gpt-5-nano"
-    QUALITY_LLM_REVIEWER_MODEL: str = "gpt-5-mini"
-    QUALITY_LLM_CHAIR_MODEL: str = "gpt-5-mini"
+    DEV_LLM_REVIEWER_MODEL: str = "gpt-4o-mini"
+    DEV_LLM_CHAIR_MODEL: str = "gpt-4o-mini"
+    QUALITY_LLM_REVIEWER_MODEL: str = "gpt-4o-mini"
+    QUALITY_LLM_CHAIR_MODEL: str = "gpt-4o-mini"
 
     # NCP
     NCP_ACCESS_KEY: str = ""
