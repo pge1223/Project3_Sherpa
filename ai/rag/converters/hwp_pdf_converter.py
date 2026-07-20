@@ -41,6 +41,15 @@ SUPPORTED_EXTENSIONS: frozenset[str] = frozenset({".hwp", ".hwpx"})
 
 _CANDIDATE_EXECUTABLE_NAMES: tuple[str, ...] = ("soffice", "libreoffice", "soffice.exe")
 
+# Windows에서 winget/공식 인스톨러로 LibreOffice를 설치해도 기본적으로 PATH에는
+# 추가되지 않는다. 환경변수(HWP_CONVERTER_EXECUTABLE)도 PATH도 없을 때 마지막
+# 수단으로 흔한 기본 설치 경로를 확인한다 — 환경변수로 명시된 경로가 항상 최우선이며
+# 이 목록은 그 다음, PATH 탐색 다음 순서로만 쓰인다.
+_WINDOWS_DEFAULT_INSTALL_PATHS: tuple[str, ...] = (
+    r"C:\Program Files\LibreOffice\program\soffice.exe",
+    r"C:\Program Files (x86)\LibreOffice\program\soffice.exe",
+)
+
 # Microsoft Compound File Binary Format(OLE2) 매직 넘버. HWP 5.0은 이 컨테이너 포맷을
 # 그대로 사용한다. 다른 OLE 기반 포맷(예: 구버전 .doc/.xls)과 컨테이너 수준에서는
 # 구분되지 않으므로, 확장자(.hwp)와 함께 최소한의 방어적 검증으로만 사용한다 —
@@ -121,6 +130,9 @@ def find_executable(configured_path: Optional[str]) -> Optional[str]:
         found = shutil.which(name)
         if found:
             return found
+    for candidate in _WINDOWS_DEFAULT_INSTALL_PATHS:
+        if Path(candidate).exists():
+            return candidate
     return None
 
 

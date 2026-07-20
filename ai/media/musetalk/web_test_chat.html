@@ -209,7 +209,9 @@
 // 발언 내용은 아래에 채팅 로그(자막 이력)처럼 누적된다.
 const MIME_CODEC = 'video/mp4; codecs="avc1.42E01E, mp4a.40.2"';
 // streaming_optimization.md 시도 10에서 확정된 값
-const RESUME_THRESHOLD = 0.8;
+// 재인/Claude(2026-07-18): tail 페이싱 제거 이후 버퍼링 패턴이 바뀌어서 1.5로 조정
+// (web_test_chat_two_avatars.html, CommitteeVideoStage.jsx와 동일하게 맞춤)
+const RESUME_THRESHOLD = 1.5;
 const PAUSE_THRESHOLD = 0.15;
 const SPEAKER_NAME = "사업전략 전문가";
 

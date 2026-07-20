@@ -1,8 +1,21 @@
 pge_doc/
 
 # 재인: 스트리밍 버퍼링 구조 검증 후 더 이상 안 쓰는 스크래치 테스트 페이지
-# (web_test_chat.html은 CommitteeVideoStage.jsx 로직의 원형 참고 파일이라 계속 추적)
+# (web_test_chat.html은 CommitteeVideoStage.jsx 로직의 원형 참고 파일이라 계속 추적 -
+# 아래 새 규칙(ai/media/musetalk/*.html)보다 이 !예외가 밑에 있어야 우선 적용됨)
 ai/media/musetalk/web_test_stream_mse.html
+
+# 재인: 코랩 노트북(.ipynb) - 실험 버전이 계속 늘어나고(v2, launch, elevenlabs_test,
+# zonos_test 등) 파일 크기도 커서 레포에 안 올림. 실행용 최종본은 대신
+# ai/media/musetalk/colab/에 로컬로 관리.
+# 이미 추적 중이던 musetalk_setup.ipynb는 이 규칙만으로는 안 빠지니 별도 정리 필요.
+*.ipynb
+
+# 재인: ai/media/musetalk/ 밑의 단독 테스트 HTML 페이지들(web_test_chat_two_avatars.html
+# 등, 스트리밍/버퍼링 실험용 스크래치) - frontend/ 쪽 실제 앱 HTML(index.html)은 이 경로가
+# 아니라서 영향 없음. web_test_chat.html은 이미 추적 중이라 이 규칙과 무관하게 계속 추적됨
+# (git은 새로 추가될 파일에만 gitignore를 적용하고, 이미 추적 중인 파일은 안 건드림).
+ai/media/musetalk/*.html
 
 # 재인: 팀 작업분해표(WBS) - 별도 공유 문서로 관리, 레포에는 안 올림
 AI_Review_Board_HAI_직접구축_작업분해.xlsx

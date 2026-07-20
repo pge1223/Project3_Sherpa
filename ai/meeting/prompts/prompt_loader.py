@@ -104,6 +104,13 @@ def render_persona_block(card: dict) -> str:
         for h in scope["handoff_to"]:
             lines.append(f"- {h['persona_id']}: {h['when']}")
 
+    # 용준/Claude(2026-07-20): 아이디어 발전 회의(ideation) 전문가 카드에만 있는 선택 필드.
+    # 기존 심사형 카드엔 이 키가 없으므로 없으면 그냥 건너뛴다(하위호환).
+    if card.get("collaboration_stances"):
+        lines.append("")
+        lines.append("[발언 시 명시해야 하는 태도(stance) — 다음 중 하나를 선택]")
+        lines.extend(f"- {s}" for s in card["collaboration_stances"])
+
     return "\n".join(lines)
 
 
@@ -169,6 +176,96 @@ def build_chair_prompt(
     return template
 
 
+# ============================================================================
+# 용준/Claude(2026-07-20): 아이디어 발전 회의(ideation) 모드 프롬프트 빌더.
+# 기존 build_reviewer_prompt/build_chair_prompt는 건드리지 않고 새 함수만 추가한다.
+# 템플릿: ideation_common.txt(전문가 공통, reviewer_prompt.txt와 같은 패턴),
+# ideation_facilitator_prompt.txt(라운드 열기/닫기), ideation_synthesis_prompt.txt(최종 종합).
+# ============================================================================
+
+IDEATION_TURN_TEMPLATE = "ideation_common.txt"
+IDEATION_FACILITATOR_TEMPLATE = "ideation_facilitator_prompt.txt"
+IDEATION_SYNTHESIS_TEMPLATE = "ideation_synthesis_prompt.txt"
+
+
+def build_ideation_turn_prompt(
+    persona_id: str,
+    notice_and_criteria: Any,
+    user_idea: Any,
+    retrieved_evidence: Any,
+    round_context: Any,
+) -> str:
+    """기획/개발 전문가 1턴 실행 프롬프트를 조립한다.
+
+    round_context는 전체 회의록이 아니라 상태(ideation_state.py)가 미리 압축한
+    {"round": int, "previous_turn": dict|None, "consensus_so_far": [str],
+    "unresolved_issues": [str]} 형태다 — 토큰 사용량을 줄이기 위해 직전 발언 1개와
+    누적 요약만 전달한다(요청 7번 "토큰 사용량 고려").
+    """
+    card = get_persona_card(persona_id)
+    template = _read_text(IDEATION_TURN_TEMPLATE)
+    replacements = {
+        "<<PERSONA_BLOCK>>": render_persona_block(card),
+        "<<NOTICE_AND_CRITERIA_JSON>>": _as_text(notice_and_criteria),
+        "<<USER_IDEA_JSON>>": _as_text(user_idea),
+        "<<RETRIEVED_EVIDENCE_JSON>>": _as_text(retrieved_evidence),
+        "<<ROUND_CONTEXT_JSON>>": _as_text(round_context),
+    }
+    for token, value in replacements.items():
+        template = template.replace(token, value)
+    return template
+
+
+def build_ideation_facilitator_prompt(
+    notice_and_criteria: Any,
+    user_idea: Any,
+    round_number: int,
+    max_rounds: int,
+    turns_this_round: Any,
+    consensus_so_far: Any,
+    unresolved_issues: Any,
+) -> str:
+    """라운드 시작(쟁점 정리) + 라운드 종료(합의/이견/다음 행동 판단) 겸용 프롬프트."""
+    card = get_persona_card("ideation_facilitator")
+    template = _read_text(IDEATION_FACILITATOR_TEMPLATE)
+    replacements = {
+        "<<FACILITATOR_BLOCK>>": render_persona_block(card),
+        "<<NOTICE_AND_CRITERIA_JSON>>": _as_text(notice_and_criteria),
+        "<<USER_IDEA_JSON>>": _as_text(user_idea),
+        "<<ROUND_NUMBER>>": str(round_number),
+        "<<MAX_ROUNDS>>": str(max_rounds),
+        "<<TURNS_THIS_ROUND_JSON>>": _as_text(turns_this_round),
+        "<<CONSENSUS_SO_FAR_JSON>>": _as_text(consensus_so_far if consensus_so_far is not None else []),
+        "<<UNRESOLVED_ISSUES_JSON>>": _as_text(unresolved_issues if unresolved_issues is not None else []),
+    }
+    for token, value in replacements.items():
+        template = template.replace(token, value)
+    return template
+
+
+def build_ideation_synthesis_prompt(
+    notice_and_criteria: Any,
+    user_idea: Any,
+    all_turns: Any,
+    consensus_so_far: Any,
+    unresolved_issues: Any,
+) -> str:
+    """회의 종료 시 최종 아이디어 제안서를 조립하는 프롬프트."""
+    card = get_persona_card("ideation_facilitator")
+    template = _read_text(IDEATION_SYNTHESIS_TEMPLATE)
+    replacements = {
+        "<<FACILITATOR_BLOCK>>": render_persona_block(card),
+        "<<NOTICE_AND_CRITERIA_JSON>>": _as_text(notice_and_criteria),
+        "<<USER_IDEA_JSON>>": _as_text(user_idea),
+        "<<ALL_TURNS_JSON>>": _as_text(all_turns),
+        "<<CONSENSUS_SO_FAR_JSON>>": _as_text(consensus_so_far if consensus_so_far is not None else []),
+        "<<UNRESOLVED_ISSUES_JSON>>": _as_text(unresolved_issues if unresolved_issues is not None else []),
+    }
+    for token, value in replacements.items():
+        template = template.replace(token, value)
+    return template
+
+
 if __name__ == "__main__":
     # 스모크 테스트: 실제 LLM 호출 없이 프롬프트 조립만 확인한다.
     demo_rubric = {
@@ -193,3 +290,26 @@ if __name__ == "__main__":
     assert "위원장" in cp
     print(f"reviewer_prompt 길이: {len(rp)}  / chair_prompt 길이: {len(cp)}")
     print("OK: 프롬프트 조립 및 토큰 치환 정상")
+
+    # 용준/Claude(2026-07-20): ideation 프롬프트 빌더 스모크 테스트.
+    demo_notice = {"notice_summary": "지역 소상공인 디지털전환 공모전", "criteria": ["실현가능성", "차별성"]}
+    demo_idea = {"title": "동네 가게 챗봇", "description": "소상공인이 손님 문의에 자동으로 답하는 챗봇"}
+    demo_round_context = {"round": 1, "previous_turn": None, "consensus_so_far": [], "unresolved_issues": []}
+
+    tp_planning = build_ideation_turn_prompt("planning_expert", demo_notice, demo_idea, demo_evidence, demo_round_context)
+    tp_dev = build_ideation_turn_prompt("dev_expert", demo_notice, demo_idea, demo_evidence, demo_round_context)
+    fp = build_ideation_facilitator_prompt(demo_notice, demo_idea, 1, 3, [], [], [])
+    sp = build_ideation_synthesis_prompt(demo_notice, demo_idea, [], [], [])
+
+    assert "<<" not in tp_planning, "ideation 기획 전문가 프롬프트에 치환되지 않은 토큰이 있습니다"
+    assert "<<" not in tp_dev, "ideation 개발 전문가 프롬프트에 치환되지 않은 토큰이 있습니다"
+    assert "<<" not in fp, "ideation 진행자 프롬프트에 치환되지 않은 토큰이 있습니다"
+    assert "<<" not in sp, "ideation 종합 프롬프트에 치환되지 않은 토큰이 있습니다"
+    assert "당신은 AI Review Board의 기획 전문가입니다" in tp_planning
+    assert "당신은 AI Review Board의 개발 전문가입니다" in tp_dev
+    assert "당신은 AI Review Board의 개발 전문가입니다" not in tp_planning
+    assert "당신은 AI Review Board의 기획 전문가입니다" not in tp_dev
+    assert "회의 진행자" in fp
+    print(f"ideation_turn(planning) 길이: {len(tp_planning)} / ideation_turn(dev) 길이: {len(tp_dev)}")
+    print(f"ideation_facilitator 길이: {len(fp)} / ideation_synthesis 길이: {len(sp)}")
+    print("OK: ideation 프롬프트 조립 및 토큰 치환 정상")
