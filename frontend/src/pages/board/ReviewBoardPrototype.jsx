@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   Link2, Upload, FileText, Sparkles,
@@ -359,6 +359,18 @@ function UploadAndAnalyzeScreen({ projectId, onFeedbackReady }) {
   const [reviewsReady, setReviewsReady] = useState(false)
   const progressTokenRef = useRef(null)
   const pollTimerRef = useRef(null)
+
+  // 가은/Claude(2026-07-20): 실측 버그 — 분석 진행 중에 사이드바로 다른 단계로 이동하면
+  // (unmount) 이 interval이 안 멈추고 계속 살아서 백엔드를 계속 두드렸다
+  // (MentorSelectionPage.jsx에는 있던 언마운트 정리를 포팅하면서 빠뜨림).
+  useEffect(() => {
+    return () => {
+      if (pollTimerRef.current) {
+        clearInterval(pollTimerRef.current)
+        pollTimerRef.current = null
+      }
+    }
+  }, [])
 
   function updateDoc(id, patch) {
     setDocuments((prev) => prev.map((doc) => (doc.id === id ? { ...doc, ...patch } : doc)))
