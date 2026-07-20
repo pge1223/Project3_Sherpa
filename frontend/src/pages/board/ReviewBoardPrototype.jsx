@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import {
   Link2, Upload, FileText, Sparkles,
   CheckCircle2, Circle, AlertCircle, Send, Award, Target, ShieldCheck,
-  ArrowRight, TrendingUp, ChevronDown, ChevronUp,
+  ArrowRight, TrendingUp, ChevronDown, ChevronUp, Calendar,
 } from "lucide-react";
 import { createProject } from "../../api/projectApi";
 import {
@@ -484,6 +484,16 @@ function AnalysisScreen({ mode, onNext, projectId }) {
               </div>
 
               <div className="card glass">
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+                  <Calendar size={15} color="var(--purple)" />
+                  <div style={{ fontWeight: 700, fontSize: 14 }}>일정</div>
+                </div>
+                <div style={{ fontSize: 12.5, color: (facts?.deadline && facts.deadline !== '미공개') ? "var(--text-1)" : "var(--text-2)" }}>
+                  제출 마감: {facts?.deadline || "미공개"}
+                </div>
+              </div>
+
+              <div className="card glass">
                 <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 10 }}>주의 리스크</div>
                 <ul style={{ margin: 0, paddingLeft: 16, fontSize: 12.5, color: "var(--text-1)", lineHeight: 1.8 }}>
                   {[...(strategy?.risk_flags || []), ...(facts?.disqualification_rules || [])].map((v, i) => <li key={i}>{v}</li>)}
@@ -491,7 +501,6 @@ function AnalysisScreen({ mode, onNext, projectId }) {
                     <li style={{ color: "var(--text-2)" }}>공고문에 명시된 실격·주의 사항이 없어요.</li>
                   )}
                 </ul>
-                <div style={{ fontSize: 12, color: "var(--text-2)", marginTop: 10 }}>제출 마감: {facts?.deadline || "미공개"}</div>
               </div>
 
               <div className="card glass">
