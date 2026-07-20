@@ -1,3 +1,13 @@
+### 7/20 — 소통혁신24 IT 공모전 데이터 수집 완료
+
+- AJAX 직접 호출 방식으로 소통혁신24 크롤링 (Selenium → requests 전환)
+- `contest_announcements_it` — IT 공고 360건 저장 (241페이지 전수 스캔)
+- `contest_works` — 수상작(winner) 468건 + 수상후보작(candidate) 486건 = 954건 저장
+- IT 키워드 필터링, wrk_id 고유키 중복 방지, selection_status로 구분
+- 이미지 URL + 수상등급 저장, OCR은 대표작 20~30건 검증 후 확대 예정
+- 스크립트: `test_crawl.py`, `crawl_sotong_winners.py`
+- PR #96 머지 + NCP 배포 완료
+
 ## 2026-07-18
 
 ### 작업 내용
