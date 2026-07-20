@@ -130,14 +130,13 @@ function Shell({ children, active, mode, onNavigate, showNav }) {
  * 파일 업로드 탭, 전용 "가져오기" 버튼, 진행 상태·에러 표시, 색인 폴링)을 그대로
  * 옮겨왔다.
  */
-function EntryScreen({ onEnter, loading, error, projectId, ensureProject }) {
+function EntryScreen({ onEnter, loading, error, projectId, ensureProject, documents, setDocuments }) {
   const [mode, setMode] = useState(null);
   const [criteriaTab, setCriteriaTab] = useState('url');
   const [criteriaUrl, setCriteriaUrl] = useState('');
   const [criteriaLoading, setCriteriaLoading] = useState(false);
   const [criteriaError, setCriteriaError] = useState('');
   const [isCriteriaDragging, setIsCriteriaDragging] = useState(false);
-  const [documents, setDocuments] = useState([]);
   const criteriaFileInputRef = useRef(null);
 
   function updateDoc(id, patch) {
@@ -184,13 +183,14 @@ function EntryScreen({ onEnter, loading, error, projectId, ensureProject }) {
       const result = await fetchCriteriaUrl(criteriaUrl.trim(), pid);
       const id = `url-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
       const title = result.page_content?.title || criteriaUrl.trim();
+      const excerpt = (result.page_content?.text || '').trim().slice(0, 300);
       const { status: contentStatus, meta: contentMeta } = assessCriteriaContent(result);
 
       if (result.document_status === 'indexing' && result.document_id) {
-        setDocuments((prev) => [...prev, { id, name: title, meta: '공고문을 색인하는 중...', status: 'embedding' }]);
+        setDocuments((prev) => [...prev, { id, name: title, meta: '공고문을 색인하는 중...', status: 'embedding', excerpt }]);
         pollDocumentIndexing(pid, result.document_id, id, contentStatus, contentMeta);
       } else {
-        setDocuments((prev) => [...prev, { id, name: title, meta: contentMeta, status: contentStatus }]);
+        setDocuments((prev) => [...prev, { id, name: title, meta: contentMeta, status: contentStatus, excerpt }]);
       }
       setCriteriaUrl('');
     } catch (err) {
@@ -368,37 +368,76 @@ function EntryScreen({ onEnter, loading, error, projectId, ensureProject }) {
   );
 }
 
-/* ---------------- 2. 공모전 분석 결과 (공통) ---------------- */
-function AnalysisScreen({ mode, onNext }) {
-  const items = [
-    { icon: Target, color: "purple", title: "진짜로 원하는 문제와 변화", body: "표면적 주제어가 아닌 정책·사업 목적 → 예비창업인 디지털 전환 체감도 향상" },
-    { icon: Award, color: "coral", title: "평가에서 가장 크게 갈리는 지점", body: "기술성 30점 · 사업성 25점 · 실현가능성 20점 · 발표 10점" },
-    { icon: ShieldCheck, color: "green", title: "반드시 지켜야 할 조건", body: "팀 5인 이내, 실동작 데모 필수, 제출 형식 PPT 20장 이내" },
-    { icon: TrendingUp, color: "amber", title: "수상작에서 읽히는 경향", body: "최근 2개년 수상작 데이터 근거가 명확한 B2G 문제 정의를 선택" },
+const _ANALYSIS_STATUS_LABEL = {
+  done: '수집 완료', embedding: '색인 중', warning: '확인 필요', error: '실패',
+};
+const _ANALYSIS_STATUS_TONE = {
+  done: 'green', embedding: 'amber', warning: 'amber', error: 'coral',
+};
+
+/* ---------------- 2. 공모전 분석 결과 (공통) ----------------
+ * 가은/Claude(2026-07-20): 실측 버그 — URL/파일로 실제 공고문을 수집해도 이 화면엔
+ * 항상 똑같은 고정 예시("2026 IT 예비창업인...")만 나왔다. EntryScreen에서 모은
+ * documents를 그대로 보여준다 — 평가 항목·배점 자동 추출(PER-002)까지는 아직
+ * 이 화면에 연결하지 않았고(별도 작업), 실제로 수집된 문서와 그 본문 일부만 보여준다.
+ * 아무것도 수집하지 않고 넘어온 경우에는 "예시"라고 명시한 카드로 대체한다.
+ */
+function AnalysisScreen({ mode, onNext, documents }) {
+  const hasDocuments = documents && documents.length > 0;
+  const exampleItems = [
+    { icon: Target, color: "purple", title: "진짜로 원하는 문제와 변화", body: "표면적 주제어가 아닌 정책·사업 목적을 먼저 파악해요." },
+    { icon: Award, color: "coral", title: "평가에서 가장 크게 갈리는 지점", body: "공고문에 배점이 있으면 그 배점을 최우선 근거로 써요." },
+    { icon: ShieldCheck, color: "green", title: "반드시 지켜야 할 조건", body: "참가 자격, 제출 형식, 일정 등 필수 조건을 짚어요." },
+    { icon: TrendingUp, color: "amber", title: "수상작에서 읽히는 경향", body: "축적된 공고·심사 데이터가 쌓이면 여기서 보여줄 예정이에요." },
   ];
+
   return (
     <div style={{ maxWidth: 820 }}>
-      <div className="badge purple mono">공고문 · 최근 6개년 수상작 분석</div>
-      <h1 style={{ fontSize: 26, fontWeight: 700, margin: "12px 0 24px" }}>2026 IT 예비창업인 디지털전환 공모전</h1>
+      <div className="badge purple mono">{hasDocuments ? "공고문·평가기준 수집 결과" : "예시 화면 · 공고문 미등록"}</div>
+      <h1 style={{ fontSize: 26, fontWeight: 700, margin: "12px 0 24px" }}>
+        {hasDocuments ? "등록한 공고문을 확인하세요" : "등록된 공고문이 없어요"}
+      </h1>
 
-      <div className="rb-grid-2" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 20 }}>
-        {items.map((it, i) => (
-          <div key={i} className="card glass">
-            <it.icon size={17} color={`var(--${it.color})`} />
-            <div style={{ fontWeight: 600, fontSize: 13.5, margin: "10px 0 6px" }}>{it.title}</div>
-            <div style={{ fontSize: 12.5, color: "var(--text-2)", lineHeight: 1.6 }}>{it.body}</div>
-          </div>
-        ))}
-      </div>
-
-      <div className="card glass" style={{ borderColor: "var(--amber-dim)", marginBottom: 24 }}>
-        <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
-          <AlertCircle size={15} color="var(--amber)" style={{ marginTop: 2, flexShrink: 0 }} />
-          <div style={{ fontSize: 12.5, color: "var(--text-1)", lineHeight: 1.6 }}>
-            심사기준 배점이 공식 확인되어 이 분석의 최우선 근거로 사용되었습니다. 근거: 공고문 4p 표.
-          </div>
+      {hasDocuments ? (
+        <div style={{ display: "flex", flexDirection: "column", gap: 14, marginBottom: 20 }}>
+          {documents.map((doc) => (
+            <div key={doc.id} className="card glass">
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10, marginBottom: doc.excerpt ? 10 : 0 }}>
+                <div style={{ fontWeight: 700, fontSize: 14.5 }}>{doc.name}</div>
+                <span className={`badge ${_ANALYSIS_STATUS_TONE[doc.status] || 'amber'} mono`} style={{ flexShrink: 0 }}>
+                  {_ANALYSIS_STATUS_LABEL[doc.status] || doc.status}
+                </span>
+              </div>
+              <div style={{ fontSize: 12.5, color: "var(--text-2)", lineHeight: 1.6 }}>{doc.meta}</div>
+              {doc.excerpt && (
+                <div style={{ fontSize: 12.5, color: "var(--text-1)", lineHeight: 1.7, marginTop: 10, borderTop: "1px solid var(--glass-border)", paddingTop: 10 }}>
+                  {doc.excerpt}…
+                </div>
+              )}
+            </div>
+          ))}
         </div>
-      </div>
+      ) : (
+        <>
+          <div className="rb-grid-2" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 20 }}>
+            {exampleItems.map((it, i) => (
+              <div key={i} className="card glass">
+                <it.icon size={17} color={`var(--${it.color})`} />
+                <div style={{ fontWeight: 600, fontSize: 13.5, margin: "10px 0 6px" }}>{it.title}</div>
+                <div style={{ fontSize: 12.5, color: "var(--text-2)", lineHeight: 1.6 }}>{it.body}</div>
+              </div>
+            ))}
+          </div>
+          <div className="card glass" style={{ borderColor: "var(--amber-dim)", marginBottom: 24 }}>
+            <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+              <AlertCircle size={15} color="var(--amber)" style={{ marginTop: 2, flexShrink: 0 }} />
+              <div style={{ fontSize: 12.5, color: "var(--text-1)", lineHeight: 1.6 }}>
+                이전 화면에서 공고 URL이나 파일을 등록하지 않았어요 — 공식 심사기준 없이 일반적인 평가 관점으로 진행합니다.
+              </div>
+            </div>
+          </div>
+        </>
+      )}
 
       <button className="btn-primary" style={{ display: "flex", alignItems: "center", gap: 8 }} onClick={onNext}>
         {mode === "pre" ? "AI 위원과 주제 확정 시작" : "기획서 업로드하기"} <ArrowRight size={15} />
@@ -753,6 +792,10 @@ export default function ReviewBoardPrototype() {
   const [projectId, setProjectId] = useState(null);
   const [entryLoading, setEntryLoading] = useState(false);
   const [entryError, setEntryError] = useState('');
+  // 가은/Claude(2026-07-20): 실측 버그 — URL로 실제 공고문을 수집해도 "공모전 분석"
+  // 화면엔 항상 똑같은 고정 예시 카드만 나왔다(EntryScreen이 모은 문서 목록이 어디에도
+  // 안 넘어갔음). AnalysisScreen에서 보여줄 수 있게 여기(부모)로 끌어올린다.
+  const [criteriaDocuments, setCriteriaDocuments] = useState([]);
 
   const goNext = () => {
     const seq = (mode && FLOW_BY_MODE[mode]) || ["entry"];
@@ -805,9 +848,13 @@ export default function ReviewBoardPrototype() {
           error={entryError}
           projectId={projectId}
           ensureProject={ensureProject}
+          documents={criteriaDocuments}
+          setDocuments={setCriteriaDocuments}
         />
       )}
-      {stage === "analysis" && <AnalysisScreen mode={mode} onNext={goNext} />}
+      {stage === "analysis" && (
+        <AnalysisScreen mode={mode} onNext={goNext} documents={criteriaDocuments} />
+      )}
       {stage === "ideation" && <IdeationScreen onNext={goNext} />}
       {stage === "ideation_result" && <IdeationResultScreen />}
       {stage === "upload" && (
