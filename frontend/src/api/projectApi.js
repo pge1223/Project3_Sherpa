@@ -40,6 +40,19 @@ export async function createProject({ title, doc_type, description }) {
   return data
 }
 
+// PRJ-004 — 벡터 청크/문서/회의/프로젝트를 백엔드가 한 번에 정리한다(projects.py 참고).
+export async function deleteProject(projectId) {
+  const res = await fetch(`${API_BASE_URL}/projects/${projectId}`, {
+    method: 'DELETE',
+    headers: { ...authHeaders() },
+  })
+  const data = await res.json()
+  if (!res.ok) {
+    throw new Error(data.detail || '프로젝트를 삭제하지 못했습니다.')
+  }
+  return data
+}
+
 // committee: 선택한 멘토 persona_id 2~4개(MentorSelectionPage). 생략하면 백엔드가
 // rubric_mapping의 전체 committee를 그대로 쓴다(기존 호출 호환).
 // progressToken: 진짜 진행률 폴링용(getAnalyzeProgress) — 호출부가 POST 전에 미리
