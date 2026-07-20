@@ -529,6 +529,31 @@ async def get_documents(
     ]
 
 
+# 가은/Claude(2026-07-21): 실측 요청 — /board에서 URL/파일로 올린 공고문·평가기준
+# 문서를 잘못 올렸을 때 지울 수 있게. PRJ-004(프로젝트 전체 삭제, projects.py)와
+# 같은 순서(Chroma 벡터 청크 -> MongoDB 문서 레코드)를 문서 1건 단위로 좁힌 것 — 벡터
+# 삭제는 ChromaVectorStore.delete_document()를 직접 쓴다(RAGIndexingService는
+# delete_project만 감싸고 있어 서비스 계층에 새 메서드를 추가하는 대신 documents.py
+# 안에서 기존 _get_indexing_service() 싱글턴을 그대로 재사용).
+@router.delete("/{project_id}/{document_id}")
+async def delete_document(
+    project_id: str,
+    document_id: str,
+    authorization: Optional[str] = Header(None, alias="authorization"),
+):
+    user_email = get_current_user(authorization)
+    await verify_project_owner(project_id, user_email)
+
+    document = await document_repo.find_by_id(document_id)
+    if not document or document.get("project_id") != project_id:
+        raise HTTPException(status_code=404, detail="문서를 찾을 수 없습니다")
+
+    indexing_service = _get_indexing_service()
+    await run_in_threadpool(indexing_service.vector_store.delete_document, project_id, document_id)
+    await document_repo.delete_by_id(document_id)
+    return {"message": "문서가 삭제되었습니다"}
+
+
 # DOC-004: 문서 처리 상태 조회
 @router.get("/{project_id}/{document_id}/status")
 async def get_document_status(

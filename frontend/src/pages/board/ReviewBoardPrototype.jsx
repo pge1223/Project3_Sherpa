@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import {
   Link2, Upload, FileText, Sparkles,
   CheckCircle2, Circle, AlertCircle, Send, Award, Target, ShieldCheck,
-  ArrowRight, TrendingUp, ChevronDown, ChevronUp, Calendar, FolderOpen,
+  ArrowRight, TrendingUp, ChevronDown, ChevronUp, Calendar, FolderOpen, X,
 } from "lucide-react";
 import { createProject } from "../../api/projectApi";
 import {
@@ -11,6 +11,7 @@ import {
   uploadDocument,
   getDocumentStatus,
   getAnnouncementAnalysis,
+  deleteDocument,
 } from "../../api/documentApi";
 import { analyzeProject, getAnalyzeProgress, getMentorCandidates } from "../../api/projectApi";
 import { isAcceptedDocument, formatFileSize, ACCEPTED_DOCUMENT_EXTENSIONS } from "../../utils/file";
@@ -151,10 +152,29 @@ function EntryScreen({ onEnter, loading, error, projectId, ensureProject, docume
   const [criteriaLoading, setCriteriaLoading] = useState(false);
   const [criteriaError, setCriteriaError] = useState('');
   const [isCriteriaDragging, setIsCriteriaDragging] = useState(false);
+  const [deletingIds, setDeletingIds] = useState([]);
   const criteriaFileInputRef = useRef(null);
 
   function updateDoc(id, patch) {
     setDocuments((prev) => prev.map((doc) => (doc.id === id ? { ...doc, ...patch } : doc)));
+  }
+
+  // 가은/Claude(2026-07-21): 실측 요청 — 잘못 올린 공고문·평가기준 문서를 지울 수 있게.
+  // backendId(실제 DB document_id)가 아직 없으면(업로드/색인 중) 서버 삭제는 건너뛰고
+  // 목록에서만 뺀다 — 곧 도착할 폴링/응답이 사라진 행을 되살리지 않도록 documents에서
+  // 완전히 지운다(updateDoc과 달리 필터로 제거).
+  async function handleDeleteDoc(doc) {
+    if (deletingIds.includes(doc.id)) return
+    setDeletingIds((prev) => [...prev, doc.id])
+    try {
+      if (doc.backendId && projectId) {
+        await deleteDocument(projectId, doc.backendId)
+      }
+      setDocuments((prev) => prev.filter((d) => d.id !== doc.id))
+    } catch (err) {
+      setCriteriaError(err.message)
+      setDeletingIds((prev) => prev.filter((id) => id !== doc.id))
+    }
   }
 
   function pollDocumentIndexing(pid, documentId, rowId, contentStatus, contentMeta) {
@@ -204,10 +224,10 @@ function EntryScreen({ onEnter, loading, error, projectId, ensureProject, docume
       // 나왔다. 원문 요약은 "공모전 분석" 화면(AnalysisScreen)이 LLM으로 뽑은 요약을 대신
       // 보여주므로, 여기서는 원문 슬라이스를 더 이상 안 만든다.
       if (result.document_status === 'indexing' && result.document_id) {
-        setDocuments((prev) => [...prev, { id, name: title, meta: '공고문을 색인하는 중...', status: 'embedding' }]);
+        setDocuments((prev) => [...prev, { id, backendId: result.document_id, name: title, meta: '공고문을 색인하는 중...', status: 'embedding' }]);
         pollDocumentIndexing(pid, result.document_id, id, contentStatus, contentMeta);
       } else {
-        setDocuments((prev) => [...prev, { id, name: title, meta: contentMeta, status: contentStatus }]);
+        setDocuments((prev) => [...prev, { id, backendId: result.document_id, name: title, meta: contentMeta, status: contentStatus }]);
       }
       setCriteriaUrl('');
     } catch (err) {
@@ -224,10 +244,10 @@ function EntryScreen({ onEnter, loading, error, projectId, ensureProject, docume
       const pid = await ensureProject();
       const doc = await uploadDocument(pid, file, 'pdf', 'criteria');
       if (doc.status === 'conversion_failed') {
-        updateDoc(id, { status: 'error', meta: doc.conversion_metadata?.conversion_error || '문서를 변환하지 못했습니다.' });
+        updateDoc(id, { backendId: doc.id, status: 'error', meta: doc.conversion_metadata?.conversion_error || '문서를 변환하지 못했습니다.' });
         return;
       }
-      updateDoc(id, { status: 'done', meta: formatFileSize(file.size) });
+      updateDoc(id, { backendId: doc.id, status: 'done', meta: formatFileSize(file.size) });
     } catch (err) {
       updateDoc(id, { status: 'error', meta: err.message });
     }
@@ -361,10 +381,21 @@ function EntryScreen({ onEnter, loading, error, projectId, ensureProject, docume
                   <div style={{ fontSize: 13.5, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{doc.name}</div>
                   <div style={{ fontSize: 12, color: 'var(--text-2)' }}>{doc.meta}</div>
                 </div>
-                {doc.status === 'embedding' && <span className="badge amber mono" style={{ flexShrink: 0, marginLeft: 10 }}>색인 중</span>}
-                {doc.status === 'done' && <span className="badge green mono" style={{ flexShrink: 0, marginLeft: 10 }}>✓ 완료</span>}
-                {doc.status === 'warning' && <span className="badge amber mono" style={{ flexShrink: 0, marginLeft: 10 }}>확인 필요</span>}
-                {doc.status === 'error' && <span className="badge coral mono" style={{ flexShrink: 0, marginLeft: 10 }}>실패</span>}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0, marginLeft: 10 }}>
+                  {doc.status === 'embedding' && <span className="badge amber mono">색인 중</span>}
+                  {doc.status === 'done' && <span className="badge green mono">✓ 완료</span>}
+                  {doc.status === 'warning' && <span className="badge amber mono">확인 필요</span>}
+                  {doc.status === 'error' && <span className="badge coral mono">실패</span>}
+                  <button
+                    className="icon-btn"
+                    onClick={() => handleDeleteDoc(doc)}
+                    disabled={deletingIds.includes(doc.id)}
+                    aria-label="문서 삭제"
+                    style={{ background: 'none', border: 'none', padding: 4, cursor: deletingIds.includes(doc.id) ? 'default' : 'pointer', color: 'var(--text-2)', display: 'flex', opacity: deletingIds.includes(doc.id) ? 0.4 : 1 }}
+                  >
+                    <X size={14} />
+                  </button>
+                </div>
               </div>
             ))}
           </div>
