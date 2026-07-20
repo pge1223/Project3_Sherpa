@@ -34,8 +34,8 @@
    documents.py의 기존 RAGIndexingService 인스턴스를 재사용한다(KUREEmbedder 중복 로딩
    방지). **domain="government_support"는 role_mapping.py 매핑이 없어 500으로 막힌다**
    (아래 [아직 협의가 필요한 것] 참고).
-6. llm_call은 실제 OpenAI 호출이다(_build_real_llm_call). LLM_PROFILE=dev가 기본값이라
-   gpt-5-nano로 도는데, 값을 quality로 바꾸면 gpt-5-mini로 바뀐다(backend/.env). 호출
+6. llm_call은 실제 OpenAI 호출이다(_build_real_llm_call). LLM_PROFILE=dev/quality 둘 다
+   기본값은 gpt-4o-mini다(backend/app/config.py, backend/.env로 프로필별 개별 재정의 가능). 호출
    상한(_MAX_LLM_CALLS_PER_MEETING)과 recursion_limit을 걸어 루프/재시도 폭주를 막았다
    (이 세션에서 LangGraph e2e 테스트할 때 사용자가 명시적으로 요구한 안전장치와 동일).
 7. 결과는 MeetingModel/MeetingRepository(MTG-005)로 저장하는데, 이번엔 committee/
