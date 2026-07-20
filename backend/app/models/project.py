@@ -16,6 +16,7 @@ class ProjectModel:
         updated_at: Optional[datetime] = None,
         _id: Optional[ObjectId] = None,
         dynamic_rubric_mapping: Optional[dict] = None,
+        announcement_analysis_cache: Optional[dict] = None,
     ):
         self._id = _id
         self.user_email = user_email
@@ -32,6 +33,11 @@ class ProjectModel:
         # 생성 시점엔 항상 None이고, backend/app/api/routes/meetings.py가
         # project_repo.update_project()로 나중에 채운다.
         self.dynamic_rubric_mapping = dynamic_rubric_mapping
+        # 가은/Claude(2026-07-21): "공모전 분석" 화면(AnnouncementAnalysisResponse)을 매
+        # 방문마다 새로 LLM 호출해서 계산하던 걸 프로젝트당 1회만 만들고 캐시 — 위
+        # dynamic_rubric_mapping과 동일한 패턴(생성 시점엔 None, 나중에
+        # documents.py가 project_repo.update_project()로 채운다).
+        self.announcement_analysis_cache = announcement_analysis_cache
 
     def to_dict(self) -> dict:
         return {
@@ -43,4 +49,5 @@ class ProjectModel:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "dynamic_rubric_mapping": self.dynamic_rubric_mapping,
+            "announcement_analysis_cache": self.announcement_analysis_cache,
         }
