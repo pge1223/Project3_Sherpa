@@ -24,7 +24,9 @@ export default function LandingPage() {
           ))}
         </p>
 
-        <button className="landing-cta" onClick={() => navigate('/login')}>
+        {/* 가은/Claude(2026-07-20): 서비스 방향 전환 — "시작하기"는 이제 신규
+            작성 전/작성 후 2-모드 프로토타입(/board)으로 바로 들어간다. */}
+        <button className="landing-cta" onClick={() => navigate('/board')}>
           시작하기
         </button>
       </div>
