@@ -209,9 +209,6 @@ export default function ProjectListPage() {
             <button style={styles.backButton} onClick={() => navigate('/board')} aria-label="board로 돌아가기">&lt;</button>
             <h1 style={styles.title}>내 프로젝트</h1>
           </div>
-          <button style={styles.newButton} onClick={() => navigate('/projects/new')}>
-            + 새 프로젝트
-          </button>
         </div>
 
         {deleteError && <p style={styles.deleteErrorText}>{deleteError}</p>}
@@ -309,16 +306,6 @@ const styles = {
     margin: 0,
     fontSize: 24,
     fontWeight: 700,
-  },
-  newButton: {
-    padding: '10px 20px',
-    borderRadius: 999,
-    background: 'linear-gradient(135deg, #7c5cea, #8b6ef0)',
-    border: 'none',
-    color: '#0b0a16',
-    fontSize: 13,
-    fontWeight: 600,
-    cursor: 'pointer',
   },
   deleteErrorText: { color: '#c05339', fontSize: 13, marginBottom: 10 },
   card: {
