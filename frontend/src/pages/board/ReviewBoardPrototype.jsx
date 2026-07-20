@@ -3,10 +3,16 @@ import { useNavigate } from "react-router-dom";
 import {
   Link2, Upload, FileText, Sparkles,
   CheckCircle2, Circle, AlertCircle, Send, Award, Target, ShieldCheck,
-  ArrowRight, TrendingUp,
+  ArrowRight, TrendingUp, ChevronDown, ChevronUp, Calendar, FolderOpen, X,
 } from "lucide-react";
 import { createProject } from "../../api/projectApi";
-import { fetchUrl as fetchCriteriaUrl, uploadDocument, getDocumentStatus } from "../../api/documentApi";
+import {
+  fetchUrl as fetchCriteriaUrl,
+  uploadDocument,
+  getDocumentStatus,
+  getAnnouncementAnalysis,
+  deleteDocument,
+} from "../../api/documentApi";
 import { analyzeProject, getAnalyzeProgress, getMentorCandidates } from "../../api/projectApi";
 import { isAcceptedDocument, formatFileSize, ACCEPTED_DOCUMENT_EXTENSIONS } from "../../utils/file";
 import { assessCriteriaContent } from "../../utils/criteriaAssessment";
@@ -46,6 +52,7 @@ const ANALYZE_POLL_INTERVAL_MS = 1000
 
 function Shell({ children, active, mode, onNavigate, showNav }) {
   const flow = mode ? FLOW_BY_MODE[mode] : ["entry"];
+  const navigate = useNavigate();
 
   return (
     <div className="rb-root">
@@ -92,13 +99,21 @@ function Shell({ children, active, mode, onNavigate, showNav }) {
         .rb-root .card{ border-radius:16px; padding:20px; }
         .rb-root .progress-track{ height:8px; border-radius:999px; background:var(--bg-2); overflow:hidden; }
         .rb-root .progress-fill{ height:100%; border-radius:999px; background:linear-gradient(135deg, var(--purple), #8b6ef0); transition:width .5s ease; }
+        .rb-root .rb-my-projects{ position:fixed; top:20px; right:24px; z-index:10; display:flex; align-items:center; gap:6px; }
         @media (max-width: 780px){
+          .rb-root .rb-my-projects{ top:10px; right:12px; padding:8px 12px; font-size:12px; }
           .rb-root{ flex-direction:column; }
           .rb-root .navrail{ display:none; }
           .rb-root .main{ padding:20px; }
           .rb-grid-2{ grid-template-columns: 1fr !important; }
         }
       `}</style>
+
+      {/* 가은/Claude(2026-07-21): 기존 /projects 페이지(레거시 스타일 그대로 유지)로
+          돌아갈 수 있는 진입점 — 버튼 자체만 board 톤(glass/badge 스타일)으로 맞춘다. */}
+      <button className="rb-my-projects btn-ghost mono" onClick={() => navigate('/projects')}>
+        <FolderOpen size={14} /> 내 프로젝트
+      </button>
 
       {showNav && (
         <div className="navrail glass">
@@ -137,10 +152,29 @@ function EntryScreen({ onEnter, loading, error, projectId, ensureProject, docume
   const [criteriaLoading, setCriteriaLoading] = useState(false);
   const [criteriaError, setCriteriaError] = useState('');
   const [isCriteriaDragging, setIsCriteriaDragging] = useState(false);
+  const [deletingIds, setDeletingIds] = useState([]);
   const criteriaFileInputRef = useRef(null);
 
   function updateDoc(id, patch) {
     setDocuments((prev) => prev.map((doc) => (doc.id === id ? { ...doc, ...patch } : doc)));
+  }
+
+  // 가은/Claude(2026-07-21): 실측 요청 — 잘못 올린 공고문·평가기준 문서를 지울 수 있게.
+  // backendId(실제 DB document_id)가 아직 없으면(업로드/색인 중) 서버 삭제는 건너뛰고
+  // 목록에서만 뺀다 — 곧 도착할 폴링/응답이 사라진 행을 되살리지 않도록 documents에서
+  // 완전히 지운다(updateDoc과 달리 필터로 제거).
+  async function handleDeleteDoc(doc) {
+    if (deletingIds.includes(doc.id)) return
+    setDeletingIds((prev) => [...prev, doc.id])
+    try {
+      if (doc.backendId && projectId) {
+        await deleteDocument(projectId, doc.backendId)
+      }
+      setDocuments((prev) => prev.filter((d) => d.id !== doc.id))
+    } catch (err) {
+      setCriteriaError(err.message)
+      setDeletingIds((prev) => prev.filter((id) => id !== doc.id))
+    }
   }
 
   function pollDocumentIndexing(pid, documentId, rowId, contentStatus, contentMeta) {
@@ -183,14 +217,17 @@ function EntryScreen({ onEnter, loading, error, projectId, ensureProject, docume
       const result = await fetchCriteriaUrl(criteriaUrl.trim(), pid);
       const id = `url-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
       const title = result.page_content?.title || criteriaUrl.trim();
-      const excerpt = (result.page_content?.text || '').trim().slice(0, 300);
       const { status: contentStatus, meta: contentMeta } = assessCriteriaContent(result);
 
+      // 가은/Claude(2026-07-21): 실측 지적 — 여기서 원문 앞부분 300자를 그대로 미리보기로
+      // 보여줬더니 메뉴/내비게이션 텍스트("공지사항 - 공지사항 - 뉴포커스 - ...")가 그대로
+      // 나왔다. 원문 요약은 "공모전 분석" 화면(AnalysisScreen)이 LLM으로 뽑은 요약을 대신
+      // 보여주므로, 여기서는 원문 슬라이스를 더 이상 안 만든다.
       if (result.document_status === 'indexing' && result.document_id) {
-        setDocuments((prev) => [...prev, { id, name: title, meta: '공고문을 색인하는 중...', status: 'embedding', excerpt }]);
+        setDocuments((prev) => [...prev, { id, backendId: result.document_id, name: title, meta: '공고문을 색인하는 중...', status: 'embedding' }]);
         pollDocumentIndexing(pid, result.document_id, id, contentStatus, contentMeta);
       } else {
-        setDocuments((prev) => [...prev, { id, name: title, meta: contentMeta, status: contentStatus, excerpt }]);
+        setDocuments((prev) => [...prev, { id, backendId: result.document_id, name: title, meta: contentMeta, status: contentStatus }]);
       }
       setCriteriaUrl('');
     } catch (err) {
@@ -207,10 +244,10 @@ function EntryScreen({ onEnter, loading, error, projectId, ensureProject, docume
       const pid = await ensureProject();
       const doc = await uploadDocument(pid, file, 'pdf', 'criteria');
       if (doc.status === 'conversion_failed') {
-        updateDoc(id, { status: 'error', meta: doc.conversion_metadata?.conversion_error || '문서를 변환하지 못했습니다.' });
+        updateDoc(id, { backendId: doc.id, status: 'error', meta: doc.conversion_metadata?.conversion_error || '문서를 변환하지 못했습니다.' });
         return;
       }
-      updateDoc(id, { status: 'done', meta: formatFileSize(file.size) });
+      updateDoc(id, { backendId: doc.id, status: 'done', meta: formatFileSize(file.size) });
     } catch (err) {
       updateDoc(id, { status: 'error', meta: err.message });
     }
@@ -344,10 +381,21 @@ function EntryScreen({ onEnter, loading, error, projectId, ensureProject, docume
                   <div style={{ fontSize: 13.5, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{doc.name}</div>
                   <div style={{ fontSize: 12, color: 'var(--text-2)' }}>{doc.meta}</div>
                 </div>
-                {doc.status === 'embedding' && <span className="badge amber mono" style={{ flexShrink: 0, marginLeft: 10 }}>색인 중</span>}
-                {doc.status === 'done' && <span className="badge green mono" style={{ flexShrink: 0, marginLeft: 10 }}>✓ 완료</span>}
-                {doc.status === 'warning' && <span className="badge amber mono" style={{ flexShrink: 0, marginLeft: 10 }}>확인 필요</span>}
-                {doc.status === 'error' && <span className="badge coral mono" style={{ flexShrink: 0, marginLeft: 10 }}>실패</span>}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0, marginLeft: 10 }}>
+                  {doc.status === 'embedding' && <span className="badge amber mono">색인 중</span>}
+                  {doc.status === 'done' && <span className="badge green mono">✓ 완료</span>}
+                  {doc.status === 'warning' && <span className="badge amber mono">확인 필요</span>}
+                  {doc.status === 'error' && <span className="badge coral mono">실패</span>}
+                  <button
+                    className="icon-btn"
+                    onClick={() => handleDeleteDoc(doc)}
+                    disabled={deletingIds.includes(doc.id)}
+                    aria-label="문서 삭제"
+                    style={{ background: 'none', border: 'none', padding: 4, cursor: deletingIds.includes(doc.id) ? 'default' : 'pointer', color: 'var(--text-2)', display: 'flex', opacity: deletingIds.includes(doc.id) ? 0.4 : 1 }}
+                  >
+                    <X size={14} />
+                  </button>
+                </div>
               </div>
             ))}
           </div>
@@ -368,75 +416,167 @@ function EntryScreen({ onEnter, loading, error, projectId, ensureProject, docume
   );
 }
 
-const _ANALYSIS_STATUS_LABEL = {
-  done: '수집 완료', embedding: '색인 중', warning: '확인 필요', error: '실패',
-};
-const _ANALYSIS_STATUS_TONE = {
-  done: 'green', embedding: 'amber', warning: 'amber', error: 'coral',
-};
+const _CONFIDENCE_LABEL = { high: '확신 높음', medium: '확신 보통', low: '확신 낮음' };
 
 /* ---------------- 2. 공모전 분석 결과 (공통) ----------------
- * 가은/Claude(2026-07-20): 실측 버그 — URL/파일로 실제 공고문을 수집해도 이 화면엔
- * 항상 똑같은 고정 예시("2026 IT 예비창업인...")만 나왔다. EntryScreen에서 모은
- * documents를 그대로 보여준다 — 평가 항목·배점 자동 추출(PER-002)까지는 아직
- * 이 화면에 연결하지 않았고(별도 작업), 실제로 수집된 문서와 그 본문 일부만 보여준다.
- * 아무것도 수집하지 않고 넘어온 경우에는 "예시"라고 명시한 카드로 대체한다.
+ * 가은/Claude(2026-07-21): 실측 제보 두 건에 대한 대응.
+ * 1) "URL 넣고 분석 시작 눌렀는데 예시 카드만 나왔다" — 이 화면이 늘 고정 예시만
+ *    보여줬던 문제. 이제 실제 수집한 공고문을 근거로 백엔드가 LLM 1회 호출로 뽑은
+ *    official_facts(공고문에 실제 있는 사실)/strategic_analysis(AI 추론)를 보여준다.
+ * 2) 팀 UX 스펙(2026-07-21) 그대로: 첫 화면은 4개 카드(핵심 과제/평가 갈리는 지점/
+ *    반드시 지킬 조건/수상작 경향)만, 아래에 접을 수 있는 상세 분석(추천 전략/주의
+ *    리스크/출처)을 둔다. 수상작·유사사례 경향은 이 시스템에 그 데이터 소스 자체가
+ *    없어서 항상 "자료 미확보" 상태로 고정 표시하고 LLM이 지어내지 않는다.
  */
-function AnalysisScreen({ mode, onNext, documents }) {
-  const hasDocuments = documents && documents.length > 0;
-  const exampleItems = [
-    { icon: Target, color: "purple", title: "진짜로 원하는 문제와 변화", body: "표면적 주제어가 아닌 정책·사업 목적을 먼저 파악해요." },
-    { icon: Award, color: "coral", title: "평가에서 가장 크게 갈리는 지점", body: "공고문에 배점이 있으면 그 배점을 최우선 근거로 써요." },
-    { icon: ShieldCheck, color: "green", title: "반드시 지켜야 할 조건", body: "참가 자격, 제출 형식, 일정 등 필수 조건을 짚어요." },
-    { icon: TrendingUp, color: "amber", title: "수상작에서 읽히는 경향", body: "축적된 공고·심사 데이터가 쌓이면 여기서 보여줄 예정이에요." },
-  ];
+function AnalysisScreen({ mode, onNext, projectId }) {
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [analysis, setAnalysis] = useState(null);
+  const [detailOpen, setDetailOpen] = useState(false);
+
+  useEffect(() => {
+    if (!projectId) {
+      setLoading(false);
+      setAnalysis({ has_announcement: false });
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+    setError('');
+    getAnnouncementAnalysis(projectId)
+      .then((data) => { if (!cancelled) setAnalysis(data); })
+      .catch((err) => { if (!cancelled) setError(err.message); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [projectId]);
+
+  if (loading) {
+    return (
+      <div style={{ maxWidth: 820 }}>
+        <div className="badge purple mono">공고문 분석 중</div>
+        <h1 style={{ fontSize: 26, fontWeight: 700, margin: "12px 0 24px" }}>등록한 공고문을 읽고 있어요...</h1>
+        <div className="card glass" style={{ color: "var(--text-2)", fontSize: 13 }}>잠시만 기다려주세요.</div>
+      </div>
+    );
+  }
+
+  const hasAnnouncement = !!analysis?.has_announcement;
+  const facts = analysis?.official_facts;
+  const strategy = analysis?.strategic_analysis;
+  const evidence = analysis?.evidence || [];
+
+  const cards = hasAnnouncement
+    ? [
+        { icon: Target, color: "purple", title: "핵심 과제", body: strategy?.core_intent || "핵심 과제를 판단할 근거가 부족해요." },
+        { icon: Award, color: "coral", title: "평가에서 갈리는 지점", list: facts?.evaluation_criteria },
+        { icon: ShieldCheck, color: "green", title: "반드시 지켜야 할 조건", list: [...(facts?.eligibility || []), ...(facts?.submission_requirements || [])].slice(0, 4) },
+        { icon: TrendingUp, color: "amber", title: "수상작·유사사례 경향", body: "수상작 자료 미확보 — 유사 공모전 사례 기반 분석은 아직 지원하지 않아요." },
+      ]
+    : [];
 
   return (
     <div style={{ maxWidth: 820 }}>
-      <div className="badge purple mono">{hasDocuments ? "공고문·평가기준 수집 결과" : "예시 화면 · 공고문 미등록"}</div>
+      <div className="badge purple mono">{hasAnnouncement ? "공고문 분석 결과" : "공고문 미등록"}</div>
       <h1 style={{ fontSize: 26, fontWeight: 700, margin: "12px 0 24px" }}>
-        {hasDocuments ? "등록한 공고문을 확인하세요" : "등록된 공고문이 없어요"}
+        {hasAnnouncement ? (analysis?.announcement_title || "등록한 공고문을 확인하세요") : "등록된 공고문이 없어요"}
       </h1>
 
-      {hasDocuments ? (
-        <div style={{ display: "flex", flexDirection: "column", gap: 14, marginBottom: 20 }}>
-          {documents.map((doc) => (
-            <div key={doc.id} className="card glass">
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10, marginBottom: doc.excerpt ? 10 : 0 }}>
-                <div style={{ fontWeight: 700, fontSize: 14.5 }}>{doc.name}</div>
-                <span className={`badge ${_ANALYSIS_STATUS_TONE[doc.status] || 'amber'} mono`} style={{ flexShrink: 0 }}>
-                  {_ANALYSIS_STATUS_LABEL[doc.status] || doc.status}
-                </span>
-              </div>
-              <div style={{ fontSize: 12.5, color: "var(--text-2)", lineHeight: 1.6 }}>{doc.meta}</div>
-              {doc.excerpt && (
-                <div style={{ fontSize: 12.5, color: "var(--text-1)", lineHeight: 1.7, marginTop: 10, borderTop: "1px solid var(--glass-border)", paddingTop: 10 }}>
-                  {doc.excerpt}…
-                </div>
-              )}
-            </div>
-          ))}
-        </div>
-      ) : (
+      {error && <p style={{ color: "var(--coral)", fontSize: 13, marginBottom: 16 }}>{error}</p>}
+
+      {hasAnnouncement ? (
         <>
-          <div className="rb-grid-2" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 20 }}>
-            {exampleItems.map((it, i) => (
+          <div className="rb-grid-2" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 16 }}>
+            {cards.map((it, i) => (
               <div key={i} className="card glass">
                 <it.icon size={17} color={`var(--${it.color})`} />
                 <div style={{ fontWeight: 600, fontSize: 13.5, margin: "10px 0 6px" }}>{it.title}</div>
-                <div style={{ fontSize: 12.5, color: "var(--text-2)", lineHeight: 1.6 }}>{it.body}</div>
+                {it.body && <div style={{ fontSize: 12.5, color: "var(--text-2)", lineHeight: 1.6 }}>{it.body}</div>}
+                {it.list && (
+                  it.list.length > 0
+                    ? <ul style={{ margin: 0, paddingLeft: 16, fontSize: 12.5, color: "var(--text-2)", lineHeight: 1.7 }}>
+                        {it.list.map((v, j) => <li key={j}>{v}</li>)}
+                      </ul>
+                    : <div style={{ fontSize: 12.5, color: "var(--text-2)" }}>확인된 내용이 없어요.</div>
+                )}
               </div>
             ))}
           </div>
-          <div className="card glass" style={{ borderColor: "var(--amber-dim)", marginBottom: 24 }}>
-            <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
-              <AlertCircle size={15} color="var(--amber)" style={{ marginTop: 2, flexShrink: 0 }} />
-              <div style={{ fontSize: 12.5, color: "var(--text-1)", lineHeight: 1.6 }}>
-                이전 화면에서 공고 URL이나 파일을 등록하지 않았어요 — 공식 심사기준 없이 일반적인 평가 관점으로 진행합니다.
+
+          <button
+            className="btn-ghost"
+            style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 20 }}
+            onClick={() => setDetailOpen((v) => !v)}
+          >
+            {detailOpen ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+            상세 분석 {detailOpen ? "접기" : "보기"}
+          </button>
+
+          {detailOpen && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 14, marginBottom: 24 }}>
+              <div className="card glass">
+                <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 10 }}>추천 전략</div>
+                <ul style={{ margin: 0, paddingLeft: 16, fontSize: 12.5, color: "var(--text-1)", lineHeight: 1.8 }}>
+                  {[...(strategy?.winning_points || []), ...(strategy?.recommended_direction || [])].map((v, i) => <li key={i}>{v}</li>)}
+                  {(strategy?.winning_points?.length || 0) + (strategy?.recommended_direction?.length || 0) === 0 && (
+                    <li style={{ color: "var(--text-2)" }}>제안할 전략을 판단할 근거가 부족해요.</li>
+                  )}
+                </ul>
+              </div>
+
+              <div className="card glass">
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+                  <Calendar size={15} color="var(--purple)" />
+                  <div style={{ fontWeight: 700, fontSize: 14 }}>일정</div>
+                </div>
+                <div style={{ fontSize: 12.5, color: (facts?.deadline && facts.deadline !== '미공개') ? "var(--text-1)" : "var(--text-2)" }}>
+                  제출 마감: {facts?.deadline || "미공개"}
+                </div>
+              </div>
+
+              <div className="card glass">
+                <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 10 }}>주의 리스크</div>
+                <ul style={{ margin: 0, paddingLeft: 16, fontSize: 12.5, color: "var(--text-1)", lineHeight: 1.8 }}>
+                  {[...(strategy?.risk_flags || []), ...(facts?.disqualification_rules || [])].map((v, i) => <li key={i}>{v}</li>)}
+                  {(strategy?.risk_flags?.length || 0) + (facts?.disqualification_rules?.length || 0) === 0 && (
+                    <li style={{ color: "var(--text-2)" }}>공고문에 명시된 실격·주의 사항이 없어요.</li>
+                  )}
+                </ul>
+              </div>
+
+              <div className="card glass">
+                <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 10 }}>출처</div>
+                {evidence.length === 0 && <div style={{ fontSize: 12.5, color: "var(--text-2)" }}>표시할 근거가 없어요.</div>}
+                {evidence.map((e, i) => (
+                  <div key={i} style={{ padding: "8px 0", borderTop: i > 0 ? "1px solid var(--glass-border)" : "none" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "flex-start" }}>
+                      <div style={{ fontSize: 12.5, color: "var(--text-1)" }}>{e.claim}</div>
+                      <span className={`badge ${e.source_type === 'announcement' ? 'green' : 'purple'} mono`} style={{ flexShrink: 0 }}>
+                        {e.source_type === 'announcement' ? '공고문 근거' : 'AI 추론'}
+                      </span>
+                    </div>
+                    <div style={{ fontSize: 11, color: "var(--text-2)", marginTop: 2 }}>
+                      {e.location || (e.source_type === 'announcement' ? '위치 미상' : '추론')} · {_CONFIDENCE_LABEL[e.confidence] || e.confidence}
+                    </div>
+                  </div>
+                ))}
+                {(analysis?.source_document_names?.length || 0) > 0 && (
+                  <div style={{ fontSize: 11.5, color: "var(--text-2)", marginTop: 10 }}>
+                    참고 문서: {analysis.source_document_names.join(', ')}
+                  </div>
+                )}
               </div>
             </div>
-          </div>
+          )}
         </>
+      ) : (
+        <div className="card glass" style={{ borderColor: "var(--amber-dim)", marginBottom: 24 }}>
+          <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+            <AlertCircle size={15} color="var(--amber)" style={{ marginTop: 2, flexShrink: 0 }} />
+            <div style={{ fontSize: 12.5, color: "var(--text-1)", lineHeight: 1.6 }}>
+              이전 화면에서 공고 URL이나 파일을 등록하지 않았어요 — 공식 심사기준 없이 일반적인 평가 관점으로 진행합니다.
+            </div>
+          </div>
+        </div>
       )}
 
       <button className="btn-primary" style={{ display: "flex", alignItems: "center", gap: 8 }} onClick={onNext}>
@@ -853,7 +993,7 @@ export default function ReviewBoardPrototype() {
         />
       )}
       {stage === "analysis" && (
-        <AnalysisScreen mode={mode} onNext={goNext} documents={criteriaDocuments} />
+        <AnalysisScreen mode={mode} onNext={goNext} projectId={projectId} />
       )}
       {stage === "ideation" && <IdeationScreen onNext={goNext} />}
       {stage === "ideation_result" && <IdeationResultScreen />}

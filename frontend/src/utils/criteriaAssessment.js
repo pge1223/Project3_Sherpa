@@ -31,7 +31,11 @@ export function assessCriteriaContent(result) {
   const hasCriteriaSignal = CRITERIA_KEYWORDS.some((k) => (result.page_content?.text || '').includes(k))
 
   let status = 'done'
-  let meta = attachmentCount > 0 ? `첨부파일 ${attachmentCount}개 수집` : new URL(result.origin_url).hostname
+  // 가은/Claude(2026-07-21): 실측 지적 — "첨부파일 2개 수집 · HWP 1개는 못 읽었어요"가
+  // 마치 "2개 중 1개를 못 읽었다"(부분집합)처럼 읽혔다. attachments(자동으로 읽어서 수집
+  // 완료한 것)와 unsupported_attachments(HWP라 아예 못 읽은 것)는 서로 다른, 겹치지 않는
+  // 별개 목록이다 — "이 외"를 붙여 별도 개수임을 명시한다.
+  let meta = attachmentCount > 0 ? `첨부파일 ${attachmentCount}개 자동 수집 완료` : new URL(result.origin_url).hostname
 
   if (contentWarning) {
     status = 'warning'
@@ -45,7 +49,7 @@ export function assessCriteriaContent(result) {
     status = 'warning'
     meta = '이 페이지에서 공고 내용을 거의 찾지 못했습니다 — 실제 공고 상세 페이지 URL이 맞는지 확인해주세요.'
   } else if (unsupportedLinks.length > 0) {
-    meta += ` · HWP 첨부 ${unsupportedLinks.length}개는 자동으로 못 읽었어요(선택 — 필요하면 아래에서 받아 올리세요)`
+    meta += ` · 이 외 HWP 첨부 ${unsupportedLinks.length}개는 자동으로 못 읽었어요(선택 — 필요하면 아래에서 받아 올리세요)`
   }
 
   return { status, meta, unsupportedLinks }
