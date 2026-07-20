@@ -202,11 +202,13 @@ export default function ProjectListPage() {
       <main style={styles.main}>
         <div style={styles.headerRow}>
           <div className="badge-wrap" style={styles.brand}>AI Review Board</div>
-          <button style={styles.backButton} onClick={() => navigate('/board')}>← board로</button>
         </div>
 
         <div style={styles.header}>
-          <h1 style={styles.title}>내 프로젝트</h1>
+          <div style={styles.titleRow}>
+            <button style={styles.backButton} onClick={() => navigate('/board')} aria-label="board로 돌아가기">&lt;</button>
+            <h1 style={styles.title}>내 프로젝트</h1>
+          </div>
           <button style={styles.newButton} onClick={() => navigate('/projects/new')}>
             + 새 프로젝트
           </button>
@@ -280,20 +282,27 @@ const styles = {
   main: { flex: 1, minWidth: 0, padding: '32px 40px', maxWidth: 760, overflowY: 'auto' },
   headerRow: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 },
   brand: { fontSize: 13, fontWeight: 700, letterSpacing: '0.02em', color: '#1c1a2e' },
-  backButton: {
-    background: 'transparent',
-    border: '1px solid rgba(28,26,46,0.10)',
-    borderRadius: 12,
-    padding: '8px 14px',
-    fontSize: 13,
-    color: '#5b5770',
-    cursor: 'pointer',
-  },
   header: {
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'space-between',
     margin: '4px 0 20px',
+  },
+  titleRow: { display: 'flex', alignItems: 'center', gap: 10 },
+  backButton: {
+    background: 'transparent',
+    border: '1px solid rgba(28,26,46,0.10)',
+    borderRadius: 10,
+    width: 32,
+    height: 32,
+    fontSize: 16,
+    lineHeight: 1,
+    color: '#5b5770',
+    cursor: 'pointer',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
   },
   title: {
     margin: 0,
