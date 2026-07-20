@@ -53,3 +53,42 @@ class FetchUrlRequest(BaseModel):
 class FetchUrlResponse(UrlExtractionResult):
     document_id: Optional[str] = None
     document_status: Optional[str] = None
+
+
+# 가은/Claude(2026-07-21): "공모전 분석" 화면(사용자 UX 스펙, 2026-07-21) — 공고문에서
+# 실제로 확인되는 사실(official_facts)과 AI가 추론한 전략적 분석(strategic_analysis)을
+# 분리해서 반환한다. 공고문에 없는 정보를 지어내지 않는다 — 못 찾은 필드는 빈 배열/
+# "미공개" 문자열로 명시한다(값을 비워두는 대신 근거 없음 자체를 표시).
+class OfficialFacts(BaseModel):
+    eligibility: list[str] = []
+    deadline: str = "미공개"
+    submission_requirements: list[str] = []
+    evaluation_criteria: list[str] = []
+    disqualification_rules: list[str] = []
+
+
+class StrategicAnalysis(BaseModel):
+    core_intent: str = ""
+    winning_points: list[str] = []
+    recommended_direction: list[str] = []
+    risk_flags: list[str] = []
+
+
+class AnnouncementEvidence(BaseModel):
+    claim: str
+    # "announcement": 공고문 원문에 직접 근거가 있음 / "inference": AI가 추론한 내용(원문에 명시 없음)
+    source_type: str
+    location: Optional[str] = None
+    confidence: str = "medium"
+
+
+# 가은/Claude(2026-07-21): 수상작/유사 사례 경향은 이 시스템에 그 데이터 소스 자체가
+# 없어서(수상작 아카이브 미구축) LLM이 절대 지어내지 않는다 — has_similar_case_data는
+# 항상 False로 고정하고, 프론트가 이 값을 보고 "자료 미확보" 상태를 표시한다.
+class AnnouncementAnalysisResponse(BaseModel):
+    has_announcement: bool
+    official_facts: Optional[OfficialFacts] = None
+    strategic_analysis: Optional[StrategicAnalysis] = None
+    evidence: list[AnnouncementEvidence] = []
+    has_similar_case_data: bool = False
+    source_document_names: list[str] = []
