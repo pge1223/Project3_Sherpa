@@ -5,6 +5,27 @@
 
 ---
 
+## ⚠️ 2026-07-20 서비스 방향 전환 (진행 중)
+
+팀 논의를 거쳐 서비스 방향이 바뀌었다. 최신 방향과 근거는
+`docs/REVIEW_BOARD_서비스_방향성_정리_20260720.md`를 최우선으로 확인할 것 —
+이 문서(기준일 2026-07-14)를 포함해 아래 내용 상당수는 그 이전 버전(4위원
+고정 committee, 항상 배치형 회의) 기준이라 최신 방향과 다를 수 있다.
+
+확정된 변경:
+
+- 기존 competition 도메인 고정 4위원 체계(창의성·기술·사업전략·완성도)는
+  더 이상 쓰지 않지만, 코드·데이터는 지우지 않고 legacy로 남긴다.
+- "작성 전(주제 발굴) / 작성 후(문서 피드백)" 2-모드 신규 플로우를 도입한다.
+- 문서 피드백은 즉시 결과 제공이 기본이고, AI 위원 소집은 배치형이 아니라
+  대화형으로 바뀐다.
+- 이번 전환 작업 담당: 기획/개발 위원 페르소나 카드는 용준, 신규 프론트
+  플로우는 가은.
+
+이 문서를 최초 인수인계용으로 쓸 때도 위 전환 노트를 먼저 반영해서 요약할 것.
+
+---
+
 ## 1. 프로젝트 식별
 
 - **프로젝트명:** AI Review Board
@@ -913,19 +934,21 @@ Claude는 아래 규칙을 따른다.
 
 Claude 또는 다른 AI가 저장소에 접근할 수 있다면 다음 순서로 확인한다.
 
-1. `claude_context.md`
-2. `README.md`
-3. `docs/00_PROJECT_OVERVIEW.md`
-4. `docs/01_REQUIREMENTS.md`
-5. `docs/02_ARCHITECTURE.md`
-6. `docs/03_DECISIONS.md`
-7. `docs/04_TEAM_WORKFLOW.md`
-8. `contracts/schemas/review_output.schema.json`
-9. `contracts/meeting_rules.json`
-10. `contracts/mocks/`
-11. 각 모듈의 README
-12. 실제 구현 코드
-13. 테스트 코드
+1. `docs/REVIEW_BOARD_서비스_방향성_정리_20260720.md` (최신 서비스 방향 — 아래
+   문서들과 충돌하면 이 문서를 우선한다)
+2. `claude_context.md`
+3. `README.md`
+4. `docs/00_PROJECT_OVERVIEW.md`
+5. `docs/01_REQUIREMENTS.md`
+6. `docs/02_ARCHITECTURE.md`
+7. `docs/03_DECISIONS.md`
+8. `docs/04_TEAM_WORKFLOW.md`
+9. `contracts/schemas/review_output.schema.json`
+10. `contracts/meeting_rules.json`
+11. `contracts/mocks/`
+12. 각 모듈의 README
+13. 실제 구현 코드
+14. 테스트 코드
 
 서로 충돌하는 내용이 있을 경우 최신 요구사항정의서와 공통 계약을 우선하고, 충돌 내용을 사용자에게 알린다.
 
