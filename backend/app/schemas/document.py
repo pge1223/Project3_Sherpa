@@ -82,9 +82,18 @@ class AnnouncementEvidence(BaseModel):
     confidence: str = "medium"
 
 
-# 가은/Claude(2026-07-21): 수상작/유사 사례 경향은 이 시스템에 그 데이터 소스 자체가
-# 없어서(수상작 아카이브 미구축) LLM이 절대 지어내지 않는다 — has_similar_case_data는
-# 항상 False로 고정하고, 프론트가 이 값을 보고 "자료 미확보" 상태를 표시한다.
+# 가은/Claude(2026-07-21): kyh님이 크롤링(contest_works, 소통혁신24)해서 category/
+# source_org까지 채운(scripts/classify_contest_works.py) 수상작 아카이브가 생겨서, 여기
+# 붙였던 "데이터 소스 자체가 없다"는 이전 제약은 더 이상 사실이 아니다. LLM이 원문에서
+# 안 나오는 개별 수상작을 지어내는 건 여전히 막고, 대신 실제 DB에서 조회한 값만 담는다
+# (없으면 has_similar_case_data=False로 그대로 "미확보" 상태를 보여준다).
+class SimilarWork(BaseModel):
+    title: str
+    source_org: str = ""
+    award_grade: str = ""
+    selection_status: str = ""  # "winner" | "candidate"
+
+
 class AnnouncementAnalysisResponse(BaseModel):
     has_announcement: bool
     # 가은/Claude(2026-07-21): 실측 요청 — 화면 제목에 실제 공모전명이 나오게. 페이지
@@ -95,4 +104,5 @@ class AnnouncementAnalysisResponse(BaseModel):
     strategic_analysis: Optional[StrategicAnalysis] = None
     evidence: list[AnnouncementEvidence] = []
     has_similar_case_data: bool = False
+    similar_works: list[SimilarWork] = []
     source_document_names: list[str] = []

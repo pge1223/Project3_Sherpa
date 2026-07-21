@@ -563,6 +563,11 @@ function AnalysisScreen({ mode, onNext, onBack, projectId }) {
   const facts = analysis?.official_facts;
   const strategy = analysis?.strategic_analysis;
   const evidence = analysis?.evidence || [];
+  // 가은/Claude(2026-07-21): kyh님이 크롤링+분류한 소통혁신24 수상작 아카이브
+  // (contest_works)가 생겨서 실제 유사사례를 보여줄 수 있게 됐다 — 백엔드가 매칭을
+  // 못 찾으면(팀 공유 DB에 아직 데이터가 안 올라왔거나 이 카테고리에 사례가 없으면)
+  // has_similar_case_data가 false로 오므로 그때는 기존 "미확보" 문구를 그대로 보여준다.
+  const similarWorks = analysis?.similar_works || [];
 
   const cards = hasAnnouncement
     ? [
@@ -570,7 +575,12 @@ function AnalysisScreen({ mode, onNext, onBack, projectId }) {
         { icon: Target, color: "purple", title: "핵심 과제", body: strategy?.core_intent || "핵심 과제를 판단할 근거가 부족해요." },
         { icon: Award, color: "coral", title: "평가에서 갈리는 지점", list: facts?.evaluation_criteria },
         { icon: ShieldCheck, color: "green", title: "반드시 지켜야 할 조건", list: [...(facts?.eligibility || []), ...(facts?.submission_requirements || [])].slice(0, 4) },
-        { icon: TrendingUp, color: "amber", title: "수상작·유사사례 경향", body: "수상작 자료 미확보 — 유사 공모전 사례 기반 분석은 아직 지원하지 않아요." },
+        analysis?.has_similar_case_data
+          ? {
+              icon: TrendingUp, color: "amber", title: "수상작·유사사례 경향",
+              list: similarWorks.map((w) => [w.title, w.source_org, w.award_grade].filter(Boolean).join(" · ")),
+            }
+          : { icon: TrendingUp, color: "amber", title: "수상작·유사사례 경향", body: "수상작 자료 미확보 — 유사 공모전 사례 기반 분석은 아직 지원하지 않아요." },
       ]
     : [];
 
