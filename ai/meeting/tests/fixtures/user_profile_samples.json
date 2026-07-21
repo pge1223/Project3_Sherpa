@@ -1,0 +1,52 @@
+{
+  "_meta": {
+    "note": "작성자: 경이. 개인 맞춤형 피드백 루프(버전 추적형 User RAG)의 사용자 프로필 계약 샘플. 마이페이지에서 제출하는 GitHub·이력/교육수준을 personalization.classify_impl_difficulty()가 소비하는 구조. 지금은 프론트 mock(VersionTrackerTestPage.jsx PROFILES 2종)과 1:1로 맞춰둔 초안 — 확정되면 contracts/로 승격 제안 예정. 담당 경계: 저장/폼은 윤한(user 스키마)·가은(MyPage 폼), 소비 로직은 경이.",
+    "schema_version": "0.1.0-draft"
+  },
+  "profiles": [
+    {
+      "profile_id": "sample-nonmajor",
+      "display_label": "비전공자",
+      "education": {
+        "is_technical_major": false,
+        "field": "경영학",
+        "degree": "bachelor",
+        "graduated": true
+      },
+      "experience": {
+        "it_internship_months": 0,
+        "competition_participations": 0,
+        "awards": 0
+      },
+      "github": {
+        "connected": true,
+        "total_commits": 32,
+        "primary_languages": ["HTML", "CSS"],
+        "has_backend_experience": false,
+        "relevant_projects": 0
+      }
+    },
+    {
+      "profile_id": "sample-major",
+      "display_label": "컴퓨터공학 전공자",
+      "education": {
+        "is_technical_major": true,
+        "field": "컴퓨터공학",
+        "degree": "bachelor",
+        "graduated": true
+      },
+      "experience": {
+        "it_internship_months": 6,
+        "competition_participations": 1,
+        "awards": 1
+      },
+      "github": {
+        "connected": true,
+        "total_commits": 480,
+        "primary_languages": ["Python", "FastAPI", "React"],
+        "has_backend_experience": true,
+        "relevant_projects": 2
+      }
+    }
+  ]
+}
