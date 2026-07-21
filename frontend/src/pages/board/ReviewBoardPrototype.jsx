@@ -528,6 +528,30 @@ function AnalysisScreen({ mode, onNext, onBack, projectId }) {
   const [ideaTopic, setIdeaTopic] = useState(null);
   const [workDetail, setWorkDetail] = useState(null); // { contestTitle, works } | null
   const [workDetailLoading, setWorkDetailLoading] = useState(false);
+  const [panelWidth, setPanelWidth] = useState(460);
+  const resizingRef = useRef(false);
+
+  // 가은/Claude(2026-07-21): 실측 요청 — 수상작 상세 패널을 마우스로 드래그해 너비를
+  // 조절할 수 있게. 패널이 화면 오른쪽에 고정돼 있어 왼쪽 가장자리를 끌면 그 지점부터
+  // 화면 끝까지가 새 너비가 된다.
+  useEffect(() => {
+    function handleMouseMove(e) {
+      if (!resizingRef.current) return;
+      const next = window.innerWidth - e.clientX;
+      setPanelWidth(Math.min(Math.max(next, 340), Math.min(760, window.innerWidth - 80)));
+    }
+    function handleMouseUp() {
+      if (!resizingRef.current) return;
+      resizingRef.current = false;
+      document.body.style.userSelect = '';
+    }
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, []);
 
   useEffect(() => {
     if (!projectId) {
@@ -741,11 +765,18 @@ function AnalysisScreen({ mode, onNext, onBack, projectId }) {
       <div
         className="glass"
         style={{
-          position: "fixed", top: 0, right: 0, bottom: 0, width: 340, maxWidth: "90vw",
+          position: "fixed", top: 0, right: 0, bottom: 0, width: panelWidth, maxWidth: "90vw",
           padding: 24, overflowY: "auto", zIndex: 40, borderLeft: "1px solid var(--glass-border)",
           boxShadow: "-8px 0 24px rgba(28,26,46,0.10)",
         }}
       >
+        <div
+          onMouseDown={() => { resizingRef.current = true; document.body.style.userSelect = 'none'; }}
+          style={{
+            position: "absolute", left: 0, top: 0, bottom: 0, width: 8,
+            cursor: "col-resize", zIndex: 1,
+          }}
+        />
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16, gap: 8 }}>
           <div style={{ fontWeight: 700, fontSize: 14, lineHeight: 1.5 }}>{workDetail.contestTitle}</div>
           <button
