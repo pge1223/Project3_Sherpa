@@ -278,7 +278,14 @@ export default function PdfDocumentView({ pdfUrl, authHeaders, quoteMatches, fee
   return (
     <div>
       {error && <p style={{ color: 'var(--coral)', fontSize: 13 }}>{error}</p>}
-      {loading && <p style={{ color: 'var(--text-2)', fontSize: 13 }}>페이지를 불러오는 중...</p>}
+      {loading && (
+        <div style={{
+          position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center',
+          fontSize: 13, color: 'var(--text-2)',
+        }}>
+          페이지를 불러오는 중...
+        </div>
+      )}
 
       {!loading && numPages > 1 && (
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 14, marginBottom: 14 }}>
