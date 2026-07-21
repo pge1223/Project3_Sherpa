@@ -4,7 +4,7 @@ import {
   Link2, Upload, FileText, Sparkles,
   CheckCircle2, Circle, AlertCircle, Award, Target, ShieldCheck,
   ArrowRight, TrendingUp, ChevronDown, ChevronUp, Calendar, FolderOpen, X,
-  Menu, User, LogOut,
+  Menu, User, LogOut, ExternalLink,
 } from "lucide-react";
 import { createProject, getProject, updateProject } from "../../api/projectApi";
 import {
@@ -797,7 +797,21 @@ function AnalysisScreen({ mode, onNext, onBack, projectId }) {
               </span>
               {w.award_grade && <span style={{ fontSize: 11.5, color: "var(--text-2)" }}>{w.award_grade}</span>}
             </div>
-            <div style={{ fontSize: 13.5, fontWeight: 600, marginBottom: 6 }}>{w.work_title}</div>
+            {w.source_url ? (
+              <a
+                href={w.source_url}
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{
+                  display: "inline-flex", alignItems: "center", gap: 4,
+                  fontSize: 13.5, fontWeight: 600, marginBottom: 6, color: "var(--purple)",
+                }}
+              >
+                {w.work_title} <ExternalLink size={12} />
+              </a>
+            ) : (
+              <div style={{ fontSize: 13.5, fontWeight: 600, marginBottom: 6 }}>{w.work_title}</div>
+            )}
             {w.images.length > 0 && (
               <img src={w.images[0]} alt={w.work_title} style={{ width: "100%", borderRadius: 8, marginBottom: 6, display: "block" }} />
             )}

@@ -522,6 +522,7 @@ async def get_contest_works_by_title(
             selection_status=str(doc.get("selection_status") or ""),
             images=[img.get("url") for img in (doc.get("images") or []) if img.get("url")],
             ocr_text=str(doc.get("ocr_text") or ""),
+            source_url=str(doc.get("source_url") or ""),
         )
         for doc in docs
     ]
