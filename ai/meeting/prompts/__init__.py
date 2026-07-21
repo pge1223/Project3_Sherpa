@@ -4,6 +4,13 @@
 
 from .prompt_loader import (
     build_chair_prompt,
+    build_ideation_conv_candidate_feasibility_prompt,
+    build_ideation_conv_candidate_planning_prompt,
+    build_ideation_conv_candidate_selection_prompt,
+    build_ideation_conv_discussion_prompt,
+    build_ideation_conv_question_prompt,
+    build_ideation_conv_sufficiency_prompt,
+    build_ideation_conv_synthesis_prompt,
     build_ideation_facilitator_prompt,
     build_ideation_synthesis_prompt,
     build_ideation_turn_prompt,
@@ -16,6 +23,13 @@ from .prompt_loader import (
 
 __all__ = [
     "build_chair_prompt",
+    "build_ideation_conv_candidate_feasibility_prompt",
+    "build_ideation_conv_candidate_planning_prompt",
+    "build_ideation_conv_candidate_selection_prompt",
+    "build_ideation_conv_discussion_prompt",
+    "build_ideation_conv_question_prompt",
+    "build_ideation_conv_sufficiency_prompt",
+    "build_ideation_conv_synthesis_prompt",
     "build_ideation_facilitator_prompt",
     "build_ideation_synthesis_prompt",
     "build_ideation_turn_prompt",

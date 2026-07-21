@@ -18,6 +18,7 @@ from app.api.routes.projects import router as project_router
 from app.api.routes.documents import router as document_router
 from app.api.routes.meetings import router as meeting_router
 from app.api.routes.media import router as media_router  # 재인/Claude (2026-07-16): 위원 발언 영상 스트리밍 중계 (app/api/routes/media.py)
+from app.api.routes.workbench import router as workbench_router  # 재인/Claude (2026-07-21): "AI 피드백" 워크벤치 인용 매칭 (app/api/routes/workbench.py)
 from app.core.logger import logger
 from ai.rag.converters.diagnostics import HwpDiagnosticsResult, log_hwp_diagnostics, run_hwp_diagnostics
 
@@ -41,6 +42,7 @@ app.include_router(project_router)
 app.include_router(document_router)
 app.include_router(meeting_router)
 app.include_router(media_router)  # 재인/Claude (2026-07-16): /media/available-speakers, /media/stream
+app.include_router(workbench_router)  # 재인/Claude (2026-07-21): /workbench/{project_id}/quotes
 
 # 용준/Claude(2026-07-20): 개발용 아이디어 발전 회의 프리뷰(POST /ideation-preview).
 # ENABLE_IDEATION_PREVIEW가 기본값(False)이면 라우터 자체를 등록하지 않는다 — 비활성화
@@ -50,6 +52,14 @@ if settings.ENABLE_IDEATION_PREVIEW:
 
     app.include_router(ideation_preview_router)
     logger.info("[ideation-preview] 개발용 프리뷰 라우터 등록됨 (ENABLE_IDEATION_PREVIEW=true)")
+
+    # 용준/Claude(2026-07-20): 개발용 대화형 아이디어 발전 회의 프리뷰
+    # (POST /ideation-conversation/start 등). 같은 플래그를 공유한다 — 둘 다 같은
+    # "개발용 ideation 프리뷰" 묶음이라 별도 플래그를 새로 만들지 않았다.
+    from app.api.routes.ideation_conversation_preview import router as ideation_conversation_router
+
+    app.include_router(ideation_conversation_router)
+    logger.info("[ideation-conversation] 개발용 대화형 프리뷰 라우터 등록됨 (ENABLE_IDEATION_PREVIEW=true)")
 
 # HWP 업로드를 실제로 시도하기 전에 서버 시작 시 한 번만 변환 가능 상태를 점검해
 # app.state에 캐싱한다 — soffice/unopkg/java 서브프로세스를 /health 요청마다 반복

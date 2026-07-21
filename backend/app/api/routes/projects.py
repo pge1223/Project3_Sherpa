@@ -124,6 +124,44 @@ async def delete_project(project_id: str, authorization: Optional[str] = Header(
     return {"message": "프로젝트가 삭제되었습니다"}
 
 
+# 가은/Claude(2026-07-21): "작성 전" 흐름에서 주제를 확정할 때, EntryScreen에서 이미
+# ensureProject()로 만들어둔 프로젝트(공고문이 붙어있을 수 있음)를 새로 하나 더 만들지
+# 않고 제목·설명만 갱신하기 위한 범용 patch. 도메인 변경(DOM-002)과는 별개 목적이라
+# 엔드포인트를 분리한다 — request.domain은 여기서 다루지 않는다.
+@router.patch("/{project_id}", response_model=ProjectResponse)
+async def update_project(
+    project_id: str,
+    request: ProjectUpdateRequest,
+    authorization: Optional[str] = Header(None, alias="authorization"),
+):
+    user_email = get_current_user(authorization)
+    project = await project_repo.find_by_id_and_user(project_id, user_email)
+
+    if not project:
+        raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없습니다")
+
+    update_data = {}
+    if request.title is not None:
+        update_data["title"] = request.title
+    if request.description is not None:
+        update_data["description"] = request.description
+    if not update_data:
+        raise HTTPException(status_code=400, detail="변경할 값이 없습니다")
+
+    updated = await project_repo.update_project(project_id, update_data)
+
+    return ProjectResponse(
+        id=str(updated["_id"]),
+        user_email=updated["user_email"],
+        title=updated["title"],
+        doc_type=updated["doc_type"],
+        description=updated.get("description"),
+        status=updated["status"],
+        created_at=updated["created_at"],
+        updated_at=updated["updated_at"],
+    )
+
+
 # DOM-002: 도메인 수동 변경
 @router.patch("/{project_id}/domain")
 async def update_project_domain(
