@@ -40,6 +40,7 @@ async def create_project(request: ProjectCreateRequest, authorization: Optional[
         title=request.title,
         doc_type=request.doc_type,
         description=request.description,
+        flow_mode=request.flow_mode,
     )
     result = await project_repo.create_project(project.to_dict())
 
@@ -52,6 +53,7 @@ async def create_project(request: ProjectCreateRequest, authorization: Optional[
         status=result["status"],
         created_at=result["created_at"],
         updated_at=result["updated_at"],
+        flow_mode=result.get("flow_mode"),
     )
 
 # PRJ-002 프로젝트 목록 조회
@@ -70,6 +72,7 @@ async def get_projects(authorization: Optional[str] = Header(None, alias="author
             status=p["status"],
             created_at=p["created_at"],
             updated_at=p["updated_at"],
+            flow_mode=p.get("flow_mode"),
         )
         for p in projects
     ]
@@ -92,6 +95,7 @@ async def get_project(project_id: str, authorization: Optional[str] = Header(Non
         status=project["status"],
         created_at=project["created_at"],
         updated_at=project["updated_at"],
+        flow_mode=project.get("flow_mode"),
     )
 
 # PRJ-004 프로젝트 삭제
@@ -145,6 +149,8 @@ async def update_project(
         update_data["title"] = request.title
     if request.description is not None:
         update_data["description"] = request.description
+    if request.flow_mode is not None:
+        update_data["flow_mode"] = request.flow_mode
     if not update_data:
         raise HTTPException(status_code=400, detail="변경할 값이 없습니다")
 
@@ -159,6 +165,7 @@ async def update_project(
         status=updated["status"],
         created_at=updated["created_at"],
         updated_at=updated["updated_at"],
+        flow_mode=updated.get("flow_mode"),
     )
 
 
@@ -190,4 +197,5 @@ async def update_project_domain(
         status=updated["status"],
         created_at=updated["created_at"],
         updated_at=updated["updated_at"],
+        flow_mode=updated.get("flow_mode"),
     )

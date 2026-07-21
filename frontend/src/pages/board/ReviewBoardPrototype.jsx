@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   Link2, Upload, FileText, Sparkles,
-  CheckCircle2, Circle, AlertCircle, Send, Award, Target, ShieldCheck,
+  CheckCircle2, Circle, AlertCircle, Award, Target, ShieldCheck,
   ArrowRight, TrendingUp, ChevronDown, ChevronUp, Calendar, FolderOpen, X,
   Menu, User, LogOut,
 } from "lucide-react";
@@ -12,6 +12,7 @@ import {
   uploadDocument,
   getDocumentStatus,
   getAnnouncementAnalysis,
+  getContestWorksByTitle,
   deleteDocument,
   getDocuments,
 } from "../../api/documentApi";
@@ -19,6 +20,7 @@ import { analyzeProject, getAnalyzeProgress, getMentorCandidates } from "../../a
 import { isAcceptedDocument, formatFileSize, ACCEPTED_DOCUMENT_EXTENSIONS } from "../../utils/file";
 import { assessCriteriaContent } from "../../utils/criteriaAssessment";
 import WorkbenchScreen from "./WorkbenchScreen";
+import { IdeationScreen, IdeationResultScreen } from "./IdeationConversationScreen";
 
 // 가은/Claude(2026-07-20, INF-007): fetch-url이 색인을 백그라운드로 넘기면서
 // document_status가 "indexing"으로 오면 폴링해야 한다 — DocumentUploadPage.jsx와 동일 값.
@@ -141,6 +143,8 @@ function Shell({ children, active, mode, onNavigate, showNav }) {
         .rb-root .rb-back-title{ display:flex; align-items:center; gap:8px; }
         .rb-root .rb-back-button{ width:26px; height:26px; display:inline-flex; align-items:center; justify-content:center; border:none; background:transparent; color:var(--text-1); border-radius:8px; cursor:pointer; font-size:22px; line-height:1; padding:0; flex-shrink:0; }
         .rb-root .rb-back-button:hover{ background:var(--bg-2); color:var(--text-0); }
+        .rb-root .rb-typing-cursor{ display:inline-block; margin-left:1px; animation: rb-blink 0.9s steps(1) infinite; }
+        @keyframes rb-blink{ 0%,49%{ opacity:1; } 50%,100%{ opacity:0; } }
         @media (max-width: 780px){
           .rb-root .rb-top-menu{ top:10px; right:12px; }
           .rb-root{ flex-direction:column; }
@@ -218,9 +222,18 @@ function BackTitle({ children, onBack, level = 2, style }) {
  * 파일 업로드 탭, 전용 "가져오기" 버튼, 진행 상태·에러 표시, 색인 폴링)을 그대로
  * 옮겨왔다.
  */
-function EntryScreen({ onEnter, loading, error, projectId, ensureProject, documents, setDocuments }) {
+function EntryScreen({ onEnter, onModeSelect, loading, error, projectId, ensureProject, documents, setDocuments }) {
   const navigate = useNavigate();
   const [mode, setMode] = useState(null);
+
+  // 가은/Claude(2026-07-21): 실측 요청 — 여기서 모드 카드를 고른 시점과 "분석 시작"을
+  // 누르는 시점 사이에 공고문을 먼저 등록하면(ensureProject가 여기서 바로 호출됨) 그
+  // 시점엔 아직 부모의 mode가 안 알려져 있어 flow_mode 없이 프로젝트가 생겼다. 카드를
+  // 고르자마자 부모에도 즉시 알려서 ensureProject()가 항상 올바른 flow_mode로 만들게 한다.
+  function selectMode(m) {
+    setMode(m);
+    onModeSelect?.(m);
+  }
   const [criteriaTab, setCriteriaTab] = useState('url');
   const [criteriaUrl, setCriteriaUrl] = useState('');
   const [criteriaLoading, setCriteriaLoading] = useState(false);
@@ -361,7 +374,7 @@ function EntryScreen({ onEnter, loading, error, projectId, ensureProject, docume
         <div
           className="card glass"
           style={{ cursor: "pointer", border: mode === "pre" ? "1px solid var(--purple)" : "1px solid var(--glass-border)" }}
-          onClick={() => setMode("pre")}
+          onClick={() => selectMode("pre")}
         >
           <Sparkles size={20} color="var(--purple)" />
           <div style={{ fontWeight: 700, fontSize: 15, margin: "10px 0 6px" }}>작성 전 → 주제 발굴</div>
@@ -372,7 +385,7 @@ function EntryScreen({ onEnter, loading, error, projectId, ensureProject, docume
         <div
           className="card glass"
           style={{ cursor: "pointer", border: mode === "post" ? "1px solid var(--coral)" : "1px solid var(--glass-border)" }}
-          onClick={() => setMode("post")}
+          onClick={() => selectMode("post")}
         >
           <FileText size={20} color="var(--coral)" />
           <div style={{ fontWeight: 700, fontSize: 15, margin: "10px 0 6px" }}>작성 후 → 문서 피드백</div>
@@ -505,8 +518,9 @@ const _CONFIDENCE_LABEL = { high: '확신 높음', medium: '확신 보통', low:
  *    official_facts(공고문에 실제 있는 사실)/strategic_analysis(AI 추론)를 보여준다.
  * 2) 팀 UX 스펙(2026-07-21) 그대로: 첫 화면은 4개 카드(핵심 과제/평가 갈리는 지점/
  *    반드시 지킬 조건/수상작 경향)만, 아래에 접을 수 있는 상세 분석(추천 전략/주의
- *    리스크/출처)을 둔다. 수상작·유사사례 경향은 이 시스템에 그 데이터 소스 자체가
- *    없어서 항상 "자료 미확보" 상태로 고정 표시하고 LLM이 지어내지 않는다.
+ *    리스크/출처)을 둔다. 수상작·유사사례 경향은 kyh님의 소통혁신24 수상작 아카이브
+ *    (contest_works)가 생기기 전까지는 데이터 소스가 없어 "자료 미확보"로 고정
+ *    표시했었다 — 이제 실제 매칭 결과가 있으면 보여주고, 없을 때만 그 문구를 쓴다.
  */
 function AnalysisScreen({ mode, onNext, onBack, projectId }) {
   const [loading, setLoading] = useState(true);
@@ -514,6 +528,32 @@ function AnalysisScreen({ mode, onNext, onBack, projectId }) {
   const [analysis, setAnalysis] = useState(null);
   const [detailOpen, setDetailOpen] = useState(false);
   const [ideaTopic, setIdeaTopic] = useState(null);
+  const [workDetail, setWorkDetail] = useState(null); // { contestTitle, works } | null
+  const [workDetailLoading, setWorkDetailLoading] = useState(false);
+  const [panelWidth, setPanelWidth] = useState(460);
+  const resizingRef = useRef(false);
+
+  // 가은/Claude(2026-07-21): 실측 요청 — 수상작 상세 패널을 마우스로 드래그해 너비를
+  // 조절할 수 있게. 패널이 화면 오른쪽에 고정돼 있어 왼쪽 가장자리를 끌면 그 지점부터
+  // 화면 끝까지가 새 너비가 된다.
+  useEffect(() => {
+    function handleMouseMove(e) {
+      if (!resizingRef.current) return;
+      const next = window.innerWidth - e.clientX;
+      setPanelWidth(Math.min(Math.max(next, 340), Math.min(760, window.innerWidth - 80)));
+    }
+    function handleMouseUp() {
+      if (!resizingRef.current) return;
+      resizingRef.current = false;
+      document.body.style.userSelect = '';
+    }
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, []);
 
   useEffect(() => {
     if (!projectId) {
@@ -549,6 +589,23 @@ function AnalysisScreen({ mode, onNext, onBack, projectId }) {
     return () => { cancelled = true; };
   }, [projectId]);
 
+  // 가은/Claude(2026-07-21): 실측 요청 — "수상작·유사사례 경향" 항목을 클릭하면 같은
+  // 공모전의 다른 수상작/후보작을 옆 패널로 보여준다. "볼 게 있을 때만" 열려야 하므로
+  // (자기 자신 하나뿐이고 이미지도 없으면 클릭해도 반응 없음) 먼저 조회하고 나서 연다.
+  async function handleSimilarWorkClick(work) {
+    if (!work.contest_title || workDetailLoading) return;
+    setWorkDetailLoading(true);
+    try {
+      const data = await getContestWorksByTitle(work.contest_title);
+      const hasMore = data.works.length > 1 || data.works.some((w) => w.images.length > 0 || w.ocr_text);
+      if (hasMore) setWorkDetail({ contestTitle: data.contest_title, works: data.works });
+    } catch {
+      // 실측 지침: 데이터가 없거나(조회 실패 포함) 볼 게 없으면 그냥 아무 반응 없이 둔다.
+    } finally {
+      setWorkDetailLoading(false);
+    }
+  }
+
   if (loading) {
     return (
       <div style={{ maxWidth: 820 }}>
@@ -563,6 +620,11 @@ function AnalysisScreen({ mode, onNext, onBack, projectId }) {
   const facts = analysis?.official_facts;
   const strategy = analysis?.strategic_analysis;
   const evidence = analysis?.evidence || [];
+  // 가은/Claude(2026-07-21): kyh님이 크롤링+분류한 소통혁신24 수상작 아카이브
+  // (contest_works)가 생겨서 실제 유사사례를 보여줄 수 있게 됐다 — 백엔드가 매칭을
+  // 못 찾으면(팀 공유 DB에 아직 데이터가 안 올라왔거나 이 카테고리에 사례가 없으면)
+  // has_similar_case_data가 false로 오므로 그때는 기존 "미확보" 문구를 그대로 보여준다.
+  const similarWorks = analysis?.similar_works || [];
 
   const cards = hasAnnouncement
     ? [
@@ -570,11 +632,20 @@ function AnalysisScreen({ mode, onNext, onBack, projectId }) {
         { icon: Target, color: "purple", title: "핵심 과제", body: strategy?.core_intent || "핵심 과제를 판단할 근거가 부족해요." },
         { icon: Award, color: "coral", title: "평가에서 갈리는 지점", list: facts?.evaluation_criteria },
         { icon: ShieldCheck, color: "green", title: "반드시 지켜야 할 조건", list: [...(facts?.eligibility || []), ...(facts?.submission_requirements || [])].slice(0, 4) },
-        { icon: TrendingUp, color: "amber", title: "수상작·유사사례 경향", body: "수상작 자료 미확보 — 유사 공모전 사례 기반 분석은 아직 지원하지 않아요." },
+        analysis?.has_similar_case_data
+          ? {
+              icon: TrendingUp, color: "amber", title: "수상작·유사사례 경향",
+              list: similarWorks.map((w) => ({
+                label: [w.contest_title, w.source_org].filter(Boolean).join(" · "),
+                onClick: () => handleSimilarWorkClick(w),
+              })),
+            }
+          : { icon: TrendingUp, color: "amber", title: "수상작·유사사례 경향", body: "수상작 자료 미확보 — 유사 공모전 사례 기반 분석은 아직 지원하지 않아요." },
       ]
     : [];
 
   return (
+    <>
     <div style={{ maxWidth: 820 }}>
       <div className="badge purple mono">{hasAnnouncement ? "공고문 분석 결과" : "공고문 미등록"}</div>
       <BackTitle level={1} onBack={onBack} style={{ margin: "12px 0 24px" }}>
@@ -594,7 +665,15 @@ function AnalysisScreen({ mode, onNext, onBack, projectId }) {
                 {it.list && (
                   it.list.length > 0
                     ? <ul style={{ margin: 0, paddingLeft: 16, fontSize: 12.5, color: "var(--text-2)", lineHeight: 1.7 }}>
-                        {it.list.map((v, j) => <li key={j}>{v}</li>)}
+                        {it.list.map((v, j) => (
+                          <li
+                            key={j}
+                            onClick={v?.onClick}
+                            style={v?.onClick ? { cursor: "pointer", textDecorationLine: "underline", textDecorationStyle: "dotted" } : undefined}
+                          >
+                            {v?.label ?? v}
+                          </li>
+                        ))}
                       </ul>
                     : <div style={{ fontSize: 12.5, color: "var(--text-2)" }}>확인된 내용이 없어요.</div>
                 )}
@@ -683,107 +762,51 @@ function AnalysisScreen({ mode, onNext, onBack, projectId }) {
         {mode === "pre" ? "AI 위원과 주제 확정 시작" : "기획서 업로드하기"} <ArrowRight size={15} />
       </button>
     </div>
-  );
-}
 
-/* ---------------- 3. 작성 전: 주제 아이디어 회의 (더미) ---------------- */
-function IdeationScreen({ onNext, onBack, saving, error }) {
-  const [messages, setMessages] = useState([
-    { role: "ai", persona: "기획", text: "이 문제를 실제로 겪은 대상이 누구인가요?" },
-  ]);
-  const [draft, setDraft] = useState("");
-
-  const send = () => {
-    if (!draft.trim()) return;
-    const next = [...messages, { role: "user", text: draft }];
-    setMessages(next);
-    setDraft("");
-    // TODO(가은): 실제 주제 발굴 회의 API 붙이면 이 setTimeout을 대체
-    setTimeout(() => {
-      setMessages((cur) => [
-        ...cur,
-        { role: "ai", persona: "개발", text: "현재 보유한 기술·협력처·데이터 중 바로 활용 가능한 건 무엇인가요?" },
-      ]);
-    }, 400);
-  };
-
-  return (
-    <div className="rb-grid-2" style={{ maxWidth: 860, display: "grid", gridTemplateColumns: "1fr 300px", gap: 20 }}>
-      <div>
-        <div className="badge coral mono" style={{ marginBottom: 10 }}>주제 아이디어 회의</div>
-        <BackTitle onBack={onBack} style={{ marginBottom: 16 }}>
-          기획 위원 · 개발 위원과 함께 좁혀가는 중
-        </BackTitle>
-        <div className="card glass" style={{ minHeight: 360, display: "flex", flexDirection: "column", gap: 12 }}>
-          <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 12 }}>
-            {messages.map((m, i) => (
-              <div key={i} style={{ alignSelf: m.role === "ai" ? "flex-start" : "flex-end", maxWidth: "78%" }}>
-                {m.role === "ai" && (
-                  <div className={`badge ${m.persona === "기획" ? "purple" : "coral"} mono`} style={{ marginBottom: 4 }}>{m.persona} 위원</div>
-                )}
-                <div style={{
-                  background: m.role === "ai" ? "var(--bg-1)" : "var(--purple-dim)",
-                  border: "1px solid var(--glass-border)", borderRadius: 12, padding: "10px 14px", fontSize: 13.5, lineHeight: 1.6,
-                }}>
-                  {m.text}
-                </div>
-              </div>
-            ))}
-          </div>
-          <div style={{ display: "flex", gap: 8 }}>
-            <input
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && send()}
-              placeholder="답변을 입력하세요"
-              style={{ flex: 1, background: "var(--bg-1)", border: "1px solid var(--glass-border)", borderRadius: 10, padding: "10px 14px", color: "var(--text-0)", fontSize: 13 }}
-            />
-            <button className="btn-primary" style={{ padding: "10px 14px" }} onClick={send}><Send size={14} /></button>
-          </div>
+    {workDetail && (
+      <div
+        className="glass"
+        style={{
+          position: "fixed", top: 0, right: 0, bottom: 0, width: panelWidth, maxWidth: "90vw",
+          padding: 24, overflowY: "auto", zIndex: 40, borderLeft: "1px solid var(--glass-border)",
+          boxShadow: "-8px 0 24px rgba(28,26,46,0.10)",
+        }}
+      >
+        <div
+          onMouseDown={() => { resizingRef.current = true; document.body.style.userSelect = 'none'; }}
+          style={{
+            position: "absolute", left: 0, top: 0, bottom: 0, width: 8,
+            cursor: "col-resize", zIndex: 1,
+          }}
+        />
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16, gap: 8 }}>
+          <div style={{ fontWeight: 700, fontSize: 14, lineHeight: 1.5 }}>{workDetail.contestTitle}</div>
+          <button
+            onClick={() => setWorkDetail(null)}
+            aria-label="닫기"
+            style={{ background: "none", border: "none", padding: 4, cursor: "pointer", color: "var(--text-2)", flexShrink: 0 }}
+          >
+            <X size={16} />
+          </button>
         </div>
-      </div>
-
-      <div>
-        <div style={{ fontSize: 12, color: "var(--text-2)", marginBottom: 10, textTransform: "uppercase", letterSpacing: "0.05em" }}>주제 후보</div>
-        {["예비창업인 재고관리 AI 비서", "무인매장 이상행동 감지"].map((t, i) => (
-          <div key={i} className="card glass" style={{ marginBottom: 10, padding: 14 }}>
-            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>{t}</div>
-            <div style={{ fontSize: 11.5, color: "var(--text-2)" }}>적합성 상 · 차별성 중 · 리스크 낮음</div>
-          </div>
-        ))}
-        {error && <p style={{ color: "var(--coral)", fontSize: 12.5, margin: "0 0 10px" }}>{error}</p>}
-        <button className="btn-ghost" style={{ width: "100%", marginTop: 8 }} onClick={onNext} disabled={saving}>
-          {saving ? "프로젝트 저장 중..." : "주제 확정하고 이어서 받기"}
-        </button>
-      </div>
-    </div>
-  );
-}
-
-/* ---------------- 4. 주제 확정 결과 (더미) ---------------- */
-function IdeationResultScreen({ onBack }) {
-  const rows = [
-    ["문제 정의", "예비창업인의 87%가 재고 파악을 감으로 처리해 결품·과잉재고가 반복됨"],
-    ["해결안", "POS 연동 재고 예측 AI 비서 → 판매 패턴 학습 후 발주 시점 자동 알림"],
-    ["대상", "종업원 5인 이하 오프라인 소매업 예비창업인"],
-    ["기대효과", "결품률 32% 감소, 재고 회전율 1.4배 개선 (유사 사례 기준 추정)"],
-    ["검증 방법", "협력 매장 3곳 4주 파일럿, 발주 정확도·재고 회전율 비교"],
-  ];
-  return (
-    <div style={{ maxWidth: 760 }}>
-      <div className="badge green mono" style={{ marginBottom: 12 }}>주제 확정 · 기획서 작성 출발점</div>
-      <BackTitle onBack={onBack} style={{ marginBottom: 20 }}>
-        {IDEA_PROJECT_TOPIC}
-      </BackTitle>
-      <div className="card glass">
-        {rows.map(([k, v], i) => (
-          <div key={i} style={{ display: "grid", gridTemplateColumns: "110px 1fr", gap: 16, padding: "14px 0", borderTop: i > 0 ? "1px solid var(--glass-border)" : "none" }}>
-            <div style={{ fontSize: 12, color: "var(--text-2)", fontFamily: "var(--mono)" }}>{k}</div>
-            <div style={{ fontSize: 13.5, lineHeight: 1.6 }}>{v}</div>
+        {workDetail.works.map((w, i) => (
+          <div key={i} style={{ padding: "14px 0", borderTop: i > 0 ? "1px solid var(--glass-border)" : "none" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
+              <span className={`badge ${w.selection_status === "winner" ? "green" : "amber"} mono`}>
+                {w.selection_status === "winner" ? "수상" : "후보"}
+              </span>
+              {w.award_grade && <span style={{ fontSize: 11.5, color: "var(--text-2)" }}>{w.award_grade}</span>}
+            </div>
+            <div style={{ fontSize: 13.5, fontWeight: 600, marginBottom: 6 }}>{w.work_title}</div>
+            {w.images.length > 0 && (
+              <img src={w.images[0]} alt={w.work_title} style={{ width: "100%", borderRadius: 8, marginBottom: 6, display: "block" }} />
+            )}
+            {w.ocr_text && <div style={{ fontSize: 12.5, color: "var(--text-1)", lineHeight: 1.6 }}>{w.ocr_text}</div>}
           </div>
         ))}
       </div>
-    </div>
+    )}
+    </>
   );
 }
 
@@ -1056,6 +1079,13 @@ export default function ReviewBoardPrototype() {
   // 화면엔 항상 똑같은 고정 예시 카드만 나왔다(EntryScreen이 모은 문서 목록이 어디에도
   // 안 넘어갔음). AnalysisScreen에서 보여줄 수 있게 여기(부모)로 끌어올린다.
   const [criteriaDocuments, setCriteriaDocuments] = useState([]);
+  // 용준/Claude(2026-07-21): "작성 전 → 주제 발굴" 실 연동 — 대화형 아이디어 회의 세션의
+  // 최신 API 응답(session_id 포함)을 부모(이 컴포넌트)의 state로 관리한다. "이전 단계로
+  // 갔다 돌아와도 회의 상태 유지"를 만족시키려면 IdeationScreen이 언마운트됐다 다시
+  // 마운트돼도(사이드바로 다른 단계를 갔다 오는 경우) 값을 잃지 않아야 하기 때문이다 —
+  // IdeationConversationScreen.jsx가 이 값이 이미 있으면 절대 start API를 다시 부르지
+  // 않는다.
+  const [ideationConv, setIdeationConv] = useState(null);
 
   const goNext = () => {
     const seq = (mode && FLOW_BY_MODE[mode]) || ["entry"];
@@ -1078,13 +1108,16 @@ export default function ReviewBoardPrototype() {
   projectIdRef.current = projectId;
   async function ensureProject() {
     if (projectIdRef.current) return projectIdRef.current;
-    const project = await createProject({ title: "새 공모전 프로젝트", doc_type: "competition" });
+    // 가은/Claude(2026-07-21): 실측 요청 — "작성 전/작성 후" 중 뭘 골랐는지가 프로젝트에
+    // 안 남아서, "내 프로젝트"에서 다시 불러오면 어느 흐름이었는지 알 방법이 없었다.
+    // 이 시점엔 EntryScreen의 onModeSelect 콜백 덕분에 mode가 이미 채워져 있다.
+    const project = await createProject({ title: "새 공모전 프로젝트", doc_type: "competition", flow_mode: mode });
     projectIdRef.current = project.id;
     setProjectId(project.id);
     return project.id;
   }
 
-  async function handleConfirmIdeaProject() {
+  async function handleConfirmIdeaProject(finalizedConversation = ideationConv) {
     if (ideaSaving) return;
     if (ideaProjectSavedRef.current) {
       goNext();
@@ -1094,16 +1127,18 @@ export default function ReviewBoardPrototype() {
     setIdeaSaveError('');
     setIdeaSaving(true);
     try {
+      const confirmedTopic = finalizedConversation?.idea_proposal?.idea_name?.trim() || IDEA_PROJECT_TOPIC;
       // 가은/Claude(2026-07-21): 실측 버그 — EntryScreen에서 공고문을 먼저 등록해
       // ensureProject()로 이미 프로젝트가 만들어져 있는데도 여기서 항상 새 프로젝트를
       // 만들어버려서, 앞서 등록한 공고문이 붙은 프로젝트가 고아가 됐다. 이미 프로젝트가
       // 있으면 새로 만들지 않고 제목·설명만 아이디어 확정 값으로 갱신한다.
       const project = projectIdRef.current
-        ? await updateProject(projectIdRef.current, { title: IDEA_PROJECT_TOPIC, description: IDEA_PROJECT_MARKER })
+        ? await updateProject(projectIdRef.current, { title: confirmedTopic, description: IDEA_PROJECT_MARKER, flow_mode: "pre" })
         : await createProject({
-            title: IDEA_PROJECT_TOPIC,
+            title: confirmedTopic,
             doc_type: "competition",
             description: IDEA_PROJECT_MARKER,
+            flow_mode: "pre",
           });
       ideaProjectSavedRef.current = true;
       projectIdRef.current = project.id;
@@ -1118,10 +1153,9 @@ export default function ReviewBoardPrototype() {
 
   async function handleEnter(m) {
     setMode(m);
-    if (m !== "post") {
-      setStage("analysis");
-      return;
-    }
+    // 가은/Claude(2026-07-21): 실측 요청 — 예전엔 "작성 전" 모드는 공고문을 안 넣었으면
+    // 프로젝트를 아예 안 만들고 넘어가서 flow_mode를 저장할 데가 없었다. 이제 두 모드
+    // 모두 여기서 프로젝트를 보장(ensureProject)해서 flow_mode가 항상 남는다.
     setEntryError("");
     setEntryLoading(true);
     try {
@@ -1143,62 +1177,6 @@ export default function ReviewBoardPrototype() {
   }
 
   // 가은/Claude(2026-07-21): ?projectId=가 있으면 기존 프로젝트를 불러와 이어서 한다.
-  // 기획서(target)가 이미 있으면 "기획서 업로드" 단계로, 공고문(criteria)만 있으면
-  // "공모전 분석" 단계로 보낸다(둘 다 있어도 분석 화면이 캐시로 즉시 뜨므로 거기서
-  // 시작). 아무 문서도 없으면 entry에 그대로 둔다.
-  useEffect(() => {
-    if (!resumeProjectId) return;
-    let cancelled = false;
-    setResuming(true);
-    setResumeError('');
-    getDocuments(resumeProjectId)
-      .then((docs) => {
-        if (cancelled) return;
-        projectIdRef.current = resumeProjectId;
-        setProjectId(resumeProjectId);
-        setMode('post');
-
-        const criteriaDocs = docs.filter((d) => d.document_role === 'criteria');
-        const targetDocs = docs.filter((d) => (d.document_role || 'target') === 'target');
-
-        setCriteriaDocuments(
-          criteriaDocs.map((d) => ({
-            id: d.id,
-            backendId: d.id,
-            name: d.original_filename,
-            meta: '이전에 등록한 문서',
-            status: _resumedDocStatus(d.status),
-          })),
-        );
-        setTargetDocuments(
-          targetDocs.map((d) => ({
-            id: d.id,
-            name: d.original_filename,
-            meta: formatFileSize(d.file_size),
-            status: _resumedDocStatus(d.status),
-          })),
-        );
-
-        if (targetDocs.length > 0) setStage('upload');
-        else if (criteriaDocs.length > 0) setStage('analysis');
-      })
-      .catch((err) => { if (!cancelled) setResumeError(err.message); })
-      .finally(() => { if (!cancelled) setResuming(false); });
-    return () => { cancelled = true; };
-  }, [resumeProjectId]);
-
-  if (resuming) {
-    return (
-      <Shell active={stage} mode={mode} onNavigate={setStage} showNav={false}>
-        <div style={{ maxWidth: 760, margin: "40px auto" }}>
-          <div className="badge purple mono">불러오는 중</div>
-          <h1 style={{ fontSize: 26, fontWeight: 700, margin: "12px 0 24px" }}>이전에 등록한 프로젝트를 불러오고 있어요...</h1>
-        </div>
-      </Shell>
-    );
-  }
-
-  // 가은/Claude(2026-07-21): ?projectId=가 있으면 기존 프로젝트를 불러와 이어서 한다.
   // 프로젝트 설명이 IDEA_PROJECT_MARKER면 "작성 전" 흐름에서 주제를 확정한 프로젝트로
   // 보고 mode를 pre로 두고 분석 화면부터 보여준다(문서가 없어도 entry에 멈추지 않도록).
   // 그 외에는 기존대로: 기획서(target)가 있으면 "기획서 업로드" 단계로, 공고문
@@ -1213,9 +1191,12 @@ export default function ReviewBoardPrototype() {
         if (cancelled) return;
         projectIdRef.current = resumeProjectId;
         setProjectId(resumeProjectId);
-        const isIdeaProject = project.description === IDEA_PROJECT_MARKER;
-        setMode(isIdeaProject ? 'pre' : 'post');
-        if (isIdeaProject) ideaProjectSavedRef.current = true;
+        // 가은/Claude(2026-07-21): flow_mode가 주 판단 기준 — EntryScreen에서 모드를
+        // 고르는 순간 저장된다. description 마커는 flow_mode가 없던 예전 프로젝트를 위한
+        // 하위호환 폴백(아이디어 확정까지 끝난 프로젝트만 잡아낼 수 있었음).
+        const isPreFlow = project.flow_mode === 'pre' || project.description === IDEA_PROJECT_MARKER;
+        setMode(isPreFlow ? 'pre' : 'post');
+        if (project.description === IDEA_PROJECT_MARKER) ideaProjectSavedRef.current = true;
 
         const criteriaDocs = docs.filter((d) => d.document_role === 'criteria');
         const targetDocs = docs.filter((d) => (d.document_role || 'target') === 'target');
@@ -1238,7 +1219,7 @@ export default function ReviewBoardPrototype() {
           })),
         );
 
-        if (isIdeaProject) setStage('analysis');
+        if (isPreFlow) setStage('analysis');
         else if (targetDocs.length > 0) setStage('upload');
         else if (criteriaDocs.length > 0) setStage('analysis');
       })
@@ -1264,6 +1245,7 @@ export default function ReviewBoardPrototype() {
       {stage === "entry" && (
         <EntryScreen
           onEnter={handleEnter}
+          onModeSelect={setMode}
           loading={entryLoading}
           error={entryError}
           projectId={projectId}
@@ -1276,9 +1258,18 @@ export default function ReviewBoardPrototype() {
         <AnalysisScreen mode={mode} onNext={goNext} onBack={goPrev} projectId={projectId} />
       )}
       {stage === "ideation" && (
-        <IdeationScreen onNext={handleConfirmIdeaProject} onBack={goPrev} saving={ideaSaving} error={ideaSaveError} />
+        <IdeationScreen
+          projectId={projectId}
+          criteriaDocuments={criteriaDocuments}
+          ideationConv={ideationConv}
+          setIdeationConv={setIdeationConv}
+          onFinalized={handleConfirmIdeaProject}
+          onBack={goPrev}
+          saving={ideaSaving}
+          saveError={ideaSaveError}
+        />
       )}
-      {stage === "ideation_result" && <IdeationResultScreen onBack={goPrev} />}
+      {stage === "ideation_result" && <IdeationResultScreen ideationConv={ideationConv} onBack={goPrev} />}
       {stage === "upload" && (
         <UploadAndAnalyzeScreen projectId={projectId} onFeedbackReady={handleFeedbackReady} onBack={goPrev} initialDocuments={targetDocuments} />
       )}

@@ -258,15 +258,10 @@ def get_current_user(authorization: Optional[str]) -> str:
 
 
 def _build_real_llm_call(meeting_id: str):
-    """실제 OpenAI 호출. LLM_PROFILE(dev|quality)에 따라 모델을 고르고, 호출마다 로그를
-    남기고, 상한을 넘으면 예외로 중단한다."""
-    profile = (settings.LLM_PROFILE or "dev").lower()
-    if profile == "quality":
-        reviewer_model = settings.QUALITY_LLM_REVIEWER_MODEL
-        chair_model = settings.QUALITY_LLM_CHAIR_MODEL
-    else:
-        reviewer_model = settings.DEV_LLM_REVIEWER_MODEL
-        chair_model = settings.DEV_LLM_CHAIR_MODEL
+    """실제 OpenAI 호출. LLM_PROFILE(dev|quality|premium)에 따라 모델을 고르고, 호출마다
+    로그를 남기고, 상한을 넘으면 예외로 중단한다."""
+    reviewer_model = settings.reviewer_model()
+    chair_model = settings.chair_model()
 
     # 429/5xx 자동 재시도가 쌓여 호출이 반복되는 걸 막기 위해 SDK 기본 재시도(2회)보다 낮춘다.
     client = OpenAI(api_key=settings.OPENAI_API_KEY, max_retries=1)
@@ -420,8 +415,7 @@ def _build_rubric_extraction_prompt(
 
 
 def _call_rubric_extraction_llm(prompt: str) -> str:
-    profile = (settings.LLM_PROFILE or "dev").lower()
-    model = settings.QUALITY_LLM_REVIEWER_MODEL if profile == "quality" else settings.DEV_LLM_REVIEWER_MODEL
+    model = settings.reviewer_model()
     client = OpenAI(api_key=settings.OPENAI_API_KEY, max_retries=1)
     resp = client.chat.completions.create(
         model=model,
@@ -673,7 +667,7 @@ def _reorder_unmentioned_revisions_first(top_revisions: list | None, history: li
 # 가은/Claude(2026-07-17): STEP7 "대화형 피드백" 후속 질문 프롬프트. 새 그래프 노드를
 # 만드는 대신, 경이의 chair_prompt.txt 도입부("당신은 AI Review Board의
 # 위원장(review_chair)입니다...")를 그대로 재사용해 _build_real_llm_call()의
-# _CHAIR_MARKER 감지로 위원장 모델(quality 프로필이면 QUALITY_LLM_CHAIR_MODEL)로 자동
+# _CHAIR_MARKER 감지로 위원장 모델(settings.chair_model(), LLM_PROFILE에 따라 자동
 # 라우팅되게 한다. 새 채점/근거를 만들지 않고 이미 저장된 회의 결과 안에서만 답하도록
 # 프롬프트로 강제한다(위원장 페르소나 카드의 scope.exclude와 동일 원칙).
 def _build_followup_prompt(
@@ -840,8 +834,7 @@ def _build_mentor_followup_prompt(
 
 
 def _call_characteristics_llm(prompt: str) -> str:
-    profile = (settings.LLM_PROFILE or "dev").lower()
-    model = settings.QUALITY_LLM_REVIEWER_MODEL if profile == "quality" else settings.DEV_LLM_REVIEWER_MODEL
+    model = settings.reviewer_model()
     client = OpenAI(api_key=settings.OPENAI_API_KEY, max_retries=1)
     resp = client.chat.completions.create(
         model=model,

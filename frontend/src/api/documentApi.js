@@ -1,4 +1,4 @@
-import { API_BASE_URL } from './client'
+import { API_BASE_URL, parseApiResponse } from './client'
 
 function authHeaders() {
   const token = localStorage.getItem('auth_token')
@@ -17,11 +17,7 @@ export async function uploadDocument(projectId, file, sourceType = 'pdf', docume
     headers: { ...authHeaders() },
     body: formData,
   })
-  const data = await res.json()
-  if (!res.ok) {
-    throw new Error(data.detail || '문서를 업로드하지 못했습니다.')
-  }
-  return data
+  return parseApiResponse(res, '문서를 업로드하지 못했습니다.')
 }
 
 // 가은/Claude(2026-07-21): 실측 요청 — /board에서 URL/파일로 잘못 올린 공고문·평가기준
@@ -32,11 +28,7 @@ export async function deleteDocument(projectId, documentId) {
     method: 'DELETE',
     headers: { ...authHeaders() },
   })
-  const data = await res.json()
-  if (!res.ok) {
-    throw new Error(data.detail || '문서를 삭제하지 못했습니다.')
-  }
-  return data
+  return parseApiResponse(res, '문서를 삭제하지 못했습니다.')
 }
 
 // 가은/Claude(2026-07-16): StepSidebar에서 진행 중이던 프로젝트로 "이어서" 업로드 화면에
@@ -45,11 +37,7 @@ export async function getDocuments(projectId) {
   const res = await fetch(`${API_BASE_URL}/documents/${projectId}`, {
     headers: { ...authHeaders() },
   })
-  const data = await res.json()
-  if (!res.ok) {
-    throw new Error(data.detail || '문서 목록을 불러오지 못했습니다.')
-  }
-  return data
+  return parseApiResponse(res, '문서 목록을 불러오지 못했습니다.')
 }
 
 // projectId가 있어야 공고문이 RAG 색인까지 되고 documents 컬렉션에 저장된다(document_role: 'criteria').
@@ -62,14 +50,7 @@ export async function fetchUrl(url, projectId) {
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify({ url, project_id: projectId }),
   })
-  const data = await res.json()
-  if (!res.ok) {
-    const message = Array.isArray(data.detail)
-      ? data.detail.map((d) => d.msg).join(', ')
-      : data.detail
-    throw new Error(message || 'URL 문서를 가져오지 못했습니다.')
-  }
-  return data
+  return parseApiResponse(res, 'URL 문서를 가져오지 못했습니다.')
 }
 
 // 가은/Claude(2026-07-19, INF-007): fetch-url이 색인을 백그라운드로 넘기면서 필요해짐 —
@@ -80,11 +61,7 @@ export async function getDocumentStatus(projectId, documentId) {
   const res = await fetch(`${API_BASE_URL}/documents/${projectId}/${documentId}/status`, {
     headers: { ...authHeaders() },
   })
-  const data = await res.json()
-  if (!res.ok) {
-    throw new Error(data.detail || '문서 상태를 확인하지 못했습니다.')
-  }
-  return data
+  return parseApiResponse(res, '문서 상태를 확인하지 못했습니다.')
 }
 
 // 가은/Claude(2026-07-21): "공모전 분석" 화면(ReviewBoardPrototype.jsx) — 이미 수집된
@@ -96,11 +73,7 @@ export async function getAnnouncementAnalysis(projectId) {
     method: 'POST',
     headers: { ...authHeaders() },
   })
-  const data = await res.json()
-  if (!res.ok) {
-    throw new Error(data.detail || '공고문 분석을 불러오지 못했습니다.')
-  }
-  return data
+  return parseApiResponse(res, '공고문 분석을 불러오지 못했습니다.')
 }
 
 // 재인/Claude(2026-07-21): "AI 피드백"(워크벤치) 화면 — 기획서 원문(parsed_text)을
@@ -111,9 +84,14 @@ export async function getDocumentPreview(projectId, documentId) {
   const res = await fetch(`${API_BASE_URL}/documents/${projectId}/${documentId}/preview`, {
     headers: { ...authHeaders() },
   })
-  const data = await res.json()
-  if (!res.ok) {
-    throw new Error(data.detail || '문서 원문을 불러오지 못했습니다.')
-  }
-  return data
+  return parseApiResponse(res, '문서 원문을 불러오지 못했습니다.')
+}
+
+// 가은/Claude(2026-07-21): "수상작·유사사례 경향" 카드 항목을 클릭하면 같은 공모전
+// (contest_title)의 다른 수상작/후보작을 옆 패널로 보여준다 — project_id와 무관한
+// 공개 아카이브 조회라 documents/{project_id}/... 경로 밖의 별도 엔드포인트를 쓴다.
+export async function getContestWorksByTitle(contestTitle) {
+  const url = `${API_BASE_URL}/documents/contest-works?${new URLSearchParams({ contest_title: contestTitle })}`
+  const res = await fetch(url, { headers: { ...authHeaders() } })
+  return parseApiResponse(res, '관련 수상작을 불러오지 못했습니다.')
 }
