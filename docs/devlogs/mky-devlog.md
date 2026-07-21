@@ -1,5 +1,44 @@
 # mky Devlog
 
+## 2026-07-21 (이어서 — 개인 맞춤형 피드백 루프 백엔드 로직·계약 정합)
+
+- 한 일:
+  - **개발 위원 피드백 개인화 로직** `ai/meeting/scoring/personalization.py` 신설:
+    `classify_impl_difficulty(profile)`(전공/학위/경력/GitHub 신호로 구현 난이도 hard/moderate/easy
+    **결정론 판정** — LLM 아님) + `build_impl_guide`/`attach_impl_guides`(지적별 난이도+가이드,
+    산문은 주입 `llm_call`로 생성, 없으면 판정만). **회의 파이프라인 무손상 후처리(B안)** — 프로필
+    없으면 자연 폴백. 프론트 `IMPL_GUIDE` mock을 대체할 실로직
+  - `is_technical_persona()` 헬퍼 — 회의엔 `committee:'dev'` 플래그가 없어(도메인별 4인 persona)
+    개발 위원을 persona_id 화이트리스트(`technical_feasibility`/`dev_expert`)로 고정.
+    윤한 리포트 훅이 이걸 그대로 import해 개발 위원 지적만 골라 `attach_impl_guides`에 넘김
+  - version-test 프론트를 백엔드 `attach_impl_guides` 출력(`{level,verbosity,label,prose}`)에 정렬 —
+    `personalizeGuide()` 하나가 E2E 교체 지점(mock→fetch)
+  - **프로필 계약을 마이페이지/GitHub API 실제 필드에 정합**(무음실패 방지, 아래 막힌 점 참고):
+    `github{public_repos,followers,total_stars,primary_languages}` / `degree` 영문 enum /
+    `experience{internship_months,competition_count,award_count}`. fixture `0.2.0-draft`
+  - 윤한 3종(프로필 CRUD `GET/PUT /users/me/profile` · 비교 API `GET /comparison` · 리포트
+    개인화 훅 `impl_guides`) dev 반영 확인 — 전부 내 `is_technical_persona`+`attach_impl_guides`
+    계약 그대로 배선됨. 테스트 154개 통과
+- 결정/이유:
+  - **개인화도 점수엔진과 같은 철학**: 난이도 "판정"은 결정론(재현 가능), "산문"만 LLM(DI로 분리).
+    프로필 미제출/일부 누락은 없는 키 0 처리 → hard 폴백(안전)
+  - **GitHub 신호는 공개 API(api.github.com)로 얻는 값만** 사용 — 커밋 총수·백엔드 이력 같은
+    조회 불가/파생 필드는 계약에서 배제해 현실에 맞춤. `degree`는 영문 enum으로 통일(한글은 표시용)
+  - 프로필 저장은 윤한이 이미 한 `users.profile` 임베드 방식 유지(별도 컬렉션 분리 강제 안 함 —
+    rework 회피, DB는 윤한 담당)
+- 막힌 점:
+  - **개인화 무음실패 직전 발견**: 내 초기 분류기가 GitHub 공개 API로 조회 불가한 필드
+    (`has_backend_experience`/`relevant_projects`/`total_commits`)를 읽어, E2E로 붙였으면 GitHub
+    신호가 항상 0 → 전원 "어려움"으로 무음 오작동할 뻔. 실제 조회 가능 필드로 재설계해 해결
+  - squash-merge로 커밋 SHA가 바뀌어(내 로컬 브랜치는 ahead지만 content는 dev 반영) 반영 여부가
+    헷갈림 — SHA 아닌 파일 content 기준으로 확인하는 습관 필요
+  - 가은 MyPage 프로필 폼이 아직 dev 미반영(다른 브랜치/PR 대기 추정) — dev엔 여전히 shell
+- 다음 할 일:
+  - 가은: MyPage 프로필 폼 dev 반영(**계약 필드 준수** — `degree` 영문 enum, `github` 4필드) +
+    `/board` 리포트에서 `impl_guides`/`comparison` 렌더
+  - 프론트 실API 배선: version-test mock → `GET /report`(impl_guides) · `GET /comparison` · `GET /meetings`
+  - E2E QA 패스: 업로드→분석→리포트 개인화→수정 재제출→비교 상승세 확인
+
 ## 2026-07-21
 
 - 한 일:
