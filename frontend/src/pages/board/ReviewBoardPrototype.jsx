@@ -1202,6 +1202,66 @@ export default function ReviewBoardPrototype() {
     );
   }
 
+  // 가은/Claude(2026-07-21): ?projectId=가 있으면 기존 프로젝트를 불러와 이어서 한다.
+  // 프로젝트 설명이 IDEA_PROJECT_MARKER면 "작성 전" 흐름에서 주제를 확정한 프로젝트로
+  // 보고 mode를 pre로 두고 분석 화면부터 보여준다(문서가 없어도 entry에 멈추지 않도록).
+  // 그 외에는 기존대로: 기획서(target)가 있으면 "기획서 업로드" 단계로, 공고문
+  // (criteria)만 있으면 "공모전 분석" 단계로 보낸다. 아무 문서도 없으면 entry에 그대로 둔다.
+  useEffect(() => {
+    if (!resumeProjectId) return;
+    let cancelled = false;
+    setResuming(true);
+    setResumeError('');
+    Promise.all([getDocuments(resumeProjectId), getProject(resumeProjectId)])
+      .then(([docs, project]) => {
+        if (cancelled) return;
+        projectIdRef.current = resumeProjectId;
+        setProjectId(resumeProjectId);
+        const isIdeaProject = project.description === IDEA_PROJECT_MARKER;
+        setMode(isIdeaProject ? 'pre' : 'post');
+        if (isIdeaProject) ideaProjectSavedRef.current = true;
+
+        const criteriaDocs = docs.filter((d) => d.document_role === 'criteria');
+        const targetDocs = docs.filter((d) => (d.document_role || 'target') === 'target');
+
+        setCriteriaDocuments(
+          criteriaDocs.map((d) => ({
+            id: d.id,
+            backendId: d.id,
+            name: d.original_filename,
+            meta: '이전에 등록한 문서',
+            status: _resumedDocStatus(d.status),
+          })),
+        );
+        setTargetDocuments(
+          targetDocs.map((d) => ({
+            id: d.id,
+            name: d.original_filename,
+            meta: formatFileSize(d.file_size),
+            status: _resumedDocStatus(d.status),
+          })),
+        );
+
+        if (isIdeaProject) setStage('analysis');
+        else if (targetDocs.length > 0) setStage('upload');
+        else if (criteriaDocs.length > 0) setStage('analysis');
+      })
+      .catch((err) => { if (!cancelled) setResumeError(err.message); })
+      .finally(() => { if (!cancelled) setResuming(false); });
+    return () => { cancelled = true; };
+  }, [resumeProjectId]);
+
+  if (resuming) {
+    return (
+      <Shell active={stage} mode={mode} onNavigate={setStage} showNav={false}>
+        <div style={{ maxWidth: 760, margin: "40px auto" }}>
+          <div className="badge purple mono">불러오는 중</div>
+          <h1 style={{ fontSize: 26, fontWeight: 700, margin: "12px 0 24px" }}>이전에 등록한 프로젝트를 불러오고 있어요...</h1>
+        </div>
+      </Shell>
+    );
+  }
+
   return (
     <Shell active={stage} mode={mode} onNavigate={setStage} showNav={stage !== "entry"}>
       {resumeError && <p style={{ color: "var(--coral)", fontSize: 13, marginBottom: 16 }}>{resumeError}</p>}
