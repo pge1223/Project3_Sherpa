@@ -8,14 +8,17 @@ from .comparison import build_revision_comparison
 from .deductions import compute_penalties
 from .explanation import build_score_explanation
 from .personalization import (
+    TECHNICAL_PERSONA_IDS,
     attach_impl_guides,
     build_impl_guide,
     build_impl_guide_prompt,
     classify_impl_difficulty,
+    is_technical_persona,
 )
 from .weights import resolve_weights
 
 __all__ = [
+    "TECHNICAL_PERSONA_IDS",
     "attach_impl_guides",
     "build_impl_guide",
     "build_impl_guide_prompt",
@@ -24,5 +27,6 @@ __all__ = [
     "calculate_score",
     "classify_impl_difficulty",
     "compute_penalties",
+    "is_technical_persona",
     "resolve_weights",
 ]

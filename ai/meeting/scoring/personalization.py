@@ -14,6 +14,22 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
+# 구현 난이도 가이드를 붙일 "기술/개발 위원" persona_id.
+# 회의 위원회에는 committee:'dev' 같은 플래그가 없고 도메인별 4인 persona가 들어간다
+# (competition: creativity_originality/technical_feasibility/business_strategy/presentation_completeness,
+#  government_support: policy_fit/business_strategy/technical_feasibility/budget_execution).
+# 이 중 "기술·구현·운영 관점"을 맡는 위원이 technical_feasibility 이며, 그의 지적이 곧
+# "구현해야 할 일"이다 — 개인화(구현 난이도) 가이드는 이 위원 지적에만 붙인다. dev_expert는
+# 아이디어 발전 회의(ideation) 쪽 개발 전문가라 함께 화이트리스트에 둔다. 기획/사업/완성도
+# 위원 지적엔 붙이지 않는다.
+TECHNICAL_PERSONA_IDS = frozenset({"technical_feasibility", "dev_expert"})
+
+
+def is_technical_persona(persona_id: str | None) -> bool:
+    """이 persona가 구현 난이도 가이드를 붙일 기술/개발 위원인지 판단한다.
+    backend가 reviewer_results에서 개발 위원 지적만 골라 attach_impl_guides로 넘길 때 쓴다."""
+    return persona_id in TECHNICAL_PERSONA_IDS
+
 # 구현 난이도 3단계와 그에 맞춘 설명 상세도.
 # hard  = 비전공/무경험 → 길고 친절한 단계별(detailed)
 # moderate = 어느 정도 기술 배경 → 표준(standard)
