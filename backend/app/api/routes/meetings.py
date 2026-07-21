@@ -111,6 +111,7 @@ from jose import jwt, JWTError
 from openai import OpenAI
 from starlette.concurrency import run_in_threadpool
 
+from ai.meeting.scoring import attach_impl_guides, is_technical_persona
 from ai.rag.evidence_linking.service import EvidenceLinkingService
 from ai.rag.evidence_sufficiency.service import EvidenceSufficiencyService
 from ai.rag.orchestration import MeetingEvidenceOrchestrationService
@@ -126,6 +127,7 @@ from app.models.meeting import MeetingModel
 from app.repositories.document_repository import DocumentRepository
 from app.repositories.meeting_repository import MeetingRepository
 from app.repositories.project_repository import ProjectRepository
+from app.repositories.user_repository import UserRepository
 from app.schemas.meeting import (
     AnalyzeProgress,
     AnalyzeRequest,
@@ -142,6 +144,7 @@ router = APIRouter(prefix="/projects", tags=["meetings"])
 meeting_repo = MeetingRepository()
 document_repo = DocumentRepository()
 project_repo = ProjectRepository()
+user_repo = UserRepository()
 
 _PERSONAS_DIR = Path(__file__).resolve().parents[4] / "ai" / "meeting" / "personas"
 
@@ -1356,13 +1359,35 @@ async def get_latest_meeting(
     return meeting
 
 
+# 윤한/Claude(2026-07-21): 개인화 훅(User RAG) — 개발 위원(technical_feasibility/dev_expert,
+# is_technical_persona) 지적만 골라 attach_impl_guides(ai/meeting/scoring/personalization.py,
+# 경이)가 요구하는 {id, status, text, suggestion} 형태로 바꾼다. status는 build_impl_guide가
+# "resolved"일 때만 가이드를 건너뛰므로, 판단이 이미 좋은(strong/acceptable) 항목은
+# "resolved"로 접어 넣어 개선이 필요 없는 지적에 가이드를 만들지 않게 한다.
+_GOOD_JUDGMENTS = {"strong", "acceptable"}
+
+
+def _build_dev_feedback(reviewer_results: list[dict]) -> list[dict]:
+    return [
+        {
+            "id": score.get("criterion_id"),
+            "status": "resolved" if score.get("judgment") in _GOOD_JUDGMENTS else "open",
+            "text": "; ".join(score.get("issues") or []) or score.get("criterion_name", ""),
+            "suggestion": "; ".join(score.get("suggestions") or []),
+        }
+        for r in reviewer_results
+        if is_technical_persona(r.get("persona_id"))
+        for score in r.get("rubric_scores") or []
+    ]
+
+
 # RPT-001: 종합 결과 표시
 @router.get("/{project_id}/report")
 async def get_project_report(
     project_id: str,
     authorization: Optional[str] = Header(None, alias="authorization"),
 ):
-    get_current_user(authorization)
+    user_email = get_current_user(authorization)
 
     project = await project_repo.find_by_id(project_id)
     if project is None:
@@ -1371,6 +1396,13 @@ async def get_project_report(
     meeting = await meeting_repo.find_latest_by_project_id(project_id)
     if meeting is None:
         raise HTTPException(status_code=404, detail="회의 결과가 없습니다. 먼저 분석을 시작하세요.")
+
+    reviewer_results = meeting.get("reviewer_results") or []
+    dev_feedback = _build_dev_feedback(reviewer_results)
+    user = await user_repo.find_by_email(user_email)
+    user_profile = (user or {}).get("profile") or None
+    llm_call = _build_real_llm_call(meeting["meeting_id"])
+    impl_guides = await run_in_threadpool(attach_impl_guides, dev_feedback, user_profile, llm_call)
 
     return {
         "project_id": project_id,
@@ -1381,9 +1413,10 @@ async def get_project_report(
         "score_result": meeting.get("score_result"),
         "chair_summary": meeting.get("chair_summary"),
         "top_revisions": meeting.get("top_revisions"),
-        "reviewer_results": meeting.get("reviewer_results"),
+        "reviewer_results": reviewer_results,
         "evidence": meeting.get("evidence"),
         "created_at": meeting.get("created_at"),
+        "impl_guides": impl_guides,
     }
 
 
