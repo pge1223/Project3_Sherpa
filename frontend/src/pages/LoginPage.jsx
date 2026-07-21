@@ -18,7 +18,9 @@ export default function LoginPage() {
     try {
       const { access_token } = await login(email, password)
       localStorage.setItem('auth_token', access_token)
-      navigate('/projects')
+      // 가은/Claude(2026-07-21): board가 이제 기본 진입점이라 로그인 후에도 board로
+      // 보낸다 — "내 프로젝트"는 board 우측 상단 버튼으로 들어간다.
+      navigate('/board')
     } catch (err) {
       setError(err.message)
     } finally {
@@ -28,10 +30,12 @@ export default function LoginPage() {
 
   // 비회원 로그인: 서버 인증 호출 없이 그냥 들어간다. authHeaders()가 auth_token 없으면
   // Authorization 헤더를 안 보내고, 백엔드는 헤더가 없으면 고정 게스트 사용자로 처리한다
-  // (projects.py/documents.py/meetings.py의 get_current_user() 참고).
+  // (projects.py/documents.py/meetings.py의 get_current_user() 참고). 게스트는 전부
+  // guest@local 하나로 묶이므로 "내 프로젝트"가 사용자별로 안 갈린다 — 알면서 쓰는
+  // 빠른 테스트용 경로로 남겨둔다.
   function handleGuestLogin() {
     localStorage.removeItem('auth_token')
-    navigate('/projects')
+    navigate('/board')
   }
 
   return (
