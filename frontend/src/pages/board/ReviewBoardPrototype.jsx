@@ -6,7 +6,7 @@ import {
   ArrowRight, TrendingUp, ChevronDown, ChevronUp, Calendar, FolderOpen, X,
   Menu, User, LogOut,
 } from "lucide-react";
-import { createProject, getProject } from "../../api/projectApi";
+import { createProject, getProject, updateProject } from "../../api/projectApi";
 import {
   fetchUrl as fetchCriteriaUrl,
   uploadDocument,
@@ -1088,11 +1088,17 @@ export default function ReviewBoardPrototype() {
     setIdeaSaveError('');
     setIdeaSaving(true);
     try {
-      const project = await createProject({
-        title: IDEA_PROJECT_TOPIC,
-        doc_type: "competition",
-        description: IDEA_PROJECT_MARKER,
-      });
+      // 가은/Claude(2026-07-21): 실측 버그 — EntryScreen에서 공고문을 먼저 등록해
+      // ensureProject()로 이미 프로젝트가 만들어져 있는데도 여기서 항상 새 프로젝트를
+      // 만들어버려서, 앞서 등록한 공고문이 붙은 프로젝트가 고아가 됐다. 이미 프로젝트가
+      // 있으면 새로 만들지 않고 제목·설명만 아이디어 확정 값으로 갱신한다.
+      const project = projectIdRef.current
+        ? await updateProject(projectIdRef.current, { title: IDEA_PROJECT_TOPIC, description: IDEA_PROJECT_MARKER })
+        : await createProject({
+            title: IDEA_PROJECT_TOPIC,
+            doc_type: "competition",
+            description: IDEA_PROJECT_MARKER,
+          });
       ideaProjectSavedRef.current = true;
       projectIdRef.current = project.id;
       setProjectId(project.id);
@@ -1127,20 +1133,23 @@ export default function ReviewBoardPrototype() {
   }
 
   // 가은/Claude(2026-07-21): ?projectId=가 있으면 기존 프로젝트를 불러와 이어서 한다.
-  // 기획서(target)가 이미 있으면 "기획서 업로드" 단계로, 공고문(criteria)만 있으면
-  // "공모전 분석" 단계로 보낸다(둘 다 있어도 분석 화면이 캐시로 즉시 뜨므로 거기서
-  // 시작). 아무 문서도 없으면 entry에 그대로 둔다.
+  // 프로젝트 설명이 IDEA_PROJECT_MARKER면 "작성 전" 흐름에서 주제를 확정한 프로젝트로
+  // 보고 mode를 pre로 두고 분석 화면부터 보여준다(문서가 없어도 entry에 멈추지 않도록).
+  // 그 외에는 기존대로: 기획서(target)가 있으면 "기획서 업로드" 단계로, 공고문
+  // (criteria)만 있으면 "공모전 분석" 단계로 보낸다. 아무 문서도 없으면 entry에 그대로 둔다.
   useEffect(() => {
     if (!resumeProjectId) return;
     let cancelled = false;
     setResuming(true);
     setResumeError('');
-    getDocuments(resumeProjectId)
-      .then((docs) => {
+    Promise.all([getDocuments(resumeProjectId), getProject(resumeProjectId)])
+      .then(([docs, project]) => {
         if (cancelled) return;
         projectIdRef.current = resumeProjectId;
         setProjectId(resumeProjectId);
-        setMode('post');
+        const isIdeaProject = project.description === IDEA_PROJECT_MARKER;
+        setMode(isIdeaProject ? 'pre' : 'post');
+        if (isIdeaProject) ideaProjectSavedRef.current = true;
 
         const criteriaDocs = docs.filter((d) => d.document_role === 'criteria');
         const targetDocs = docs.filter((d) => (d.document_role || 'target') === 'target');
@@ -1163,7 +1172,8 @@ export default function ReviewBoardPrototype() {
           })),
         );
 
-        if (targetDocs.length > 0) setStage('upload');
+        if (isIdeaProject) setStage('analysis');
+        else if (targetDocs.length > 0) setStage('upload');
         else if (criteriaDocs.length > 0) setStage('analysis');
       })
       .catch((err) => { if (!cancelled) setResumeError(err.message); })
