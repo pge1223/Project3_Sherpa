@@ -115,19 +115,61 @@ def _stub_llm_call(session_id: str, model: str):
         if "[질문 규칙]" in prompt:
             is_planning = "당신은 AI Review Board의 기획 전문가입니다" in prompt
             speaker = "planning_expert" if is_planning else "dev_expert"
-            return json.dumps(
-                {
-                    "judgment": f"[{speaker}] 판단",
-                    "question": f"[{speaker}] 질문",
-                    "question_topic": _topic_from_prompt(prompt),
-                    "referenced_message_ids": [],
-                    "evidence": [],
-                },
-                ensure_ascii=False,
-            )
+            payload = {
+                "judgment": f"[{speaker}] 판단",
+                "question": f"[{speaker}] 질문",
+                "question_topic": _topic_from_prompt(prompt),
+                "referenced_message_ids": [],
+                "evidence": [],
+            }
+            # 후보 결합 직후 첫 질문(require_combine_structure=true)이면 요청된 4단 구조
+            # 필드도 채운다 — ai/meeting/tests/test_ideation_discovery_graph.py의
+            # _CombineAwareScriptedLLM과 같은 최소 대응.
+            if "[결합 직후 첫 메시지 여부 require_combine_structure]\ntrue" in prompt:
+                payload["user_selection_summary"] = f"[{speaker}] 사용자 선택 반영 요약"
+                payload["proposal"] = f"[{speaker}] 제안"
+            return json.dumps(payload, ensure_ascii=False)
         if "[판정 규칙]" in prompt:
             return json.dumps(
                 {"answer_type": "answer", "reason": "충분", "follow_up_question": None, "clarification_response": None},
+                ensure_ascii=False,
+            )
+        if "[해석 규칙]" in prompt:
+            # 용준/Claude(2026-07-21, /board 실 연동): 후보 결합(combine) 응답 — 이번
+            # 확장(원본 후보/결합 분석을 API 응답에 노출)을 검증하는 테스트에서만 실제로
+            # 호출된다("1번과 2번 결합" 같은 자연어 요청).
+            return json.dumps(
+                {
+                    "resolution": "combine",
+                    "selected_candidate_ids": ["candidate_1", "candidate_2"],
+                    "selection_reason": "두 후보의 장점을 결합",
+                    "combined_idea": {
+                        "title": "결합 아이디어",
+                        "problem": "결합된 문제",
+                        "target_user": "결합된 사용자",
+                        "usage_scenario": "결합 상황",
+                        "core_value": "결합 가치",
+                        "solution": "결합 해결책",
+                        "main_features": ["결합 기능"],
+                        "required_data": ["결합 데이터"],
+                        "technical_approach": "결합 기술",
+                        "mvp_scope": "결합 MVP",
+                        "differentiation": "결합 차별성",
+                        "contest_fit": "결합 적합성",
+                        "success_metrics": ["결합 지표"],
+                    },
+                    "merge_analysis": {
+                        "common_problem": "반복 업무 부담",
+                        "common_value": "사장님의 시간 절약",
+                        "fit": "high",
+                        "primary_features": ["기능1"],
+                        "secondary_features": ["기능2"],
+                        "conflicts": [],
+                        "open_questions": [],
+                    },
+                    "unverified_assumptions": ["결합 가정1"],
+                    "clarifying_question": None,
+                },
                 ensure_ascii=False,
             )
         raise AssertionError(f"예상하지 못한 프롬프트: {prompt[:150]}")
@@ -257,6 +299,49 @@ def test_reply_response_includes_topic_fields_after_first_answer(client: TestCli
     body = reply_resp.json()
     assert "resolved_topics" in body
     assert "pending_question_topic" in body
+
+
+# ---------------------------------------------------------------------------
+# 용준/Claude(2026-07-21, /board 실 연동): _serialize_state에 순수 추가한
+# original_idea_candidates/selection_intent/user_selection_message/source_candidates/
+# merge_analysis 필드가 실제 API 응답에 노출되는지 검증한다 — /board의 결과 화면과 후보
+# 결합 컨텍스트 표시가 이 필드들에 의존한다.
+# ---------------------------------------------------------------------------
+
+
+def test_start_response_includes_original_candidates_field(client: TestClient):
+    resp = client.post(
+        "/ideation-conversation/start",
+        json={"competition_name": "데모 공모전", "competition_document": "실현가능성을 평가한다."},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body["original_idea_candidates"]) >= 2
+    assert body["selection_intent"] is None
+    assert body["source_candidates"] == []
+    assert body["merge_analysis"] is None
+
+
+def test_reply_response_includes_merge_context_fields_after_combine(client: TestClient):
+    start_resp = client.post(
+        "/ideation-conversation/start",
+        json={"competition_name": "데모 공모전", "competition_document": "실현가능성을 평가한다."},
+    )
+    session_id = start_resp.json()["session_id"]
+
+    reply_resp = client.post(
+        f"/ideation-conversation/{session_id}/reply", json={"message": "1번과 2번 결합해줘"}
+    )
+    assert reply_resp.status_code == 200
+    body = reply_resp.json()
+
+    assert body["selection_intent"] == "combine"
+    assert body["user_selection_message"] == "1번과 2번 결합해줘"
+    assert {c["candidate_id"] for c in body["source_candidates"]} == {"candidate_1", "candidate_2"}
+    assert body["merge_analysis"]["fit"] == "high"
+    assert body["merge_analysis"]["common_problem"] == "반복 업무 부담"
+    assert body["selected_idea"]["title"] == "결합 아이디어"
+    assert body["phase"] == "awaiting_planning_answer"
 
 
 if __name__ == "__main__":
