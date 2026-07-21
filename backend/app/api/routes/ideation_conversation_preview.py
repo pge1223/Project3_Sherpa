@@ -265,7 +265,7 @@ class StartRequest(BaseModel):
     max_rounds: int = 3
     use_rag: bool = False
     project_id: Optional[str] = None
-    model: str = Field(default="")  # 비워두면 settings.DEV_LLM_REVIEWER_MODEL 사용(개발용 오버라이드 허용).
+    model: str = Field(default="")  # 비워두면 settings.reviewer_model()(LLM_PROFILE 기준) 사용 — 개발용 오버라이드 허용.
 
 
 class ReplyRequest(BaseModel):
@@ -277,8 +277,13 @@ class FinalizeRequest(BaseModel):
     model: str = Field(default="")
 
 
+# 가은/Claude(2026-07-21): 실측 제보 — 이 화면(board "작성 전" 흐름)이 늘 DEV_LLM_REVIEWER_
+# MODEL로 고정돼 있어서, dev 프로필에 gpt-5-nano처럼 느린 추론 모델을 넣으면(파싱/JSON
+# 형식 테스트용으로 dev 프로필을 그렇게 쓰는 게 팀 의도) 실제 사용자가 쓰는 이 대화형
+# 회의까지 덩달아 느려졌다. 다른 LLM 호출(documents.py/meetings.py)과 똑같이
+# LLM_PROFILE(dev|quality|premium)을 그대로 따르게 통일한다.
 def _effective_model(requested: str) -> str:
-    return requested.strip() or settings.DEV_LLM_REVIEWER_MODEL
+    return requested.strip() or settings.reviewer_model()
 
 
 @router.post("/start")

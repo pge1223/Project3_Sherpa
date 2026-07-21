@@ -19,20 +19,20 @@ export async function getProject(projectId) {
   return parseApiResponse(res, '프로젝트를 불러오지 못했습니다.')
 }
 
-export async function createProject({ title, doc_type, description }) {
+export async function createProject({ title, doc_type, description, flow_mode }) {
   const res = await fetch(`${API_BASE_URL}/projects/`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
-    body: JSON.stringify({ title, doc_type, description }),
+    body: JSON.stringify({ title, doc_type, description, flow_mode }),
   })
   return parseApiResponse(res, '프로젝트를 생성하지 못했습니다.')
 }
 
-export async function updateProject(projectId, { title, description }) {
+export async function updateProject(projectId, { title, description, flow_mode }) {
   const res = await fetch(`${API_BASE_URL}/projects/${projectId}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
-    body: JSON.stringify({ title, description }),
+    body: JSON.stringify({ title, description, flow_mode }),
   })
   return parseApiResponse(res, '프로젝트를 수정하지 못했습니다.')
 }

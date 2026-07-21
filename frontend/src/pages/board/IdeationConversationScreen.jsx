@@ -53,10 +53,52 @@ function ideationSessionStorageKey(projectId) {
   return projectId ? `ideation-conv-session:${projectId}` : null
 }
 
-function MessageBubble({ message }) {
+// 가은/Claude(2026-07-21): 실측 요청 — 백엔드가 전체 응답을 한 번에 돌려주는 REST
+// 호출이라(스트리밍 없음) 도착한 텍스트를 한 글자씩 풀어내는 클라이언트 사이드
+// 타이핑 효과만 낸다(진짜 토큰 스트리밍이 아니다). 이미 화면에 있던 메시지(이전 단계
+// 갔다 돌아오거나 세션을 이어받은 경우)까지 다시 타이핑되면 어색하므로, "새로 도착한"
+// 위원 메시지에만 적용한다 — 어디서 이 구분을 하는지는 IdeationScreen의
+// newMessageIds 참고.
+function useTypewriter(text, enabled) {
+  const [display, setDisplay] = useState(enabled ? '' : text)
+  const [done, setDone] = useState(!enabled)
+
+  useEffect(() => {
+    if (!enabled) {
+      setDisplay(text)
+      setDone(true)
+      return
+    }
+    setDisplay('')
+    setDone(false)
+    if (!text) {
+      setDone(true)
+      return
+    }
+    let i = 0
+    const CHARS_PER_TICK = Math.max(1, Math.ceil(text.length / 120)) // 긴 답변도 과하게 오래 걸리지 않도록
+    const timer = setInterval(() => {
+      i += CHARS_PER_TICK
+      if (i >= text.length) {
+        setDisplay(text)
+        setDone(true)
+        clearInterval(timer)
+      } else {
+        setDisplay(text.slice(0, i))
+      }
+    }, 18)
+    return () => clearInterval(timer)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [text, enabled])
+
+  return { display, done }
+}
+
+function MessageBubble({ message, typing }) {
   const meta = speakerMetaFor(message)
   const isRight = meta.align === 'right'
   const hasContent = !!message.content?.trim()
+  const { display, done } = useTypewriter(message.content || '', typing)
 
   if (!hasContent) {
     return (
@@ -88,7 +130,8 @@ function MessageBubble({ message }) {
             whiteSpace: 'pre-wrap',
           }}
         >
-          {message.content}
+          {display}
+          {typing && !done && <span className="rb-typing-cursor">▌</span>}
         </div>
       </div>
     </div>
@@ -260,6 +303,19 @@ export function IdeationScreen({
   const startedRef = useRef(false)
   const chatEndRef = useRef(null)
 
+  // 가은/Claude(2026-07-21): 타이핑 효과는 "새로 도착한" 위원 메시지에만 건다 — 마운트
+  // 시점(세션을 이어받아 이미 대화 내역이 있는 경우 포함)에 있던 메시지는 전부
+  // "이미 본 것"으로 미리 표시해 다시 타이핑되지 않게 한다. 렌더마다 새로 계산하고
+  // 커밋 후 effect에서 baseline을 갱신하는 방식이라 컴포넌트가 리렌더돼도 같은
+  // 메시지가 두 번 타이핑되지 않는다.
+  const seenMessageIdsRef = useRef(new Set((ideationConv?.messages || []).map((m) => m.message_id)))
+  const currentMessages = ideationConv?.messages || []
+  const currentMessageIds = new Set(currentMessages.map((m) => m.message_id))
+  const newMessageIds = new Set([...currentMessageIds].filter((id) => !seenMessageIdsRef.current.has(id)))
+  useEffect(() => {
+    seenMessageIdsRef.current = currentMessageIds
+  })
+
   async function runStart() {
     setStarting(true)
     setError(null)
@@ -412,7 +468,13 @@ export function IdeationScreen({
           {starting && !ideationConv && (
             <p style={{ color: 'var(--text-2)', fontSize: 13 }}>공모전 분석을 바탕으로 아이디어 후보를 만들고 있어요...</p>
           )}
-          {ideationConv?.messages?.map((m) => <MessageBubble key={m.message_id} message={m} />)}
+          {currentMessages.map((m) => (
+            <MessageBubble
+              key={m.message_id}
+              message={m}
+              typing={m.speaker_id !== 'user' && newMessageIds.has(m.message_id)}
+            />
+          ))}
           {(sending || finalizing) && (
             <p style={{ fontSize: 12.5, color: 'var(--text-2)' }}>
               {statusLabelFor({ phase, starting, sending, finalizing })}...

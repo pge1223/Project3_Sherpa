@@ -12,6 +12,7 @@ import {
   uploadDocument,
   getDocumentStatus,
   getAnnouncementAnalysis,
+  getContestWorksByTitle,
   deleteDocument,
   getDocuments,
 } from "../../api/documentApi";
@@ -142,6 +143,8 @@ function Shell({ children, active, mode, onNavigate, showNav }) {
         .rb-root .rb-back-title{ display:flex; align-items:center; gap:8px; }
         .rb-root .rb-back-button{ width:26px; height:26px; display:inline-flex; align-items:center; justify-content:center; border:none; background:transparent; color:var(--text-1); border-radius:8px; cursor:pointer; font-size:22px; line-height:1; padding:0; flex-shrink:0; }
         .rb-root .rb-back-button:hover{ background:var(--bg-2); color:var(--text-0); }
+        .rb-root .rb-typing-cursor{ display:inline-block; margin-left:1px; animation: rb-blink 0.9s steps(1) infinite; }
+        @keyframes rb-blink{ 0%,49%{ opacity:1; } 50%,100%{ opacity:0; } }
         @media (max-width: 780px){
           .rb-root .rb-top-menu{ top:10px; right:12px; }
           .rb-root{ flex-direction:column; }
@@ -219,9 +222,18 @@ function BackTitle({ children, onBack, level = 2, style }) {
  * 파일 업로드 탭, 전용 "가져오기" 버튼, 진행 상태·에러 표시, 색인 폴링)을 그대로
  * 옮겨왔다.
  */
-function EntryScreen({ onEnter, loading, error, projectId, ensureProject, documents, setDocuments }) {
+function EntryScreen({ onEnter, onModeSelect, loading, error, projectId, ensureProject, documents, setDocuments }) {
   const navigate = useNavigate();
   const [mode, setMode] = useState(null);
+
+  // 가은/Claude(2026-07-21): 실측 요청 — 여기서 모드 카드를 고른 시점과 "분석 시작"을
+  // 누르는 시점 사이에 공고문을 먼저 등록하면(ensureProject가 여기서 바로 호출됨) 그
+  // 시점엔 아직 부모의 mode가 안 알려져 있어 flow_mode 없이 프로젝트가 생겼다. 카드를
+  // 고르자마자 부모에도 즉시 알려서 ensureProject()가 항상 올바른 flow_mode로 만들게 한다.
+  function selectMode(m) {
+    setMode(m);
+    onModeSelect?.(m);
+  }
   const [criteriaTab, setCriteriaTab] = useState('url');
   const [criteriaUrl, setCriteriaUrl] = useState('');
   const [criteriaLoading, setCriteriaLoading] = useState(false);
@@ -362,7 +374,7 @@ function EntryScreen({ onEnter, loading, error, projectId, ensureProject, docume
         <div
           className="card glass"
           style={{ cursor: "pointer", border: mode === "pre" ? "1px solid var(--purple)" : "1px solid var(--glass-border)" }}
-          onClick={() => setMode("pre")}
+          onClick={() => selectMode("pre")}
         >
           <Sparkles size={20} color="var(--purple)" />
           <div style={{ fontWeight: 700, fontSize: 15, margin: "10px 0 6px" }}>작성 전 → 주제 발굴</div>
@@ -373,7 +385,7 @@ function EntryScreen({ onEnter, loading, error, projectId, ensureProject, docume
         <div
           className="card glass"
           style={{ cursor: "pointer", border: mode === "post" ? "1px solid var(--coral)" : "1px solid var(--glass-border)" }}
-          onClick={() => setMode("post")}
+          onClick={() => selectMode("post")}
         >
           <FileText size={20} color="var(--coral)" />
           <div style={{ fontWeight: 700, fontSize: 15, margin: "10px 0 6px" }}>작성 후 → 문서 피드백</div>
@@ -506,8 +518,9 @@ const _CONFIDENCE_LABEL = { high: '확신 높음', medium: '확신 보통', low:
  *    official_facts(공고문에 실제 있는 사실)/strategic_analysis(AI 추론)를 보여준다.
  * 2) 팀 UX 스펙(2026-07-21) 그대로: 첫 화면은 4개 카드(핵심 과제/평가 갈리는 지점/
  *    반드시 지킬 조건/수상작 경향)만, 아래에 접을 수 있는 상세 분석(추천 전략/주의
- *    리스크/출처)을 둔다. 수상작·유사사례 경향은 이 시스템에 그 데이터 소스 자체가
- *    없어서 항상 "자료 미확보" 상태로 고정 표시하고 LLM이 지어내지 않는다.
+ *    리스크/출처)을 둔다. 수상작·유사사례 경향은 kyh님의 소통혁신24 수상작 아카이브
+ *    (contest_works)가 생기기 전까지는 데이터 소스가 없어 "자료 미확보"로 고정
+ *    표시했었다 — 이제 실제 매칭 결과가 있으면 보여주고, 없을 때만 그 문구를 쓴다.
  */
 function AnalysisScreen({ mode, onNext, onBack, projectId }) {
   const [loading, setLoading] = useState(true);
@@ -515,6 +528,32 @@ function AnalysisScreen({ mode, onNext, onBack, projectId }) {
   const [analysis, setAnalysis] = useState(null);
   const [detailOpen, setDetailOpen] = useState(false);
   const [ideaTopic, setIdeaTopic] = useState(null);
+  const [workDetail, setWorkDetail] = useState(null); // { contestTitle, works } | null
+  const [workDetailLoading, setWorkDetailLoading] = useState(false);
+  const [panelWidth, setPanelWidth] = useState(460);
+  const resizingRef = useRef(false);
+
+  // 가은/Claude(2026-07-21): 실측 요청 — 수상작 상세 패널을 마우스로 드래그해 너비를
+  // 조절할 수 있게. 패널이 화면 오른쪽에 고정돼 있어 왼쪽 가장자리를 끌면 그 지점부터
+  // 화면 끝까지가 새 너비가 된다.
+  useEffect(() => {
+    function handleMouseMove(e) {
+      if (!resizingRef.current) return;
+      const next = window.innerWidth - e.clientX;
+      setPanelWidth(Math.min(Math.max(next, 340), Math.min(760, window.innerWidth - 80)));
+    }
+    function handleMouseUp() {
+      if (!resizingRef.current) return;
+      resizingRef.current = false;
+      document.body.style.userSelect = '';
+    }
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, []);
 
   useEffect(() => {
     if (!projectId) {
@@ -550,6 +589,23 @@ function AnalysisScreen({ mode, onNext, onBack, projectId }) {
     return () => { cancelled = true; };
   }, [projectId]);
 
+  // 가은/Claude(2026-07-21): 실측 요청 — "수상작·유사사례 경향" 항목을 클릭하면 같은
+  // 공모전의 다른 수상작/후보작을 옆 패널로 보여준다. "볼 게 있을 때만" 열려야 하므로
+  // (자기 자신 하나뿐이고 이미지도 없으면 클릭해도 반응 없음) 먼저 조회하고 나서 연다.
+  async function handleSimilarWorkClick(work) {
+    if (!work.contest_title || workDetailLoading) return;
+    setWorkDetailLoading(true);
+    try {
+      const data = await getContestWorksByTitle(work.contest_title);
+      const hasMore = data.works.length > 1 || data.works.some((w) => w.images.length > 0 || w.ocr_text);
+      if (hasMore) setWorkDetail({ contestTitle: data.contest_title, works: data.works });
+    } catch {
+      // 실측 지침: 데이터가 없거나(조회 실패 포함) 볼 게 없으면 그냥 아무 반응 없이 둔다.
+    } finally {
+      setWorkDetailLoading(false);
+    }
+  }
+
   if (loading) {
     return (
       <div style={{ maxWidth: 820 }}>
@@ -564,6 +620,11 @@ function AnalysisScreen({ mode, onNext, onBack, projectId }) {
   const facts = analysis?.official_facts;
   const strategy = analysis?.strategic_analysis;
   const evidence = analysis?.evidence || [];
+  // 가은/Claude(2026-07-21): kyh님이 크롤링+분류한 소통혁신24 수상작 아카이브
+  // (contest_works)가 생겨서 실제 유사사례를 보여줄 수 있게 됐다 — 백엔드가 매칭을
+  // 못 찾으면(팀 공유 DB에 아직 데이터가 안 올라왔거나 이 카테고리에 사례가 없으면)
+  // has_similar_case_data가 false로 오므로 그때는 기존 "미확보" 문구를 그대로 보여준다.
+  const similarWorks = analysis?.similar_works || [];
 
   const cards = hasAnnouncement
     ? [
@@ -571,11 +632,20 @@ function AnalysisScreen({ mode, onNext, onBack, projectId }) {
         { icon: Target, color: "purple", title: "핵심 과제", body: strategy?.core_intent || "핵심 과제를 판단할 근거가 부족해요." },
         { icon: Award, color: "coral", title: "평가에서 갈리는 지점", list: facts?.evaluation_criteria },
         { icon: ShieldCheck, color: "green", title: "반드시 지켜야 할 조건", list: [...(facts?.eligibility || []), ...(facts?.submission_requirements || [])].slice(0, 4) },
-        { icon: TrendingUp, color: "amber", title: "수상작·유사사례 경향", body: "수상작 자료 미확보 — 유사 공모전 사례 기반 분석은 아직 지원하지 않아요." },
+        analysis?.has_similar_case_data
+          ? {
+              icon: TrendingUp, color: "amber", title: "수상작·유사사례 경향",
+              list: similarWorks.map((w) => ({
+                label: [w.contest_title, w.source_org].filter(Boolean).join(" · "),
+                onClick: () => handleSimilarWorkClick(w),
+              })),
+            }
+          : { icon: TrendingUp, color: "amber", title: "수상작·유사사례 경향", body: "수상작 자료 미확보 — 유사 공모전 사례 기반 분석은 아직 지원하지 않아요." },
       ]
     : [];
 
   return (
+    <>
     <div style={{ maxWidth: 820 }}>
       <div className="badge purple mono">{hasAnnouncement ? "공고문 분석 결과" : "공고문 미등록"}</div>
       <BackTitle level={1} onBack={onBack} style={{ margin: "12px 0 24px" }}>
@@ -595,7 +665,15 @@ function AnalysisScreen({ mode, onNext, onBack, projectId }) {
                 {it.list && (
                   it.list.length > 0
                     ? <ul style={{ margin: 0, paddingLeft: 16, fontSize: 12.5, color: "var(--text-2)", lineHeight: 1.7 }}>
-                        {it.list.map((v, j) => <li key={j}>{v}</li>)}
+                        {it.list.map((v, j) => (
+                          <li
+                            key={j}
+                            onClick={v?.onClick}
+                            style={v?.onClick ? { cursor: "pointer", textDecorationLine: "underline", textDecorationStyle: "dotted" } : undefined}
+                          >
+                            {v?.label ?? v}
+                          </li>
+                        ))}
                       </ul>
                     : <div style={{ fontSize: 12.5, color: "var(--text-2)" }}>확인된 내용이 없어요.</div>
                 )}
@@ -684,6 +762,51 @@ function AnalysisScreen({ mode, onNext, onBack, projectId }) {
         {mode === "pre" ? "AI 위원과 주제 확정 시작" : "기획서 업로드하기"} <ArrowRight size={15} />
       </button>
     </div>
+
+    {workDetail && (
+      <div
+        className="glass"
+        style={{
+          position: "fixed", top: 0, right: 0, bottom: 0, width: panelWidth, maxWidth: "90vw",
+          padding: 24, overflowY: "auto", zIndex: 40, borderLeft: "1px solid var(--glass-border)",
+          boxShadow: "-8px 0 24px rgba(28,26,46,0.10)",
+        }}
+      >
+        <div
+          onMouseDown={() => { resizingRef.current = true; document.body.style.userSelect = 'none'; }}
+          style={{
+            position: "absolute", left: 0, top: 0, bottom: 0, width: 8,
+            cursor: "col-resize", zIndex: 1,
+          }}
+        />
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16, gap: 8 }}>
+          <div style={{ fontWeight: 700, fontSize: 14, lineHeight: 1.5 }}>{workDetail.contestTitle}</div>
+          <button
+            onClick={() => setWorkDetail(null)}
+            aria-label="닫기"
+            style={{ background: "none", border: "none", padding: 4, cursor: "pointer", color: "var(--text-2)", flexShrink: 0 }}
+          >
+            <X size={16} />
+          </button>
+        </div>
+        {workDetail.works.map((w, i) => (
+          <div key={i} style={{ padding: "14px 0", borderTop: i > 0 ? "1px solid var(--glass-border)" : "none" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
+              <span className={`badge ${w.selection_status === "winner" ? "green" : "amber"} mono`}>
+                {w.selection_status === "winner" ? "수상" : "후보"}
+              </span>
+              {w.award_grade && <span style={{ fontSize: 11.5, color: "var(--text-2)" }}>{w.award_grade}</span>}
+            </div>
+            <div style={{ fontSize: 13.5, fontWeight: 600, marginBottom: 6 }}>{w.work_title}</div>
+            {w.images.length > 0 && (
+              <img src={w.images[0]} alt={w.work_title} style={{ width: "100%", borderRadius: 8, marginBottom: 6, display: "block" }} />
+            )}
+            {w.ocr_text && <div style={{ fontSize: 12.5, color: "var(--text-1)", lineHeight: 1.6 }}>{w.ocr_text}</div>}
+          </div>
+        ))}
+      </div>
+    )}
+    </>
   );
 }
 
@@ -985,7 +1108,10 @@ export default function ReviewBoardPrototype() {
   projectIdRef.current = projectId;
   async function ensureProject() {
     if (projectIdRef.current) return projectIdRef.current;
-    const project = await createProject({ title: "새 공모전 프로젝트", doc_type: "competition" });
+    // 가은/Claude(2026-07-21): 실측 요청 — "작성 전/작성 후" 중 뭘 골랐는지가 프로젝트에
+    // 안 남아서, "내 프로젝트"에서 다시 불러오면 어느 흐름이었는지 알 방법이 없었다.
+    // 이 시점엔 EntryScreen의 onModeSelect 콜백 덕분에 mode가 이미 채워져 있다.
+    const project = await createProject({ title: "새 공모전 프로젝트", doc_type: "competition", flow_mode: mode });
     projectIdRef.current = project.id;
     setProjectId(project.id);
     return project.id;
@@ -1007,11 +1133,12 @@ export default function ReviewBoardPrototype() {
       // 만들어버려서, 앞서 등록한 공고문이 붙은 프로젝트가 고아가 됐다. 이미 프로젝트가
       // 있으면 새로 만들지 않고 제목·설명만 아이디어 확정 값으로 갱신한다.
       const project = projectIdRef.current
-        ? await updateProject(projectIdRef.current, { title: confirmedTopic, description: IDEA_PROJECT_MARKER })
+        ? await updateProject(projectIdRef.current, { title: confirmedTopic, description: IDEA_PROJECT_MARKER, flow_mode: "pre" })
         : await createProject({
             title: confirmedTopic,
             doc_type: "competition",
             description: IDEA_PROJECT_MARKER,
+            flow_mode: "pre",
           });
       ideaProjectSavedRef.current = true;
       projectIdRef.current = project.id;
@@ -1026,10 +1153,9 @@ export default function ReviewBoardPrototype() {
 
   async function handleEnter(m) {
     setMode(m);
-    if (m !== "post") {
-      setStage("analysis");
-      return;
-    }
+    // 가은/Claude(2026-07-21): 실측 요청 — 예전엔 "작성 전" 모드는 공고문을 안 넣었으면
+    // 프로젝트를 아예 안 만들고 넘어가서 flow_mode를 저장할 데가 없었다. 이제 두 모드
+    // 모두 여기서 프로젝트를 보장(ensureProject)해서 flow_mode가 항상 남는다.
     setEntryError("");
     setEntryLoading(true);
     try {
@@ -1065,9 +1191,12 @@ export default function ReviewBoardPrototype() {
         if (cancelled) return;
         projectIdRef.current = resumeProjectId;
         setProjectId(resumeProjectId);
-        const isIdeaProject = project.description === IDEA_PROJECT_MARKER;
-        setMode(isIdeaProject ? 'pre' : 'post');
-        if (isIdeaProject) ideaProjectSavedRef.current = true;
+        // 가은/Claude(2026-07-21): flow_mode가 주 판단 기준 — EntryScreen에서 모드를
+        // 고르는 순간 저장된다. description 마커는 flow_mode가 없던 예전 프로젝트를 위한
+        // 하위호환 폴백(아이디어 확정까지 끝난 프로젝트만 잡아낼 수 있었음).
+        const isPreFlow = project.flow_mode === 'pre' || project.description === IDEA_PROJECT_MARKER;
+        setMode(isPreFlow ? 'pre' : 'post');
+        if (project.description === IDEA_PROJECT_MARKER) ideaProjectSavedRef.current = true;
 
         const criteriaDocs = docs.filter((d) => d.document_role === 'criteria');
         const targetDocs = docs.filter((d) => (d.document_role || 'target') === 'target');
@@ -1090,7 +1219,7 @@ export default function ReviewBoardPrototype() {
           })),
         );
 
-        if (isIdeaProject) setStage('analysis');
+        if (isPreFlow) setStage('analysis');
         else if (targetDocs.length > 0) setStage('upload');
         else if (criteriaDocs.length > 0) setStage('analysis');
       })
@@ -1116,6 +1245,7 @@ export default function ReviewBoardPrototype() {
       {stage === "entry" && (
         <EntryScreen
           onEnter={handleEnter}
+          onModeSelect={setMode}
           loading={entryLoading}
           error={entryError}
           projectId={projectId}
