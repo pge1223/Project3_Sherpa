@@ -312,10 +312,13 @@ def test_start_ideation_meeting_produces_schema_valid_document():
 
 
 def test_review_output_schema_untouched():
-    """기존 심사형 계약(review_output.schema.json)이 이번 작업으로 바뀌지 않았는지 확인한다."""
+    """기존 심사형 계약(review_output.schema.json)이 이 ideation 작업으로 바뀌지 않았는지
+    확인한다 - ideation과 무관한 review_output 자체 개정(v2.3.0, unscored_criteria 추가,
+    재인/Claude 2026-07-21)까지 막는 게 아니라, ideation 관련 $defs가 섞여 들어오지
+    않는지만 본다."""
     review_schema_path = REPO_ROOT / "contracts" / "schemas" / "review_output.schema.json"
     schema = json.loads(review_schema_path.read_text(encoding="utf-8"))
-    assert schema["$comment"].startswith("v2.2.0")
+    assert schema["$comment"].startswith("v2.3.0")
     assert "meetingTurn" not in schema["$defs"]
     assert "ideaProposal" not in schema["$defs"]
 

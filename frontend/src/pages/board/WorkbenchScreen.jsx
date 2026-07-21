@@ -85,6 +85,64 @@ function extractFeedbackItems(reviewOutput) {
   return items
 }
 
+// review_output.schema.json v2.3.0의 judgment(4종, rubricScore/unscoredCriterion.attempted_judgment
+// 공용) -> 화면에 보여줄 한글 표기.
+const JUDGMENT_LABEL = {
+  strong: '우수',
+  acceptable: '적당함',
+  needs_improvement: '보완 필요',
+  critical_risk: '심각한 위험',
+}
+
+// 재인/Claude(2026-07-21, ai/meeting/graph/transform.py에 unscored_criteria 추가 — 사용자
+// 확인 하에 진행, 경이님 확인 필요): 위원이 근거 부족으로 채점하지 못한 항목을 화면에
+// 보여준다. 지금까지는 이 항목들이 rubric_scores에서 그냥 사라져서, "왜 이 항목 피드백이
+// 없지?"를 사용자가 알 방법이 없었다(실측 확인).
+//
+// reason별로 사용자한테 해줄 조언이 다르다:
+// - insufficient_evidence/not_applicable: 위원이 원문 전체를 보고 직접 "이 관점에서 다룰
+//   내용이 없다"고 판단한 것 - 문서에 관련 내용을 추가해야 한다는 신호.
+// - evidence_gate_blocked: 위원은 실제 판단(attempted_judgment)까지 냈는데, 그걸 뒷받침할
+//   근거를 저희 RAG 시스템이 명확히 못 찾아 연결해서 점수에 반영을 안 한 것 - 사용자
+//   문서가 부족해서가 아니라 저희 검색 시스템 한계일 수 있어서, "당신 탓 아니다"를
+//   명확히 하고 위원이 실제로 낸 판단을 그대로 보여준다.
+//
+// GPT가 review_items에 그 criterion_id 자체를 아예 안 넣은 경우(위원 응답 누락)는
+// unscored_criteria에도 안 남으므로, 여기엔 나타나지 않는다 - 그건 사용자한테 보여줄
+// 문제가 아니라 저희 쪽에서 고쳐야 할 시스템 이슈라 의도적으로 화면에서 제외한다.
+function extractUnscoredItems(reviewOutput) {
+  const items = []
+  for (const reviewer of reviewOutput?.reviewer_results || []) {
+    for (const u of reviewer.unscored_criteria || []) {
+      const reviewerName = reviewer.persona_name || reviewer.role
+      if (u.reason === 'evidence_gate_blocked') {
+        const judgmentLabel = JUDGMENT_LABEL[u.attempted_judgment] || u.attempted_judgment
+        items.push({
+          id: `unscored-${reviewer.persona_id}-${u.criterion_id}`,
+          criterionName: u.criterion_name,
+          reviewerName,
+          notUserFault: true,
+          message: `${reviewerName}의 판단은 "${judgmentLabel}"이었지만, 이를 뒷받침할 근거를 ` +
+            `저희 시스템이 문서에서 명확히 찾아 연결하지 못해 최종 점수에는 반영되지 않았습니다. ` +
+            `문서 내용이 부족해서가 아니라 저희 검색 시스템의 한계일 수 있어요.`,
+          strengths: u.strengths || [],
+          weaknesses: u.weaknesses || [],
+        })
+      } else {
+        items.push({
+          id: `unscored-${reviewer.persona_id}-${u.criterion_id}`,
+          criterionName: u.criterion_name,
+          reviewerName,
+          notUserFault: false,
+          message: `${reviewerName}이(가) 문서 전체를 검토했지만, 이 항목을 평가할 근거를 ` +
+            `찾지 못했습니다. 관련 내용을 문서에 보강해보세요.`,
+        })
+      }
+    }
+  }
+  return items
+}
+
 // 재인/Claude(2026-07-21): "맥락 이상 감지"(backend/app/api/routes/workbench.py의
 // /context-check) 결과를 위원 피드백과 똑같은 feedbackItems 모양으로 바꾼다 - 그래야
 // 아래 하이라이트/우측 상세 패널 로직을 위원 피드백과 그대로 같이 쓸 수 있다.
@@ -196,6 +254,7 @@ export default function WorkbenchScreen({ projectId }) {
   const selectedFeedbackItems = selectedFeedbackIds
     .map((id) => feedbackById.get(id))
     .filter(Boolean)
+  const unscoredItems = useMemo(() => extractUnscoredItems(reviewOutput), [reviewOutput])
 
   return (
     <div style={{ display: 'flex', gap: 20, height: 'calc(100vh - 64px)' }}>
@@ -264,6 +323,31 @@ export default function WorkbenchScreen({ projectId }) {
           팀 논의로 이 화면에서 빼기로 함 - committee_video_streaming_architecture.md
           쪽 스트리밍 연동은 이 워크벤치가 아닌 다른 화면에서 다룰 예정) */}
       <div style={{ flex: 1, minWidth: 280, display: 'flex', flexDirection: 'column', gap: 16 }}>
+        {unscoredItems.length > 0 && (
+          <div
+            className="card glass"
+            style={{ flex: '0 0 auto', maxHeight: '40%', overflowY: 'auto', padding: 14, border: '1px solid var(--amber-dim)' }}
+          >
+            <div className="badge mono" style={{ marginBottom: 10, background: 'var(--amber-dim)', color: 'var(--amber)' }}>
+              <AlertTriangle size={12} /> 평가되지 않은 항목 {unscoredItems.length}개
+            </div>
+            {unscoredItems.map((u) => (
+              <div key={u.id} style={{ marginBottom: 10, paddingBottom: 10, borderBottom: '1px solid var(--border, #eee)' }}>
+                <div style={{ fontSize: 12.5, fontWeight: 600, marginBottom: 4 }}>{u.criterionName}</div>
+                <p style={{ fontSize: 12, lineHeight: 1.6, color: 'var(--text-1)', marginBottom: u.strengths?.length || u.weaknesses?.length ? 6 : 0 }}>
+                  {u.message}
+                </p>
+                {(u.strengths?.length > 0 || u.weaknesses?.length > 0) && (
+                  <div style={{ fontSize: 11.5, color: 'var(--text-2)', lineHeight: 1.6 }}>
+                    {u.strengths?.map((s, i) => <div key={`s-${i}`}>+ {s}</div>)}
+                    {u.weaknesses?.map((w, i) => <div key={`w-${i}`}>- {w}</div>)}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+
         <div className="card glass" style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 18, display: 'flex', flexDirection: 'column', gap: 14 }}>
           {selectedFeedbackItems.length === 0 && (
             <div style={{ color: 'var(--text-2)', fontSize: 13, display: 'flex', alignItems: 'center', gap: 8 }}>
