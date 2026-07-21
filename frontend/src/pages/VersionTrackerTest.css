@@ -1,0 +1,69 @@
+/* 작성자: 경이 (테스트 전용) — VersionTrackerTestPage 스타일 + 애니메이션.
+   ★ 팔레트/글래스/버튼은 가은님의 새 디자인(ReviewBoardPrototype.jsx .rb-root)과 동일한
+   웜 화이트(#faf8f4) 톤을 그대로 맞춘다 — 나중에 /board 플로우에 이어붙일 때 이질감 0.
+   여기선 그 톤을 .vt-root 로 스코핑하고, keyframes 기반 모션(등장/막대/라인/점)을 더한다. */
+
+.vt-root {
+  --bg-0: #faf8f4; --bg-1: #ffffff; --bg-2: #f1eee5;
+  --glass: rgba(255, 255, 255, 0.72); --glass-border: rgba(28, 26, 46, 0.1);
+  --purple: #7c5cea; --purple-dim: rgba(124, 92, 234, 0.12);
+  --coral: #e0603d; --coral-dim: rgba(224, 96, 61, 0.12);
+  --green: #16a37a; --green-dim: rgba(22, 163, 122, 0.12);
+  --amber: #b8830b; --amber-dim: rgba(184, 131, 11, 0.14);
+  --text-0: #1c1a2e; --text-1: #5b5770; --text-2: #918d9f;
+  --cream: #f4efe2; --cream-line: #e7ddc4;
+  --mono: 'JetBrains Mono', ui-monospace, monospace;
+
+  min-height: 100vh;
+  width: 100%;
+  background:
+    radial-gradient(1100px 600px at 12% -10%, rgba(124, 92, 234, 0.1), transparent 60%),
+    radial-gradient(900px 500px at 100% 10%, rgba(22, 163, 122, 0.07), transparent 55%),
+    radial-gradient(800px 500px at 50% 110%, rgba(224, 96, 61, 0.06), transparent 55%),
+    var(--bg-0);
+  color: var(--text-0);
+  font-family: 'Pretendard', -apple-system, sans-serif;
+}
+
+.vt-root .glass { background: var(--glass); border: 1px solid var(--glass-border); backdrop-filter: blur(14px); box-shadow: 0 2px 14px rgba(28, 26, 46, 0.05); }
+.vt-root .mono { font-family: var(--mono); letter-spacing: 0.02em; }
+.vt-root .badge { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; padding: 3px 9px; border-radius: 99px; font-family: var(--mono); }
+.vt-root .badge.purple { background: var(--purple-dim); color: var(--purple); }
+.vt-root .badge.coral { background: var(--coral-dim); color: var(--coral); }
+.vt-root .badge.green { background: var(--green-dim); color: var(--green); }
+.vt-root .badge.amber { background: var(--amber-dim); color: var(--amber); }
+.vt-root .btn-primary { background: linear-gradient(135deg, var(--purple), #8b6ef0); color: #0b0a16; font-weight: 600; border: none; border-radius: 12px; padding: 11px 18px; cursor: pointer; font-size: 13px; transition: transform 0.15s ease, filter 0.15s ease, box-shadow 0.15s ease; }
+.vt-root .btn-primary:hover:not(:disabled) { transform: translateY(-1px); filter: brightness(1.04); }
+.vt-root .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
+.vt-root .btn-ghost { background: transparent; border: 1px solid var(--glass-border); color: var(--text-1); border-radius: 12px; padding: 8px 14px; cursor: pointer; font-size: 13px; transition: background 0.15s ease; }
+.vt-root .btn-ghost:hover { background: var(--bg-2); }
+.vt-root .card { border-radius: 16px; padding: 20px; }
+
+/* --- 애니메이션 --- */
+.vt-fade { opacity: 0; animation: vtFadeUp 0.5s cubic-bezier(0.22, 0.8, 0.28, 1) forwards; }
+@keyframes vtFadeUp { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
+
+.vt-bar-seg { transform: scaleX(0); transform-origin: left center; animation: vtGrow 0.9s cubic-bezier(0.2, 0.8, 0.2, 1) forwards; }
+@keyframes vtGrow { to { transform: scaleX(1); } }
+
+.vt-line { stroke-dasharray: 1; stroke-dashoffset: 1; animation: vtDraw 1.2s ease forwards 0.25s; }
+@keyframes vtDraw { to { stroke-dashoffset: 0; } }
+
+.vt-area { opacity: 0; animation: vtFadeIn 0.9s ease forwards 0.7s; }
+@keyframes vtFadeIn { to { opacity: 1; } }
+
+.vt-dot { opacity: 0; transform-box: fill-box; transform-origin: center; animation: vtPop 0.4s cubic-bezier(0.34, 1.56, 0.64, 1) forwards; }
+@keyframes vtPop { from { opacity: 0; transform: scale(0); } to { opacity: 1; transform: scale(1); } }
+
+.vt-dot-label { opacity: 0; animation: vtFadeIn 0.4s ease forwards; }
+
+.vt-tab { transition: background 0.18s ease, color 0.18s ease, box-shadow 0.18s ease, transform 0.15s ease, border-color 0.18s ease; }
+.vt-tab:hover { transform: translateY(-1px); }
+
+.vt-dotg { cursor: pointer; }
+
+@media (prefers-reduced-motion: reduce) {
+  .vt-fade, .vt-bar-seg, .vt-line, .vt-area, .vt-dot, .vt-dot-label {
+    animation: none !important; opacity: 1 !important; transform: none !important; stroke-dashoffset: 0 !important;
+  }
+}

@@ -5,6 +5,7 @@ import { isAcceptedDocument, formatFileSize, ACCEPTED_DOCUMENT_EXTENSIONS } from
 import { createProject, getProject } from '../api/projectApi'
 import { uploadDocument, fetchUrl, getDocuments, getDocumentStatus } from '../api/documentApi'
 import { DOC_TYPE_OPTIONS } from '../utils/docType'
+import { assessCriteriaContent } from '../utils/criteriaAssessment'
 import StepSidebar from '../components/wizard/StepSidebar'
 
 // 가은/Claude(2026-07-16): 백엔드 document.status -> 이 화면의 DocumentRow status로 매핑.
@@ -22,68 +23,11 @@ function toRowStatus(backendStatus) {
   return 'embedding'
 }
 
-// 가은/Claude(2026-07-18): fetch-url 응답의 text_length가 이 값보다 작으면 "본문을 거의
-// 못 찾았다"로 간주해 경고를 띄운다 — 실제 평가기준 공고문은 보통 최소 이 정도 분량은
-// 된다. 백엔드가 indexed_empty(청크 0개)로 판단하기 전에도(짧지만 청크는 생기는 애매한
-// 경우) 프론트에서 한 번 더 걸러준다.
-const _CRITERIA_MIN_TEXT_LENGTH = 300
-
 // 가은/Claude(2026-07-19, INF-007): fetch-url이 색인을 백그라운드로 넘기면서
 // document_status가 "indexing"으로 오면 폴링해야 한다 — 서버 타임아웃
 // (_WEBPAGE_INDEXING_TIMEOUT_SECONDS=120s, documents.py)보다 여유 있게 잡는다.
 const _DOCUMENT_STATUS_POLL_INTERVAL_MS = 2000
 const _DOCUMENT_STATUS_POLL_MAX_ATTEMPTS = 90 // 2s * 90 = 3분
-
-// 가은/Claude(2026-07-18): 백엔드가 이미 만들어주는 warnings(JS 렌더링 의심 등)를
-// 예전엔 완전히 버리고 있었다 — sotong.go.kr URL로 실측: 게시판 상세 링크가 실제 공고
-// 내용이 아닌 페이지(첨부 0개, 본문 몇 글자)를 가리켜도 fetch 자체는 200으로 성공해서
-// 그냥 "✓ 완료"로만 보였다. warnings 또는 본문이 사실상 비어 있으면 경고 배지 +
-// 구체적인 이유를 보여준다.
-// 가은/Claude(2026-07-19): fetch-url이 색인을 백그라운드로 넘기면서(INF-007) 이
-// 판정(본문 품질 평가)과 색인 성공/실패가 서로 다른 시점에 나오게 됐다 — 이 함수는
-// "본문이 쓸 만한가"만 판단하고, 색인 자체의 성공/실패/타임아웃은
-// handleFetchCriteriaUrl()/pollDocumentIndexing()이 별도로 처리한다.
-function assessCriteriaContent(result) {
-  const attachmentCount = result.attachments?.length || 0
-  const textLength = result.page_content?.text_length ?? 0
-  const looksEmpty = attachmentCount === 0 && textLength < _CRITERIA_MIN_TEXT_LENGTH
-  const unsupportedLinks = result.unsupported_attachments || []
-  // 가은/Claude(2026-07-18): url_loader.py의 _UNSUPPORTED_REASON과 같은 문자열 — HWP
-  // 미지원 경고는 unsupported_attachments가 하나라도 있으면 항상 warnings에 끼어 있어서,
-  // 이걸 그대로 "본문이 부실하다"는 신호로 썼더니 서울시 규제혁신 공모전(본문에
-  // 심사기준·배점까지 다 있던 케이스)에서도 "확인 필요"가 잘못 떴다(사용자 실측 지적,
-  // 2026-07-18) — HWP 경고는 따로 떼어서 다룬다.
-  const HWP_UNSUPPORTED_WARNING = 'HWP/HWPX 형식은 현재 미지원이며 다운로드/파싱하지 않습니다.'
-  const contentWarning = (result.warnings || []).find((w) => w !== HWP_UNSUPPORTED_WARNING)
-  // 가은/Claude(2026-07-18): 본문 길이만으로는 "심사기준이 이미 본문에 있는지"를 못
-  // 가른다 — 개인정보보호 공모전(1,112자, 요강 HWP만 언급)과 서울시 규제혁신 공모전
-  // (4,278자, 배점표까지 명시) 둘 다 300자는 훌쩍 넘어서 길이 기준만으론 둘을 구분 못
-  // 함. "배점/심사기준" 같은, 한국 공고문에서 심사기준 절에 거의 항상 쓰이는 표현이
-  // 본문에 있는지로 판단한다.
-  const CRITERIA_KEYWORDS = ['배점', '심사기준', '심사 기준', '평가기준', '평가 기준', '채점']
-  const hasCriteriaSignal = CRITERIA_KEYWORDS.some((k) => (result.page_content?.text || '').includes(k))
-
-  let status = 'done'
-  let meta = attachmentCount > 0 ? `첨부파일 ${attachmentCount}개 수집` : new URL(result.origin_url).hostname
-
-  if (contentWarning) {
-    status = 'warning'
-    meta = contentWarning
-  } else if (unsupportedLinks.length > 0 && !hasCriteriaSignal) {
-    status = 'warning'
-    meta =
-      `이 페이지에 HWP 첨부파일 ${unsupportedLinks.length}개가 있어 자동으로 읽지 못했습니다 — ` +
-      '평가기준이 그 안에만 있을 수 있어요. 아래에서 받아 "파일 업로드" 탭으로 직접 올려주세요.'
-  } else if (looksEmpty) {
-    status = 'warning'
-    meta = '이 페이지에서 공고 내용을 거의 찾지 못했습니다 — 실제 공고 상세 페이지 URL이 맞는지 확인해주세요.'
-  } else if (unsupportedLinks.length > 0) {
-    // 본문에 이미 심사기준이 있어 보이면(hasCriteriaSignal) 경고 대신 선택적 참고자료로만 안내한다.
-    meta += ` · HWP 첨부 ${unsupportedLinks.length}개는 자동으로 못 읽었어요(선택 — 필요하면 아래에서 받아 올리세요)`
-  }
-
-  return { status, meta, unsupportedLinks }
-}
 
 function UploadIcon() {
   return (
