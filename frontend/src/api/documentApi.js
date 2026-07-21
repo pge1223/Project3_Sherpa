@@ -97,3 +97,12 @@ export async function getDocumentPreviewHtml(projectId, documentId) {
   })
   return parseApiResponse(res, '문서 원문(서식)을 불러오지 못했습니다.')
 }
+
+// 가은/Claude(2026-07-21): "수상작·유사사례 경향" 카드 항목을 클릭하면 같은 공모전
+// (contest_title)의 다른 수상작/후보작을 옆 패널로 보여준다 — project_id와 무관한
+// 공개 아카이브 조회라 documents/{project_id}/... 경로 밖의 별도 엔드포인트를 쓴다.
+export async function getContestWorksByTitle(contestTitle) {
+  const url = `${API_BASE_URL}/documents/contest-works?${new URLSearchParams({ contest_title: contestTitle })}`
+  const res = await fetch(url, { headers: { ...authHeaders() } })
+  return parseApiResponse(res, '관련 수상작을 불러오지 못했습니다.')
+}

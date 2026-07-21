@@ -17,6 +17,7 @@ class ProjectModel:
         _id: Optional[ObjectId] = None,
         dynamic_rubric_mapping: Optional[dict] = None,
         announcement_analysis_cache: Optional[dict] = None,
+        flow_mode: Optional[str] = None,
     ):
         self._id = _id
         self.user_email = user_email
@@ -38,6 +39,10 @@ class ProjectModel:
         # dynamic_rubric_mapping과 동일한 패턴(생성 시점엔 None, 나중에
         # documents.py가 project_repo.update_project()로 채운다).
         self.announcement_analysis_cache = announcement_analysis_cache
+        # 가은/Claude(2026-07-21): EntryScreen에서 고른 "작성 전(pre)"/"작성 후(post)"를
+        # 그대로 저장 — resume 시 이 값으로 mode를 복원한다("아이디어 확정"까지 가야만
+        # 알 수 있던 기존 description 마커 방식을 대체).
+        self.flow_mode = flow_mode
 
     def to_dict(self) -> dict:
         return {
@@ -50,4 +55,5 @@ class ProjectModel:
             "updated_at": self.updated_at,
             "dynamic_rubric_mapping": self.dynamic_rubric_mapping,
             "announcement_analysis_cache": self.announcement_analysis_cache,
+            "flow_mode": self.flow_mode,
         }

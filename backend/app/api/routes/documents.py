@@ -50,16 +50,20 @@ import chromadb
 
 from app.common.exceptions import BadRequestException, InternalServerException
 from app.repositories.project_repository import ProjectRepository
+from app.repositories.contest_work_repository import ContestWorkRepository
 from app.config import settings
 from app.models.document import DocumentModel
 from app.repositories.document_repository import DocumentRepository
 from app.schemas.document import (
     AnnouncementAnalysisResponse,
     AnnouncementEvidence,
+    ContestWorkDetail,
+    ContestWorksByTitleResponse,
     DocumentResponse,
     FetchUrlRequest,
     FetchUrlResponse,
     OfficialFacts,
+    SimilarWork,
     StrategicAnalysis,
 )
 
@@ -68,6 +72,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/documents", tags=["documents"])
 document_repo = DocumentRepository()
 project_repo = ProjectRepository()
+contest_work_repo = ContestWorkRepository()
 
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -263,6 +268,81 @@ async def _index_webpage_background(
     await document_repo.update_fields(document_id, {"status": status_value})
 
 
+# 가은/Claude(2026-07-21): 실측 요청 — 파일 업로드(평가 대상 기획서 포함)가 느리다.
+# 원인은 fetch-url(INF-007)과 달리 파일 업로드는 파싱→청킹→임베딩→Chroma 색인을 응답
+# 전에 동기로 다 끝내고 있어서다. 같은 패턴으로 색인을 백그라운드로 넘긴다 — 업로드
+# 응답은 즉시(status="indexing") 돌아가고, 프론트는 기존 status 엔드포인트(DOC-004)를
+# 폴링한다. 타임아웃은 웹페이지보다 여유 있게 둔다(HWP→PDF 변환 + 대용량 파일 고려).
+_FILE_INDEXING_TIMEOUT_SECONDS = 180
+
+
+async def _index_file_background(
+    *,
+    document_id: str,
+    project_id: str,
+    file_path: str,
+    filename: str,
+    document_role: str,
+) -> None:
+    """파일 파싱+색인을 백그라운드로 돌리고 끝나면 documents의 status/parsed_text/
+    conversion_metadata를 patch한다(_index_webpage_background와 동일 패턴). 동기 시절
+    응답에 실어 보내던 HWP/HWPX 변환 실패(user_message)도 여기서 conversion_metadata에
+    저장한다 — 프론트는 status 폴링 응답의 conversion_metadata로 같은 안내를 보여준다."""
+    _index_started = time.time()
+    logger.info("[upload] 색인(백그라운드) 시작 document_id=%s filename=%s", document_id, filename)
+    try:
+        stored_count, parsed_text, conversion_metadata = await asyncio.wait_for(
+            run_in_threadpool(_parse_chunk_and_index, document_id, project_id, file_path, filename, document_role),
+            timeout=_FILE_INDEXING_TIMEOUT_SECONDS,
+        )
+        await document_repo.update_fields(
+            document_id,
+            {
+                "status": "indexed" if stored_count > 0 else "indexed_empty",
+                "parsed_text": parsed_text,
+                "conversion_metadata": conversion_metadata,
+            },
+        )
+        logger.info(
+            "[upload] === 색인(백그라운드) 완료 === document_id=%s elapsed=%.1fs stored_count=%d",
+            document_id,
+            time.time() - _index_started,
+            stored_count,
+        )
+        return
+    except asyncio.TimeoutError:
+        logger.warning(
+            "[upload] 색인(백그라운드) 타임아웃: document_id=%s (%ds 초과) elapsed=%.1fs",
+            document_id,
+            _FILE_INDEXING_TIMEOUT_SECONDS,
+            time.time() - _index_started,
+        )
+        await document_repo.update_fields(document_id, {"status": "indexing_timeout"})
+    except DocumentConversionError as exc:
+        logger.warning("[upload] 문서 변환 실패(백그라운드): document_id=%s error=%s", document_id, exc)
+        await document_repo.update_fields(
+            document_id,
+            {
+                "status": "conversion_failed",
+                "conversion_metadata": {
+                    "original_file_type": os.path.splitext(filename)[1].lstrip(".").lower(),
+                    "processing_file_type": None,
+                    "conversion_status": "failed",
+                    "conversion_error": exc.user_message,
+                    "converter_name": None,
+                    "conversion_duration_ms": None,
+                },
+            },
+        )
+    except Exception:
+        logger.exception(
+            "[upload] 색인(백그라운드) 실패: document_id=%s elapsed=%.1fs",
+            document_id,
+            time.time() - _index_started,
+        )
+        await document_repo.update_fields(document_id, {"status": "indexing_failed"})
+
+
 # 가은/Claude (2026-07-15): 비회원 로그인은 Authorization 헤더 없이 그대로 들어온다 —
 # 헤더가 없으면 401 대신 고정 게스트 사용자로 통과시킨다 (projects.py와 동일 컨벤션).
 GUEST_USER_EMAIL = "guest@local"
@@ -445,44 +525,26 @@ async def upload_document(
         mime_type=file.content_type or "application/octet-stream",
         source_type=source_type,
         document_role=document_role,
+        status="indexing",
     )
 
     result = await document_repo.create(document)
 
-    # RAG-001~003: 파싱 -> 청킹 -> 임베딩 -> Chroma 색인 (실패해도 업로드 자체는 성공으로 유지)
-    try:
-        stored_count, parsed_text, conversion_metadata = await run_in_threadpool(
-            _parse_chunk_and_index, result, project_id, file_path, file.filename, document_role
+    # RAG-001~003: 파싱 -> 청킹 -> 임베딩 -> Chroma 색인.
+    # 가은/Claude(2026-07-21): 색인이 끝날 때까지 응답을 막지 않는다(INF-007과 동일 패턴,
+    # 위 _index_file_background 주석 참고) — status="indexing"으로 즉시 응답하고, 프론트가
+    # GET /{project_id}/{document_id}/status(DOC-004)를 폴링해 완료를 확인한다. HWP/HWPX
+    # 변환 실패(DocumentConversionError.user_message)도 이제 폴링 응답의
+    # conversion_metadata로 전달된다.
+    asyncio.create_task(
+        _index_file_background(
+            document_id=result,
+            project_id=project_id,
+            file_path=file_path,
+            filename=file.filename,
+            document_role=document_role,
         )
-        document.status = "indexed" if stored_count > 0 else "indexed_empty"
-        document.parsed_text = parsed_text
-        document.conversion_metadata = conversion_metadata
-        await document_repo.update_fields(
-            result,
-            {"status": document.status, "parsed_text": parsed_text, "conversion_metadata": conversion_metadata},
-        )
-    # 가은/Claude(2026-07-16): HWP/HWPX 변환 실패는 일반 색인 실패와 구분한다 —
-    # DocumentConversionError.user_message는 서버 경로/명령어 없이 그대로 프론트에
-    # 보여줘도 되는 한국어 메시지라(ai/rag/converters/exceptions.py), conversion_metadata에
-    # 담아 응답에 실어 보낸다(INTEGRATION.md 6번).
-    except DocumentConversionError as exc:
-        logger.warning("문서 변환 실패: document_id=%s error=%s", result, exc)
-        document.status = "conversion_failed"
-        document.conversion_metadata = {
-            "original_file_type": os.path.splitext(file.filename)[1].lstrip(".").lower(),
-            "processing_file_type": None,
-            "conversion_status": "failed",
-            "conversion_error": exc.user_message,
-            "converter_name": None,
-            "conversion_duration_ms": None,
-        }
-        await document_repo.update_fields(
-            result, {"status": document.status, "conversion_metadata": document.conversion_metadata}
-        )
-    except Exception:
-        logger.exception("문서 색인 중 오류가 발생했습니다: document_id=%s", result)
-        document.status = "indexing_failed"
-        await document_repo.update_status(result, document.status)
+    )
 
     return DocumentResponse(
         id=result,
@@ -501,6 +563,33 @@ async def upload_document(
         conversion_metadata=document.conversion_metadata,
         unsupported_attachments=document.unsupported_attachments,
     )
+
+
+# 가은/Claude(2026-07-21): 실측 요청 — "수상작·유사사례 경향" 카드에서 항목을 클릭하면
+# 같은 공모전(contest_title)의 다른 수상작/후보작을 옆 패널에서 더 보여준다. contest_works는
+# 프로젝트 소유권과 무관한 공개 아카이브라 project_id 없이 로그인 여부만 확인한다.
+# 주의: "/{project_id}" GET(DOC-003, 바로 아래)과 둘 다 단일 경로 세그먼트라 FastAPI는
+# 등록 순서로 매칭한다 — 이 라우트가 반드시 그보다 먼저 등록돼야
+# "/documents/contest-works"가 project_id="contest-works"로 잘못 매칭되지 않는다.
+@router.get("/contest-works", response_model=ContestWorksByTitleResponse)
+async def get_contest_works_by_title(
+    contest_title: str,
+    authorization: Optional[str] = Header(None, alias="authorization"),
+):
+    get_current_user(authorization)
+    docs = await contest_work_repo.find_by_contest_title(contest_title)
+    works = [
+        ContestWorkDetail(
+            work_title=str(doc.get("work_title") or "").strip(),
+            award_grade=str(doc.get("award_grade") or "").strip(),
+            selection_status=str(doc.get("selection_status") or ""),
+            images=[img.get("url") for img in (doc.get("images") or []) if img.get("url")],
+            ocr_text=str(doc.get("ocr_text") or ""),
+            source_url=str(doc.get("source_url") or ""),
+        )
+        for doc in docs
+    ]
+    return ContestWorksByTitleResponse(contest_title=contest_title, works=works)
 
 
 # DOC-003: 프로젝트 문서 목록 조회
@@ -580,6 +669,10 @@ async def get_document_status(
         "original_filename": document["original_filename"],
         "status": document["status"],
         "updated_at": document["updated_at"],
+        # 가은/Claude(2026-07-21): 파일 업로드 색인이 백그라운드로 바뀌면서(위 upload_document
+        # 참고) HWP/HWPX 변환 실패 안내(user_message)를 업로드 응답에 실을 수 없게 됐다 —
+        # 폴링하는 프론트가 여기서 읽는다. 순수 추가 필드(기존 폴링 클라이언트는 무시하면 그대로 동작).
+        "conversion_metadata": document.get("conversion_metadata"),
     }
 
 
@@ -706,6 +799,15 @@ async def preview_document_pdf(
 # 같은 패턴을 그대로 따른다.
 _ANNOUNCEMENT_TRUNCATE_CHARS = 8000
 
+# 가은/Claude(2026-07-21): scripts/classify_contest_works.py가 contest_works 문서에
+# 붙인 category와 같은 8개 taxonomy — 이 공고문을 같은 기준으로 분류해야 contest_works를
+# category로 매칭 조회할 수 있다. 두 목록은 반드시 동일하게 유지할 것(한쪽만 바꾸면
+# 매칭이 조용히 0건이 된다).
+_CONTEST_CATEGORIES = [
+    "AI/데이터", "공공서비스", "환경/기후", "교육/연구",
+    "복지/사회", "안전/재난", "창업/경제", "기타",
+]
+
 
 async def _load_criteria_documents_text(project_id: str) -> tuple[str, list[str]]:
     documents = await document_repo.find_by_project_id(project_id)
@@ -733,12 +835,16 @@ official_facts는 원문에 실제로 있는 내용만 담으세요 — 원문�
 strategic_analysis는 원문을 근거로 한 당신의 추론(전략적 분석)입니다 — 사실 단정이
 아니라 판단임을 유지하고, 근거 없는 단정을 피하세요.
 
+category는 아래 8개 중 이 공모전/지원사업과 가장 가까운 것 하나를 정확히 그대로
+고르세요(목록에 없는 값은 쓰지 마세요, 애매하면 "기타"): {', '.join(_CONTEST_CATEGORIES)}
+
 [공고문 원문]
 {truncated}
 
 다음 JSON 형식으로만 응답하세요:
 {{
   "announcement_title": "...",
+  "category": "...",
   "official_facts": {{
     "eligibility": ["..."],
     "deadline": "...",
@@ -763,8 +869,7 @@ evidence는 official_facts/strategic_analysis 중 실제로 중요한 판단 3~6
 
 
 def _call_announcement_analysis_llm(prompt: str) -> str:
-    profile = (settings.LLM_PROFILE or "dev").lower()
-    model = settings.QUALITY_LLM_REVIEWER_MODEL if profile == "quality" else settings.DEV_LLM_REVIEWER_MODEL
+    model = settings.reviewer_model()
     client = OpenAI(api_key=settings.OPENAI_API_KEY, max_retries=1)
     resp = client.chat.completions.create(
         model=model,
@@ -772,6 +877,26 @@ def _call_announcement_analysis_llm(prompt: str) -> str:
         response_format={"type": "json_object"},
     )
     return resp.choices[0].message.content
+
+
+# 가은/Claude(2026-07-21): contest_works는 이 앱이 만드는 데이터가 아니라 kyh님이 별도로
+# 크롤링/분류한 아카이브라 스키마가 느슨하다(work_title 없는 문서는 contest_title로
+# 대체, inst_nm/source_org 둘 다 없을 수 있음) — 그래서 값을 지어내지 않고 빈 문자열로
+# 두는 방어적 변환을 거친다. 컬렉션이 비어있거나 매칭이 0건이면 그냥 빈 리스트를 반환
+# (에러 아님) — has_similar_case_data=False로 이어져 프론트가 기존 "미확보" 문구를 보여준다.
+async def _find_similar_works(category: str) -> list[SimilarWork]:
+    docs = await contest_work_repo.find_by_category(category)
+    return [
+        SimilarWork(
+            title=str(doc.get("work_title") or doc.get("contest_title") or "").strip(),
+            source_org=str(doc.get("source_org") or doc.get("inst_nm") or "").strip(),
+            award_grade=str(doc.get("award_grade") or "").strip(),
+            selection_status=str(doc.get("selection_status") or ""),
+            contest_title=str(doc.get("contest_title") or ""),
+        )
+        for doc in docs
+        if doc.get("work_title") or doc.get("contest_title")
+    ]
 
 
 def _coerce_str_list(value: object) -> list[str]:
@@ -849,13 +974,18 @@ async def get_announcement_analysis(
 
     announcement_title = str(parsed.get("announcement_title") or "").strip() if isinstance(parsed, dict) else ""
 
+    category = parsed.get("category") if isinstance(parsed, dict) else None
+    category = category if category in _CONTEST_CATEGORIES else "기타"
+    similar_works = await _find_similar_works(category)
+
     result = AnnouncementAnalysisResponse(
         has_announcement=True,
         announcement_title=announcement_title,
         official_facts=official_facts,
         strategic_analysis=strategic_analysis,
         evidence=evidence,
-        has_similar_case_data=False,
+        has_similar_case_data=len(similar_works) > 0,
+        similar_works=similar_works,
         source_document_names=names,
     )
     await project_repo.update_project(project_id, {"announcement_analysis_cache": result.model_dump()})
