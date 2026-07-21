@@ -12,6 +12,7 @@ import {
   uploadDocument,
   getDocumentStatus,
   getAnnouncementAnalysis,
+  getContestWorksByTitle,
   deleteDocument,
   getDocuments,
 } from "../../api/documentApi";
@@ -505,8 +506,9 @@ const _CONFIDENCE_LABEL = { high: '확신 높음', medium: '확신 보통', low:
  *    official_facts(공고문에 실제 있는 사실)/strategic_analysis(AI 추론)를 보여준다.
  * 2) 팀 UX 스펙(2026-07-21) 그대로: 첫 화면은 4개 카드(핵심 과제/평가 갈리는 지점/
  *    반드시 지킬 조건/수상작 경향)만, 아래에 접을 수 있는 상세 분석(추천 전략/주의
- *    리스크/출처)을 둔다. 수상작·유사사례 경향은 이 시스템에 그 데이터 소스 자체가
- *    없어서 항상 "자료 미확보" 상태로 고정 표시하고 LLM이 지어내지 않는다.
+ *    리스크/출처)을 둔다. 수상작·유사사례 경향은 kyh님의 소통혁신24 수상작 아카이브
+ *    (contest_works)가 생기기 전까지는 데이터 소스가 없어 "자료 미확보"로 고정
+ *    표시했었다 — 이제 실제 매칭 결과가 있으면 보여주고, 없을 때만 그 문구를 쓴다.
  */
 function AnalysisScreen({ mode, onNext, onBack, projectId }) {
   const [loading, setLoading] = useState(true);
@@ -514,6 +516,8 @@ function AnalysisScreen({ mode, onNext, onBack, projectId }) {
   const [analysis, setAnalysis] = useState(null);
   const [detailOpen, setDetailOpen] = useState(false);
   const [ideaTopic, setIdeaTopic] = useState(null);
+  const [workDetail, setWorkDetail] = useState(null); // { contestTitle, works } | null
+  const [workDetailLoading, setWorkDetailLoading] = useState(false);
 
   useEffect(() => {
     if (!projectId) {
@@ -549,6 +553,23 @@ function AnalysisScreen({ mode, onNext, onBack, projectId }) {
     return () => { cancelled = true; };
   }, [projectId]);
 
+  // 가은/Claude(2026-07-21): 실측 요청 — "수상작·유사사례 경향" 항목을 클릭하면 같은
+  // 공모전의 다른 수상작/후보작을 옆 패널로 보여준다. "볼 게 있을 때만" 열려야 하므로
+  // (자기 자신 하나뿐이고 이미지도 없으면 클릭해도 반응 없음) 먼저 조회하고 나서 연다.
+  async function handleSimilarWorkClick(work) {
+    if (!work.contest_title || workDetailLoading) return;
+    setWorkDetailLoading(true);
+    try {
+      const data = await getContestWorksByTitle(work.contest_title);
+      const hasMore = data.works.length > 1 || data.works.some((w) => w.images.length > 0 || w.ocr_text);
+      if (hasMore) setWorkDetail({ contestTitle: data.contest_title, works: data.works });
+    } catch {
+      // 실측 지침: 데이터가 없거나(조회 실패 포함) 볼 게 없으면 그냥 아무 반응 없이 둔다.
+    } finally {
+      setWorkDetailLoading(false);
+    }
+  }
+
   if (loading) {
     return (
       <div style={{ maxWidth: 820 }}>
@@ -578,13 +599,17 @@ function AnalysisScreen({ mode, onNext, onBack, projectId }) {
         analysis?.has_similar_case_data
           ? {
               icon: TrendingUp, color: "amber", title: "수상작·유사사례 경향",
-              list: similarWorks.map((w) => [w.title, w.source_org, w.award_grade].filter(Boolean).join(" · ")),
+              list: similarWorks.map((w) => ({
+                label: [w.title, w.source_org, w.award_grade].filter(Boolean).join(" · "),
+                onClick: () => handleSimilarWorkClick(w),
+              })),
             }
           : { icon: TrendingUp, color: "amber", title: "수상작·유사사례 경향", body: "수상작 자료 미확보 — 유사 공모전 사례 기반 분석은 아직 지원하지 않아요." },
       ]
     : [];
 
   return (
+    <>
     <div style={{ maxWidth: 820 }}>
       <div className="badge purple mono">{hasAnnouncement ? "공고문 분석 결과" : "공고문 미등록"}</div>
       <BackTitle level={1} onBack={onBack} style={{ margin: "12px 0 24px" }}>
@@ -604,7 +629,15 @@ function AnalysisScreen({ mode, onNext, onBack, projectId }) {
                 {it.list && (
                   it.list.length > 0
                     ? <ul style={{ margin: 0, paddingLeft: 16, fontSize: 12.5, color: "var(--text-2)", lineHeight: 1.7 }}>
-                        {it.list.map((v, j) => <li key={j}>{v}</li>)}
+                        {it.list.map((v, j) => (
+                          <li
+                            key={j}
+                            onClick={v?.onClick}
+                            style={v?.onClick ? { cursor: "pointer", textDecorationLine: "underline", textDecorationStyle: "dotted" } : undefined}
+                          >
+                            {v?.label ?? v}
+                          </li>
+                        ))}
                       </ul>
                     : <div style={{ fontSize: 12.5, color: "var(--text-2)" }}>확인된 내용이 없어요.</div>
                 )}
@@ -693,6 +726,44 @@ function AnalysisScreen({ mode, onNext, onBack, projectId }) {
         {mode === "pre" ? "AI 위원과 주제 확정 시작" : "기획서 업로드하기"} <ArrowRight size={15} />
       </button>
     </div>
+
+    {workDetail && (
+      <div
+        className="glass"
+        style={{
+          position: "fixed", top: 0, right: 0, bottom: 0, width: 340, maxWidth: "90vw",
+          padding: 24, overflowY: "auto", zIndex: 40, borderLeft: "1px solid var(--glass-border)",
+          boxShadow: "-8px 0 24px rgba(28,26,46,0.10)",
+        }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16, gap: 8 }}>
+          <div style={{ fontWeight: 700, fontSize: 14, lineHeight: 1.5 }}>{workDetail.contestTitle}</div>
+          <button
+            onClick={() => setWorkDetail(null)}
+            aria-label="닫기"
+            style={{ background: "none", border: "none", padding: 4, cursor: "pointer", color: "var(--text-2)", flexShrink: 0 }}
+          >
+            <X size={16} />
+          </button>
+        </div>
+        {workDetail.works.map((w, i) => (
+          <div key={i} style={{ padding: "14px 0", borderTop: i > 0 ? "1px solid var(--glass-border)" : "none" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
+              <span className={`badge ${w.selection_status === "winner" ? "green" : "amber"} mono`}>
+                {w.selection_status === "winner" ? "수상" : "후보"}
+              </span>
+              {w.award_grade && <span style={{ fontSize: 11.5, color: "var(--text-2)" }}>{w.award_grade}</span>}
+            </div>
+            <div style={{ fontSize: 13.5, fontWeight: 600, marginBottom: 6 }}>{w.work_title}</div>
+            {w.images.length > 0 && (
+              <img src={w.images[0]} alt={w.work_title} style={{ width: "100%", borderRadius: 8, marginBottom: 6, display: "block" }} />
+            )}
+            {w.ocr_text && <div style={{ fontSize: 12.5, color: "var(--text-1)", lineHeight: 1.6 }}>{w.ocr_text}</div>}
+          </div>
+        ))}
+      </div>
+    )}
+    </>
   );
 }
 

@@ -92,6 +92,26 @@ class SimilarWork(BaseModel):
     source_org: str = ""
     award_grade: str = ""
     selection_status: str = ""  # "winner" | "candidate"
+    # 가은/Claude(2026-07-21): 실측 요청 — 카드에서 이 항목을 클릭하면 같은 공모전
+    # (contest_title)의 다른 수상작/후보작을 옆 패널에서 더 보여준다. 프론트가 그 조회에
+    # 쓸 키를 여기서 같이 내려준다.
+    contest_title: str = ""
+
+
+# 가은/Claude(2026-07-21): SimilarWork 클릭 시 상세 패널 — 같은 contest_title 안에서
+# 어떤 아이디어가 수상하고 어떤 게 후보에 그쳤는지 전부 보여준다. ocr_text는 kyh님이
+# 대표작 일부만 검증 후 확대 예정이라 아직 전부 비어있을 수 있다(그때는 빈 문자열).
+class ContestWorkDetail(BaseModel):
+    work_title: str
+    award_grade: str = ""
+    selection_status: str = ""  # "winner" | "candidate"
+    images: list[str] = []
+    ocr_text: str = ""
+
+
+class ContestWorksByTitleResponse(BaseModel):
+    contest_title: str
+    works: list[ContestWorkDetail] = []
 
 
 class AnnouncementAnalysisResponse(BaseModel):

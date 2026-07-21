@@ -51,6 +51,8 @@ from app.repositories.document_repository import DocumentRepository
 from app.schemas.document import (
     AnnouncementAnalysisResponse,
     AnnouncementEvidence,
+    ContestWorkDetail,
+    ContestWorksByTitleResponse,
     DocumentResponse,
     FetchUrlRequest,
     FetchUrlResponse,
@@ -500,6 +502,32 @@ async def upload_document(
     )
 
 
+# 가은/Claude(2026-07-21): 실측 요청 — "수상작·유사사례 경향" 카드에서 항목을 클릭하면
+# 같은 공모전(contest_title)의 다른 수상작/후보작을 옆 패널에서 더 보여준다. contest_works는
+# 프로젝트 소유권과 무관한 공개 아카이브라 project_id 없이 로그인 여부만 확인한다.
+# 주의: "/{project_id}" GET(DOC-003, 바로 아래)과 둘 다 단일 경로 세그먼트라 FastAPI는
+# 등록 순서로 매칭한다 — 이 라우트가 반드시 그보다 먼저 등록돼야
+# "/documents/contest-works"가 project_id="contest-works"로 잘못 매칭되지 않는다.
+@router.get("/contest-works", response_model=ContestWorksByTitleResponse)
+async def get_contest_works_by_title(
+    contest_title: str,
+    authorization: Optional[str] = Header(None, alias="authorization"),
+):
+    get_current_user(authorization)
+    docs = await contest_work_repo.find_by_contest_title(contest_title)
+    works = [
+        ContestWorkDetail(
+            work_title=str(doc.get("work_title") or "").strip(),
+            award_grade=str(doc.get("award_grade") or "").strip(),
+            selection_status=str(doc.get("selection_status") or ""),
+            images=[img.get("url") for img in (doc.get("images") or []) if img.get("url")],
+            ocr_text=str(doc.get("ocr_text") or ""),
+        )
+        for doc in docs
+    ]
+    return ContestWorksByTitleResponse(contest_title=contest_title, works=works)
+
+
 # DOC-003: 프로젝트 문서 목록 조회
 @router.get("/{project_id}", response_model=list[DocumentResponse])
 async def get_documents(
@@ -704,6 +732,7 @@ async def _find_similar_works(category: str) -> list[SimilarWork]:
             source_org=str(doc.get("source_org") or doc.get("inst_nm") or "").strip(),
             award_grade=str(doc.get("award_grade") or "").strip(),
             selection_status=str(doc.get("selection_status") or ""),
+            contest_title=str(doc.get("contest_title") or ""),
         )
         for doc in docs
         if doc.get("work_title") or doc.get("contest_title")
