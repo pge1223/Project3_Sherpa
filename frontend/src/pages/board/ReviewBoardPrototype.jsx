@@ -63,7 +63,7 @@ const FLOW_BY_MODE = {
 // 가은/Claude(2026-07-21): "작성 전" 흐름에서 확정한 아이디어 프로젝트를 표시하는 마커.
 // 아직 실제 주제 발굴 회의 API가 없어(더미) 확정 주제도 IdeationResultScreen과 동일한
 // 고정 값을 쓴다 — 실제 회의 API가 붙으면 이 상수 대신 회의 결과의 주제명을 저장한다.
-const IDEA_PROJECT_MARKER = "작성 전 주제 발굴 흐름에서 확정한 아이디어 프로젝트입니다.";
+export const IDEA_PROJECT_MARKER = "작성 전 주제 발굴 흐름에서 확정한 아이디어 프로젝트입니다.";
 const IDEA_PROJECT_TOPIC = "예비창업인 재고관리 AI 비서";
 
 const MIN_MENTORS = 2

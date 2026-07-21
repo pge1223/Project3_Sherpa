@@ -1,7 +1,20 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { getProjects, deleteProject } from '../api/projectApi'
+import { getProjects, deleteProject, getLatestMeeting } from '../api/projectApi'
 import StatusBadge from '../components/common/StatusBadge'
+import { IDEA_PROJECT_MARKER } from './board/ReviewBoardPrototype'
+
+// 가은/Claude(2026-07-21): 실측 제보 — "공모전 분석"(작성 전)이나 "기획서 업로드·분석"
+// (작성 후)에서 더 못 넘어가고 이탈한 프로젝트가 "내 프로젝트"에 그대로 쌓였다.
+// ensureProject()가 "분석 시작"만 눌러도(문서 하나 없이도) DB row를 만들기 때문 —
+// status 필드는 늘 "pending" 고정이라 이걸로는 구분이 안 된다(ReviewBoardPrototype.jsx
+// resume 로직과 동일하게 실제 신호로 판단): 작성 전은 아이디어 확정(IDEA_PROJECT_MARKER)
+// 여부, 작성 후는 회의(분석) 완료 여부(getLatestMeeting)로 "의미있게 진행됐는지"를 본다.
+async function hasMeaningfulProgress(project) {
+  const isPreFlow = project.flow_mode === 'pre' || project.description === IDEA_PROJECT_MARKER
+  if (isPreFlow) return project.description === IDEA_PROJECT_MARKER
+  return getLatestMeeting(project.id).then(() => true).catch(() => false)
+}
 
 function FolderIcon() {
   return (
@@ -144,15 +157,20 @@ export default function ProjectListPage() {
   const [deleteError, setDeleteError] = useState('')
 
   useEffect(() => {
+    let cancelled = false
     getProjects()
-      .then((data) => {
-        setProjects(data)
+      .then(async (data) => {
+        const flags = await Promise.all(data.map(hasMeaningfulProgress))
+        if (cancelled) return
+        setProjects(data.filter((_, i) => flags[i]))
         setLoading(false)
       })
       .catch((err) => {
+        if (cancelled) return
         setError(err.message)
         setLoading(false)
       })
+    return () => { cancelled = true }
   }, [])
 
   function handleDelete(projectId) {
