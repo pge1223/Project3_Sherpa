@@ -219,9 +219,18 @@ function BackTitle({ children, onBack, level = 2, style }) {
  * 파일 업로드 탭, 전용 "가져오기" 버튼, 진행 상태·에러 표시, 색인 폴링)을 그대로
  * 옮겨왔다.
  */
-function EntryScreen({ onEnter, loading, error, projectId, ensureProject, documents, setDocuments }) {
+function EntryScreen({ onEnter, onModeSelect, loading, error, projectId, ensureProject, documents, setDocuments }) {
   const navigate = useNavigate();
   const [mode, setMode] = useState(null);
+
+  // 가은/Claude(2026-07-21): 실측 요청 — 여기서 모드 카드를 고른 시점과 "분석 시작"을
+  // 누르는 시점 사이에 공고문을 먼저 등록하면(ensureProject가 여기서 바로 호출됨) 그
+  // 시점엔 아직 부모의 mode가 안 알려져 있어 flow_mode 없이 프로젝트가 생겼다. 카드를
+  // 고르자마자 부모에도 즉시 알려서 ensureProject()가 항상 올바른 flow_mode로 만들게 한다.
+  function selectMode(m) {
+    setMode(m);
+    onModeSelect?.(m);
+  }
   const [criteriaTab, setCriteriaTab] = useState('url');
   const [criteriaUrl, setCriteriaUrl] = useState('');
   const [criteriaLoading, setCriteriaLoading] = useState(false);
@@ -362,7 +371,7 @@ function EntryScreen({ onEnter, loading, error, projectId, ensureProject, docume
         <div
           className="card glass"
           style={{ cursor: "pointer", border: mode === "pre" ? "1px solid var(--purple)" : "1px solid var(--glass-border)" }}
-          onClick={() => setMode("pre")}
+          onClick={() => selectMode("pre")}
         >
           <Sparkles size={20} color="var(--purple)" />
           <div style={{ fontWeight: 700, fontSize: 15, margin: "10px 0 6px" }}>작성 전 → 주제 발굴</div>
@@ -373,7 +382,7 @@ function EntryScreen({ onEnter, loading, error, projectId, ensureProject, docume
         <div
           className="card glass"
           style={{ cursor: "pointer", border: mode === "post" ? "1px solid var(--coral)" : "1px solid var(--glass-border)" }}
-          onClick={() => setMode("post")}
+          onClick={() => selectMode("post")}
         >
           <FileText size={20} color="var(--coral)" />
           <div style={{ fontWeight: 700, fontSize: 15, margin: "10px 0 6px" }}>작성 후 → 문서 피드백</div>
@@ -1159,7 +1168,10 @@ export default function ReviewBoardPrototype() {
   projectIdRef.current = projectId;
   async function ensureProject() {
     if (projectIdRef.current) return projectIdRef.current;
-    const project = await createProject({ title: "새 공모전 프로젝트", doc_type: "competition" });
+    // 가은/Claude(2026-07-21): 실측 요청 — "작성 전/작성 후" 중 뭘 골랐는지가 프로젝트에
+    // 안 남아서, "내 프로젝트"에서 다시 불러오면 어느 흐름이었는지 알 방법이 없었다.
+    // 이 시점엔 EntryScreen의 onModeSelect 콜백 덕분에 mode가 이미 채워져 있다.
+    const project = await createProject({ title: "새 공모전 프로젝트", doc_type: "competition", flow_mode: mode });
     projectIdRef.current = project.id;
     setProjectId(project.id);
     return project.id;
@@ -1180,11 +1192,12 @@ export default function ReviewBoardPrototype() {
       // 만들어버려서, 앞서 등록한 공고문이 붙은 프로젝트가 고아가 됐다. 이미 프로젝트가
       // 있으면 새로 만들지 않고 제목·설명만 아이디어 확정 값으로 갱신한다.
       const project = projectIdRef.current
-        ? await updateProject(projectIdRef.current, { title: IDEA_PROJECT_TOPIC, description: IDEA_PROJECT_MARKER })
+        ? await updateProject(projectIdRef.current, { title: IDEA_PROJECT_TOPIC, description: IDEA_PROJECT_MARKER, flow_mode: "pre" })
         : await createProject({
             title: IDEA_PROJECT_TOPIC,
             doc_type: "competition",
             description: IDEA_PROJECT_MARKER,
+            flow_mode: "pre",
           });
       ideaProjectSavedRef.current = true;
       projectIdRef.current = project.id;
@@ -1199,10 +1212,9 @@ export default function ReviewBoardPrototype() {
 
   async function handleEnter(m) {
     setMode(m);
-    if (m !== "post") {
-      setStage("analysis");
-      return;
-    }
+    // 가은/Claude(2026-07-21): 실측 요청 — 예전엔 "작성 전" 모드는 공고문을 안 넣었으면
+    // 프로젝트를 아예 안 만들고 넘어가서 flow_mode를 저장할 데가 없었다. 이제 두 모드
+    // 모두 여기서 프로젝트를 보장(ensureProject)해서 flow_mode가 항상 남는다.
     setEntryError("");
     setEntryLoading(true);
     try {
@@ -1238,9 +1250,12 @@ export default function ReviewBoardPrototype() {
         if (cancelled) return;
         projectIdRef.current = resumeProjectId;
         setProjectId(resumeProjectId);
-        const isIdeaProject = project.description === IDEA_PROJECT_MARKER;
-        setMode(isIdeaProject ? 'pre' : 'post');
-        if (isIdeaProject) ideaProjectSavedRef.current = true;
+        // 가은/Claude(2026-07-21): flow_mode가 주 판단 기준 — EntryScreen에서 모드를
+        // 고르는 순간 저장된다. description 마커는 flow_mode가 없던 예전 프로젝트를 위한
+        // 하위호환 폴백(아이디어 확정까지 끝난 프로젝트만 잡아낼 수 있었음).
+        const isPreFlow = project.flow_mode === 'pre' || project.description === IDEA_PROJECT_MARKER;
+        setMode(isPreFlow ? 'pre' : 'post');
+        if (project.description === IDEA_PROJECT_MARKER) ideaProjectSavedRef.current = true;
 
         const criteriaDocs = docs.filter((d) => d.document_role === 'criteria');
         const targetDocs = docs.filter((d) => (d.document_role || 'target') === 'target');
@@ -1263,7 +1278,7 @@ export default function ReviewBoardPrototype() {
           })),
         );
 
-        if (isIdeaProject) setStage('analysis');
+        if (isPreFlow) setStage('analysis');
         else if (targetDocs.length > 0) setStage('upload');
         else if (criteriaDocs.length > 0) setStage('analysis');
       })
@@ -1289,6 +1304,7 @@ export default function ReviewBoardPrototype() {
       {stage === "entry" && (
         <EntryScreen
           onEnter={handleEnter}
+          onModeSelect={setMode}
           loading={entryLoading}
           error={entryError}
           projectId={projectId}
