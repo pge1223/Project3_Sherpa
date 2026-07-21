@@ -4,6 +4,7 @@ import {
   ArrowLeft, FolderOpen, LogOut, User,
   GitBranch, GraduationCap, FileText, Star, Users, Loader2, AlertCircle, Save,
 } from 'lucide-react'
+import { getMyProfile, updateMyProfile } from '../api/profileApi'
 
 function decodeTokenEmail() {
   const token = localStorage.getItem('auth_token')
@@ -24,31 +25,23 @@ function decodeTokenEmail() {
 const DEGREE_LABEL = { bachelor: '학사', master: '석사', phd: '박사', other: '기타' }
 const GRADUATION_LABEL = { graduated: '졸업', enrolled: '재학', leave: '휴학', completed: '수료' }
 
-function profileStorageKey(email) {
-  return `mypage_profile_${email || 'anonymous'}`
+// GitHub URL은 계약(UserProfile)에 없는 순수 UI 편의 필드라 백엔드엔 안 보내고
+// 로컬에만 캐싱한다(재방문 시 재입력 방지 — 통계는 저장된 profile.github에서 옴).
+function githubUrlStorageKey(email) {
+  return `mypage_github_url_${email || 'anonymous'}`
 }
 
 function defaultProfile() {
   return {
     education: { is_technical_major: false, degree: 'bachelor', graduation_status: 'graduated' },
     experience: { internship_months: 0, competition_count: 0, award_count: 0 },
-    githubUrl: '', // 계약 밖 UI 편의 필드 — 재입력 방지용. github 통계는 저장 시 별도로 계약 형태(github{})로 채운다.
   }
 }
 
-function loadProfile(email) {
-  try {
-    const raw = localStorage.getItem(profileStorageKey(email))
-    if (!raw) return defaultProfile()
-    const parsed = JSON.parse(raw)
-    return {
-      ...defaultProfile(),
-      ...parsed,
-      education: { ...defaultProfile().education, ...parsed.education },
-      experience: { ...defaultProfile().experience, ...parsed.experience },
-    }
-  } catch {
-    return defaultProfile()
+function mergeProfile(remote) {
+  return {
+    education: { ...defaultProfile().education, ...remote?.education },
+    experience: { ...defaultProfile().experience, ...remote?.experience },
   }
 }
 
@@ -132,16 +125,26 @@ function useDebouncedValue(value, delay = 600) {
 export default function MyPage() {
   const navigate = useNavigate()
   const email = useMemo(() => decodeTokenEmail(), [])
-  const [profile, setProfile] = useState(() => loadProfile(email))
+  const [profile, setProfile] = useState(defaultProfile)
+  const [githubUrl, setGithubUrl] = useState(() => localStorage.getItem(githubUrlStorageKey(email)) || '')
+  const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [saveError, setSaveError] = useState('')
   const [savedAt, setSavedAt] = useState(null)
 
-  const debouncedGithubUrl = useDebouncedValue(profile.githubUrl)
+  useEffect(() => {
+    let cancelled = false
+    getMyProfile()
+      .then((data) => { if (!cancelled) setProfile(mergeProfile(data)) })
+      .catch((err) => { if (!cancelled) setLoadError(err.message) })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
+  }, [])
+
+  const debouncedGithubUrl = useDebouncedValue(githubUrl)
   const githubUsername = useMemo(() => extractGithubUsername(debouncedGithubUrl), [debouncedGithubUrl])
   const github = useGithubStats(githubUsername)
-
-  function updateField(field, value) {
-    setProfile((prev) => ({ ...prev, [field]: value }))
-  }
 
   function updateEducation(field, value) {
     setProfile((prev) => ({ ...prev, education: { ...prev.education, [field]: value } }))
@@ -151,7 +154,7 @@ export default function MyPage() {
     setProfile((prev) => ({ ...prev, experience: { ...prev.experience, [field]: Number(value) || 0 } }))
   }
 
-  function handleSave() {
+  async function handleSave() {
     // 계약: github는 api.github.com 조회로 얻은 값만 담는다(commit 수·백엔드 이력 등 조회 불가 필드 제외).
     const contractProfile = {
       ...profile,
@@ -165,8 +168,18 @@ export default function MyPage() {
           }
         : { connected: false, public_repos: 0, followers: 0, total_stars: 0, primary_languages: [] },
     }
-    localStorage.setItem(profileStorageKey(email), JSON.stringify(contractProfile))
-    setSavedAt(new Date())
+    setSaving(true)
+    setSaveError('')
+    try {
+      const saved = await updateMyProfile(contractProfile)
+      setProfile(mergeProfile(saved))
+      localStorage.setItem(githubUrlStorageKey(email), githubUrl)
+      setSavedAt(new Date())
+    } catch (err) {
+      setSaveError(err.message)
+    } finally {
+      setSaving(false)
+    }
   }
 
   function handleLogout() {
@@ -200,6 +213,8 @@ export default function MyPage() {
         {/* 프로필 입력 폼: 전공여부/학위/졸업, 인턴개월/공모전참여/수상, GitHub URL */}
         <section style={styles.formCard}>
           <h2 style={styles.sectionTitle}>프로필</h2>
+          {loading && <p style={styles.savedHint}>불러오는 중...</p>}
+          {loadError && <p style={{ ...styles.savedHint, color: '#c05339' }}>{loadError} — 기본값으로 시작합니다.</p>}
 
           <div style={styles.fieldGroup}>
             <span style={styles.groupLabel}>학력</span>
@@ -266,17 +281,18 @@ export default function MyPage() {
               <span style={styles.label}>GitHub URL</span>
               <input
                 type="url" style={styles.input} placeholder="https://github.com/username"
-                value={profile.githubUrl}
-                onChange={(e) => updateField('githubUrl', e.target.value)}
+                value={githubUrl}
+                onChange={(e) => setGithubUrl(e.target.value)}
               />
             </label>
           </div>
 
           <div style={styles.saveRow}>
-            <button type="button" style={styles.saveButton} disabled={github.status === 'loading'} onClick={handleSave}>
-              <Save size={15} /> {github.status === 'loading' ? 'GitHub 통계 조회 중...' : '제출 정보 저장'}
+            <button type="button" style={styles.saveButton} disabled={github.status === 'loading' || saving} onClick={handleSave}>
+              <Save size={15} /> {github.status === 'loading' ? 'GitHub 통계 조회 중...' : saving ? '저장 중...' : '제출 정보 저장'}
             </button>
-            {savedAt && <span style={styles.savedHint}>최근 저장 {savedAt.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })}</span>}
+            {savedAt && !saveError && <span style={styles.savedHint}>최근 저장 {savedAt.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })}</span>}
+            {saveError && <span style={{ ...styles.savedHint, color: '#c05339' }}>{saveError}</span>}
           </div>
         </section>
 
@@ -302,7 +318,7 @@ export default function MyPage() {
               <div style={styles.submissionRowBody}>
                 <div style={styles.submissionRowLabel}>GitHub 저장소</div>
                 <div style={styles.submissionRowValue}>
-                  {profile.githubUrl || '등록된 GitHub URL이 없습니다.'}
+                  {githubUrl || '등록된 GitHub URL이 없습니다.'}
                 </div>
                 {githubUsername && (
                   <div style={styles.githubStats}>
