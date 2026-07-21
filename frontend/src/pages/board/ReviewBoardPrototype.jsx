@@ -6,7 +6,7 @@ import {
   ArrowRight, TrendingUp, ChevronDown, ChevronUp, Calendar, FolderOpen, X,
   Menu, User, LogOut, ExternalLink,
 } from "lucide-react";
-import { createProject, getProject, updateProject } from "../../api/projectApi";
+import { createProject, getProject, updateProject, getLatestMeeting } from "../../api/projectApi";
 import {
   fetchUrl as fetchCriteriaUrl,
   uploadDocument,
@@ -1187,15 +1187,17 @@ export default function ReviewBoardPrototype() {
   // 가은/Claude(2026-07-21): ?projectId=가 있으면 기존 프로젝트를 불러와 이어서 한다.
   // 프로젝트 설명이 IDEA_PROJECT_MARKER면 "작성 전" 흐름에서 주제를 확정한 프로젝트로
   // 보고 mode를 pre로 두고 분석 화면부터 보여준다(문서가 없어도 entry에 멈추지 않도록).
-  // 그 외(post)는 문서가 하나라도 있으면 "기획서 업로드·분석" 단계로 보낸다(post 흐름에는
-  // 공모전 분석 단계가 없다). 아무 문서도 없으면 entry에 그대로 둔다.
+  // 그 외(post)는 문서가 하나라도 있으면 일단 "기획서 업로드·분석" 후보인데, 분석이
+  // 이미 끝난 프로젝트(실측 제보 — 회의가 완료됐는데도 매번 업로드 화면이 다시 뜸)라면
+  // getLatestMeeting()으로 확인해 업로드 화면을 건너뛰고 바로 워크벤치(결과)로 보낸다.
+  // 회의가 없으면(404) 기존대로 업로드 화면. 아무 문서도 없으면 entry에 그대로 둔다.
   useEffect(() => {
     if (!resumeProjectId) return;
     let cancelled = false;
     setResuming(true);
     setResumeError('');
     Promise.all([getDocuments(resumeProjectId), getProject(resumeProjectId)])
-      .then(([docs, project]) => {
+      .then(async ([docs, project]) => {
         if (cancelled) return;
         projectIdRef.current = resumeProjectId;
         setProjectId(resumeProjectId);
@@ -1228,9 +1230,16 @@ export default function ReviewBoardPrototype() {
         );
 
         // post 흐름에는 이제 공모전 분석 단계가 없다 — 문서(기획서든 공고문이든)가
-        // 하나라도 있으면 기획서 업로드·분석으로 보낸다. 아무것도 없으면 entry 유지.
-        if (isPreFlow) setStage('analysis');
-        else if (targetDocs.length > 0 || criteriaDocs.length > 0) setStage('upload');
+        // 하나라도 있으면 기획서 업로드·분석 후보, 아무것도 없으면 entry 유지.
+        if (isPreFlow) {
+          setStage('analysis');
+          return;
+        }
+        if (targetDocs.length === 0 && criteriaDocs.length === 0) return;
+
+        const hasCompletedMeeting = await getLatestMeeting(resumeProjectId).then(() => true).catch(() => false);
+        if (cancelled) return;
+        setStage(hasCompletedMeeting ? 'workbench' : 'upload');
       })
       .catch((err) => { if (!cancelled) setResumeError(err.message); })
       .finally(() => { if (!cancelled) setResuming(false); });

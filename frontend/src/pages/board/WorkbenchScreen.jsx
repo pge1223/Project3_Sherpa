@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { AlertCircle, Lightbulb, MessageSquare, Sparkles } from 'lucide-react'
 import { getDocuments, getDocumentPreview } from '../../api/documentApi'
 import { getQuoteMatches } from '../../api/workbenchApi'
+import { getProjectReport } from '../../api/projectApi'
 
 // 재인/Claude(2026-07-21): docs/REVIEW_BOARD_서비스_방향성_정리_20260720.md의
 // "5. 핵심 UI: 시각적 인터랙티브 워크벤치" 1차 구현.
@@ -148,16 +149,25 @@ export default function WorkbenchScreen({ projectId }) {
     return () => { cancelled = true }
   }, [projectId])
 
+  // 가은/Claude(2026-07-21): 실측 제보 — "내 프로젝트"에서 분석이 이미 끝난 프로젝트로
+  // 이어서 들어오면(sessionStorage가 이번 세션엔 없는 새 탭/재접속) 워크벤치가 빈 화면으로
+  // 보였다. sessionStorage 캐시가 없으면 저장된 회의 결과(RPT-001 /report)를 대신 불러온다.
   useEffect(() => {
     if (!projectId) return
     const cached = sessionStorage.getItem(`analysis:${projectId}`)
     if (cached) {
       try {
         setReviewOutput(JSON.parse(cached))
+        return
       } catch (e) {
         console.error('[WorkbenchScreen] 분석 결과 파싱 실패', e)
       }
     }
+    let cancelled = false
+    getProjectReport(projectId)
+      .then((report) => { if (!cancelled) setReviewOutput(report) })
+      .catch((err) => { if (!cancelled) console.error('[WorkbenchScreen] 결과 조회 실패', err) })
+    return () => { cancelled = true }
   }, [projectId])
 
   const feedbackItems = useMemo(() => extractFeedbackItems(reviewOutput), [reviewOutput])
