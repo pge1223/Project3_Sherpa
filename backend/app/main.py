@@ -17,6 +17,8 @@ from app.api.routes.auth import router as auth_router
 from app.api.routes.projects import router as project_router
 from app.api.routes.documents import router as document_router
 from app.api.routes.meetings import router as meeting_router
+from app.api.routes.comparison import router as comparison_router  # 윤한/Claude(2026-07-21): RPT-004 버전 비교 (app/api/routes/comparison.py)
+from app.api.routes.profile import router as profile_router  # 윤한/Claude(2026-07-21): 마이페이지 프로필 CRUD (app/api/routes/profile.py)
 from app.api.routes.media import router as media_router  # 재인/Claude (2026-07-16): 위원 발언 영상 스트리밍 중계 (app/api/routes/media.py)
 from app.api.routes.workbench import router as workbench_router  # 재인/Claude (2026-07-21): "AI 피드백" 워크벤치 인용 매칭 (app/api/routes/workbench.py)
 from app.core.logger import logger
@@ -41,8 +43,10 @@ app.include_router(auth_router)
 app.include_router(project_router)
 app.include_router(document_router)
 app.include_router(meeting_router)
+app.include_router(comparison_router)  # 윤한/Claude(2026-07-21): GET /projects/{project_id}/comparison
 app.include_router(media_router)  # 재인/Claude (2026-07-16): /media/available-speakers, /media/stream
 app.include_router(workbench_router)  # 재인/Claude (2026-07-21): /workbench/{project_id}/quotes
+app.include_router(profile_router)  # 윤한/Claude(2026-07-21): GET·PUT /users/me/profile
 
 # 용준/Claude(2026-07-20): 개발용 아이디어 발전 회의 프리뷰(POST /ideation-preview).
 # ENABLE_IDEATION_PREVIEW가 기본값(False)이면 라우터 자체를 등록하지 않는다 — 비활성화
