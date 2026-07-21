@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import os
 import threading
@@ -10,6 +11,7 @@ from typing import Optional
 from fastapi import APIRouter, File, Form, Header, HTTPException, UploadFile, status
 from starlette.concurrency import run_in_threadpool
 from jose import jwt, JWTError
+from openai import OpenAI
 
 from ai.rag.converters import (
     ConversionStatus,
@@ -45,7 +47,15 @@ from app.repositories.project_repository import ProjectRepository
 from app.config import settings
 from app.models.document import DocumentModel
 from app.repositories.document_repository import DocumentRepository
-from app.schemas.document import DocumentResponse, FetchUrlRequest, FetchUrlResponse
+from app.schemas.document import (
+    AnnouncementAnalysisResponse,
+    AnnouncementEvidence,
+    DocumentResponse,
+    FetchUrlRequest,
+    FetchUrlResponse,
+    OfficialFacts,
+    StrategicAnalysis,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -519,6 +529,31 @@ async def get_documents(
     ]
 
 
+# 가은/Claude(2026-07-21): 실측 요청 — /board에서 URL/파일로 올린 공고문·평가기준
+# 문서를 잘못 올렸을 때 지울 수 있게. PRJ-004(프로젝트 전체 삭제, projects.py)와
+# 같은 순서(Chroma 벡터 청크 -> MongoDB 문서 레코드)를 문서 1건 단위로 좁힌 것 — 벡터
+# 삭제는 ChromaVectorStore.delete_document()를 직접 쓴다(RAGIndexingService는
+# delete_project만 감싸고 있어 서비스 계층에 새 메서드를 추가하는 대신 documents.py
+# 안에서 기존 _get_indexing_service() 싱글턴을 그대로 재사용).
+@router.delete("/{project_id}/{document_id}")
+async def delete_document(
+    project_id: str,
+    document_id: str,
+    authorization: Optional[str] = Header(None, alias="authorization"),
+):
+    user_email = get_current_user(authorization)
+    await verify_project_owner(project_id, user_email)
+
+    document = await document_repo.find_by_id(document_id)
+    if not document or document.get("project_id") != project_id:
+        raise HTTPException(status_code=404, detail="문서를 찾을 수 없습니다")
+
+    indexing_service = _get_indexing_service()
+    await run_in_threadpool(indexing_service.vector_store.delete_document, project_id, document_id)
+    await document_repo.delete_by_id(document_id)
+    return {"message": "문서가 삭제되었습니다"}
+
+
 # DOC-004: 문서 처리 상태 조회
 @router.get("/{project_id}/{document_id}/status")
 async def get_document_status(
@@ -561,3 +596,168 @@ async def preview_document(
         "parsed_text": document.get("parsed_text"),
         "status": document["status"],
     }
+
+
+# 가은/Claude(2026-07-21): "공모전 분석" 화면 실제 데이터 연결 — 실측 제보(사용자,
+# 2026-07-21) "URL 넣고 분석 시작 눌렀는데 예시 카드만 나온다"에 대한 대응이자,
+# 팀 UX 스펙(사실/전략분석/근거를 분리하고 근거 없는 내용은 지어내지 않는다)을 그대로
+# 구현한다. 이미 수집된 criteria 문서(URL/파일, document_role="criteria")의 parsed_text를
+# 그대로 근거로 쓴다 — 새 RAG 파이프라인이나 청크 검색은 쓰지 않고 원문 전체(길면 앞부분)를
+# 한 번에 LLM에 넣는 단순한 1회성 호출이라 mentor-candidates(get_mentor_candidates)와
+# 같은 패턴을 그대로 따른다.
+_ANNOUNCEMENT_TRUNCATE_CHARS = 8000
+
+
+async def _load_criteria_documents_text(project_id: str) -> tuple[str, list[str]]:
+    documents = await document_repo.find_by_project_id(project_id)
+    criteria_docs = [
+        d
+        for d in documents
+        if d.get("document_role", "target") == "criteria" and d.get("parsed_text")
+    ]
+    combined = "\n\n---\n\n".join(d["parsed_text"] for d in criteria_docs)
+    names = [d["original_filename"] for d in criteria_docs]
+    return combined, names
+
+
+def _build_announcement_analysis_prompt(text: str) -> str:
+    truncated = text[:_ANNOUNCEMENT_TRUNCATE_CHARS]
+    return f"""당신은 공모전·지원사업 공고문을 분석하는 보조입니다. 아래 공고문 원문을 읽고
+announcement_title은 이 공고의 정식 명칭(공모전/지원사업 이름)만 뽑으세요 — 페이지
+제목이나 게시판 메뉴명("공지사항", "보도자료" 등)이 아니라 본문에서 실제로 언급되는
+공식 명칭을 쓰세요. 명확한 명칭을 못 찾으면 빈 문자열로 두세요(지어내지 마세요).
+
+official_facts는 원문에 실제로 있는 내용만 담으세요 — 원문에 없는 정보는 절대
+지어내지 말고, 못 찾은 항목은 빈 배열이나 "미공개"로 남기세요. 특히 evaluation_criteria에
+배점이 원문에 없으면 반드시 ["배점 미공개"] 하나만 담으세요.
+
+strategic_analysis는 원문을 근거로 한 당신의 추론(전략적 분석)입니다 — 사실 단정이
+아니라 판단임을 유지하고, 근거 없는 단정을 피하세요.
+
+[공고문 원문]
+{truncated}
+
+다음 JSON 형식으로만 응답하세요:
+{{
+  "announcement_title": "...",
+  "official_facts": {{
+    "eligibility": ["..."],
+    "deadline": "...",
+    "submission_requirements": ["..."],
+    "evaluation_criteria": ["..."],
+    "disqualification_rules": ["..."]
+  }},
+  "strategic_analysis": {{
+    "core_intent": "...",
+    "winning_points": ["..."],
+    "recommended_direction": ["..."],
+    "risk_flags": ["..."]
+  }},
+  "evidence": [
+    {{"claim": "...", "source_type": "announcement 또는 inference", "location": "원문 내 위치 또는 null", "confidence": "high, medium, low 중 하나"}}
+  ]
+}}
+
+evidence는 official_facts/strategic_analysis 중 실제로 중요한 판단 3~6개를 골라 근거를
+표시하세요. source_type="announcement"인 항목은 location에 어느 부분에서 확인했는지
+짧게 적고(예: "제출 요건 문단"), source_type="inference"인 항목은 location을 null로 두세요."""
+
+
+def _call_announcement_analysis_llm(prompt: str) -> str:
+    profile = (settings.LLM_PROFILE or "dev").lower()
+    model = settings.QUALITY_LLM_REVIEWER_MODEL if profile == "quality" else settings.DEV_LLM_REVIEWER_MODEL
+    client = OpenAI(api_key=settings.OPENAI_API_KEY, max_retries=1)
+    resp = client.chat.completions.create(
+        model=model,
+        messages=[{"role": "user", "content": prompt}],
+        response_format={"type": "json_object"},
+    )
+    return resp.choices[0].message.content
+
+
+def _coerce_str_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(v) for v in value if isinstance(v, (str, int, float)) and str(v).strip()]
+
+
+@router.post("/{project_id}/announcement-analysis", response_model=AnnouncementAnalysisResponse)
+async def get_announcement_analysis(
+    project_id: str,
+    authorization: Optional[str] = Header(None, alias="authorization"),
+):
+    user_email = get_current_user(authorization)
+    project = await verify_project_owner(project_id, user_email)
+
+    # 가은/Claude(2026-07-21): dynamic_rubric_mapping과 동일한 "프로젝트당 1회 계산 후
+    # 캐시" 패턴 — 재방문마다 다시 LLM을 부르지 않는다. 공고문을 나중에 추가/교체해도
+    # 자동으로는 무효화하지 않는다(캐시 기준: "이 프로젝트에서 한 번이라도 분석한 적
+    # 있는가") — 재분석이 필요하면 지금은 프로젝트를 새로 만들어야 한다.
+    cached = project.get("announcement_analysis_cache")
+    if cached:
+        logger.info("[announcement-analysis] project_id=%s 캐시된 분석 결과 재사용", project_id)
+        return AnnouncementAnalysisResponse(**cached)
+
+    text, names = await _load_criteria_documents_text(project_id)
+    if not text.strip():
+        # 가은/Claude(2026-07-21): 공고문을 하나도 안 넣었으면 LLM을 호출하지 않는다 —
+        # "정보 없음"을 지어내는 것보다 화면에서 그 상태 자체를 명시적으로 보여준다.
+        # has_announcement: false는 "아직 없음"이라 캐시하지 않는다 — 공고문을 나중에
+        # 추가하면 그때는 실제로 분석해야 하기 때문.
+        return AnnouncementAnalysisResponse(has_announcement=False)
+
+    prompt = _build_announcement_analysis_prompt(text)
+    raw = await run_in_threadpool(_call_announcement_analysis_llm, prompt)
+
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        parsed = {}
+
+    facts_raw = parsed.get("official_facts") if isinstance(parsed, dict) else None
+    facts_raw = facts_raw if isinstance(facts_raw, dict) else {}
+    official_facts = OfficialFacts(
+        eligibility=_coerce_str_list(facts_raw.get("eligibility")),
+        deadline=str(facts_raw.get("deadline") or "미공개"),
+        submission_requirements=_coerce_str_list(facts_raw.get("submission_requirements")),
+        evaluation_criteria=_coerce_str_list(facts_raw.get("evaluation_criteria")) or ["배점 미공개"],
+        disqualification_rules=_coerce_str_list(facts_raw.get("disqualification_rules")),
+    )
+
+    strategy_raw = parsed.get("strategic_analysis") if isinstance(parsed, dict) else None
+    strategy_raw = strategy_raw if isinstance(strategy_raw, dict) else {}
+    strategic_analysis = StrategicAnalysis(
+        core_intent=str(strategy_raw.get("core_intent") or ""),
+        winning_points=_coerce_str_list(strategy_raw.get("winning_points")),
+        recommended_direction=_coerce_str_list(strategy_raw.get("recommended_direction")),
+        risk_flags=_coerce_str_list(strategy_raw.get("risk_flags")),
+    )
+
+    evidence: list[AnnouncementEvidence] = []
+    for item in (parsed.get("evidence") if isinstance(parsed, dict) else None) or []:
+        if not isinstance(item, dict) or not item.get("claim"):
+            continue
+        source_type = item.get("source_type") if item.get("source_type") in ("announcement", "inference") else "inference"
+        confidence = item.get("confidence") if item.get("confidence") in ("high", "medium", "low") else "medium"
+        evidence.append(
+            AnnouncementEvidence(
+                claim=str(item["claim"]),
+                source_type=source_type,
+                location=str(item["location"]) if item.get("location") else None,
+                confidence=confidence,
+            )
+        )
+
+    announcement_title = str(parsed.get("announcement_title") or "").strip() if isinstance(parsed, dict) else ""
+
+    result = AnnouncementAnalysisResponse(
+        has_announcement=True,
+        announcement_title=announcement_title,
+        official_facts=official_facts,
+        strategic_analysis=strategic_analysis,
+        evidence=evidence,
+        has_similar_case_data=False,
+        source_document_names=names,
+    )
+    await project_repo.update_project(project_id, {"announcement_analysis_cache": result.model_dump()})
+    return result
