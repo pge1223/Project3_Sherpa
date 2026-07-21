@@ -266,6 +266,234 @@ def build_ideation_synthesis_prompt(
     return template
 
 
+# ============================================================================
+# 용준/Claude(2026-07-20): 대화형(ideation-conversation) 개발용 프리뷰 프롬프트 빌더.
+# 배치형(위 build_ideation_turn_prompt 등)과 별개 함수만 추가한다 — 기존 함수는 무수정.
+# 최종 종합(finalize)은 새 템플릿을 만들지 않고 build_ideation_synthesis_prompt()를
+# 그대로 재사용한다(all_turns 자리에 conversation messages를 그대로 전달해도 문제없다 —
+# 그 프롬프트는 all_turns를 JSON 데이터로만 다루고 필드 이름을 강제하지 않는다).
+# ============================================================================
+
+IDEATION_CONV_QUESTION_TEMPLATE = "ideation_conv_question.txt"
+IDEATION_CONV_DISCUSSION_TEMPLATE = "ideation_conv_discussion.txt"
+IDEATION_CONV_SYNTHESIS_TEMPLATE = "ideation_conv_synthesis.txt"
+IDEATION_CONV_SUFFICIENCY_TEMPLATE = "ideation_conv_sufficiency.txt"
+
+# 용준/Claude(2026-07-21): discovery(아이디어 발굴) 모드 전용 템플릿 3종. refinement 전용
+# 템플릿(위 IDEATION_CONV_QUESTION_TEMPLATE 등)은 하나도 건드리지 않는다.
+IDEATION_CONV_CANDIDATE_PLANNING_TEMPLATE = "ideation_conv_candidate_planning.txt"
+IDEATION_CONV_CANDIDATE_FEASIBILITY_TEMPLATE = "ideation_conv_candidate_feasibility.txt"
+IDEATION_CONV_CANDIDATE_SELECTION_TEMPLATE = "ideation_conv_candidate_selection.txt"
+
+
+def build_ideation_conv_question_prompt(
+    persona_id: str,
+    notice_and_criteria: Any,
+    user_idea: Any,
+    retrieved_evidence: Any,
+    conversation_context: Any,
+    resolved_topics: Any = None,
+    remaining_topics: Any = None,
+    roadmap_allowed: bool = False,
+    selection_context: Any = None,
+    require_combine_structure: bool = False,
+) -> str:
+    """기획/개발 전문가의 "질문 턴" 실행 프롬프트를 조립한다(핵심 질문 1개 + 보조 질문 최대 2개).
+
+    resolved_topics/remaining_topics/roadmap_allowed(요청: 질문 주제 구조화)는
+    ideation_conv_state.py::remaining_topics_for()가 계산한 값을 그대로 받는다 —
+    remaining_topics는 이미 우선순위 순으로 정렬돼 있고, roadmap 선행 주제가 충족되지
+    않았으면 roadmap 자체가 빠져 있다(질문 노드가 애초에 roadmap을 후보로 볼 수 없게
+    막는 1차 방어선). 값을 넘기지 않으면(호출부 하위 호환) 빈 목록으로 표시된다.
+
+    selection_context/require_combine_structure(용준/Claude(2026-07-21, 후보 결합
+    컨텍스트 보존, 요청 6·9번)는 discovery 모드에서 후보를 선택/결합/추천한 세션에서만
+    값이 채워진다 — ideation_conv_nodes.py::_selection_context_for/
+    _is_first_question_after_combine가 계산한다. selection_context는 값이 없으면 빈
+    dict({})로 넘겨 "선택 컨텍스트 없음"을 표현한다."""
+    card = get_persona_card(persona_id)
+    template = _read_text(IDEATION_CONV_QUESTION_TEMPLATE)
+    replacements = {
+        "<<PERSONA_BLOCK>>": render_persona_block(card),
+        "<<NOTICE_AND_CRITERIA_JSON>>": _as_text(notice_and_criteria),
+        "<<USER_IDEA_JSON>>": _as_text(user_idea),
+        "<<RETRIEVED_EVIDENCE_JSON>>": _as_text(retrieved_evidence),
+        "<<CONVERSATION_CONTEXT_JSON>>": _as_text(conversation_context),
+        "<<RESOLVED_TOPICS_JSON>>": _as_text(resolved_topics if resolved_topics is not None else []),
+        "<<REMAINING_TOPICS_JSON>>": _as_text(remaining_topics if remaining_topics is not None else []),
+        "<<ROADMAP_ALLOWED>>": "true" if roadmap_allowed else "false",
+        "<<SELECTION_CONTEXT_JSON>>": _as_text(selection_context if selection_context is not None else {}),
+        "<<REQUIRE_COMBINE_STRUCTURE>>": "true" if require_combine_structure else "false",
+    }
+    for token, value in replacements.items():
+        template = template.replace(token, value)
+    return template
+
+
+def build_ideation_conv_discussion_prompt(
+    persona_id: str,
+    notice_and_criteria: Any,
+    user_idea: Any,
+    retrieved_evidence: Any,
+    conversation_context: Any,
+    speaks_second: bool,
+) -> str:
+    """기획/개발 전문가의 "보완 의견 턴" 실행 프롬프트를 조립한다. speaks_second=True인
+    쪽(라운드의 두 번째 발언자)만 다음 행동(continue_round/await_user_decision)을
+    판단한다 — "finalize"는 이 스키마에 아예 존재하지 않아, 전문가가 회의를 임의로
+    확정할 수 없다(요청 9~10항)."""
+    card = get_persona_card(persona_id)
+    template = _read_text(IDEATION_CONV_DISCUSSION_TEMPLATE)
+    replacements = {
+        "<<PERSONA_BLOCK>>": render_persona_block(card),
+        "<<NOTICE_AND_CRITERIA_JSON>>": _as_text(notice_and_criteria),
+        "<<USER_IDEA_JSON>>": _as_text(user_idea),
+        "<<RETRIEVED_EVIDENCE_JSON>>": _as_text(retrieved_evidence),
+        "<<CONVERSATION_CONTEXT_JSON>>": _as_text(conversation_context),
+        "<<SPEAKS_SECOND>>": "true" if speaks_second else "false",
+    }
+    for token, value in replacements.items():
+        template = template.replace(token, value)
+    return template
+
+
+def build_ideation_conv_sufficiency_prompt(
+    persona_id: str,
+    pending_question: str,
+    user_answer: str,
+    retry_count: int,
+    conversation_context: Any,
+    expected_answer_type: str | None = None,
+    user_idea: Any = None,
+    idea_candidates: Any = None,
+) -> str:
+    """사용자 메시지가 답변(answer)/설명 요청(clarification_request)/불충분한 답변
+    (insufficient_answer) 중 무엇인지 판정하는 프롬프트를 조립한다(요청 3번 재질문 조건 +
+    5번 무한 반복 방지 + 용어 설명 요청을 불충분한 답변으로 오판하지 않기).
+    질문/의견 턴과 별개의 짧은 LLM 호출 1회로, 회의 내용은 만들지 않고 판정만 한다.
+
+    expected_answer_type(질문 노드가 만든 이번 질문의 기대 답변 유형 — 예: "preference",
+    "selection")을 넘기면, 이 판정이 "답변 충분성"(방금 질문에 답했는가)과 "아이디어
+    완성도"(전체적으로 충분히 구체적인가)를 혼동하지 않도록 프롬프트가 요구 수준을
+    맞춘다. None이면(질문 노드가 값을 만들지 못했거나 구버전 응답) 템플릿이 "미상"으로
+    표시하고 기존의 일반 기준으로만 판정한다.
+
+    user_idea/idea_candidates는 clarification_request일 때 "현재 후보와 대화 맥락에 맞는"
+    선택지를 만드는 근거 자료로만 쓰인다(답을 대신 결정하는 근거가 아니다)."""
+    card = get_persona_card(persona_id)
+    template = _read_text(IDEATION_CONV_SUFFICIENCY_TEMPLATE)
+    replacements = {
+        "<<PERSONA_BLOCK>>": render_persona_block(card),
+        "<<PENDING_QUESTION>>": _as_text(pending_question),
+        "<<USER_ANSWER>>": _as_text(user_answer),
+        "<<RETRY_COUNT>>": str(retry_count),
+        "<<CONVERSATION_CONTEXT_JSON>>": _as_text(conversation_context),
+        "<<EXPECTED_ANSWER_TYPE>>": expected_answer_type or "미상(알 수 없음)",
+        "<<USER_IDEA_JSON>>": _as_text(user_idea if user_idea is not None else {}),
+        "<<IDEA_CANDIDATES_JSON>>": _as_text(idea_candidates if idea_candidates is not None else []),
+    }
+    for token, value in replacements.items():
+        template = template.replace(token, value)
+    return template
+
+
+def build_ideation_conv_synthesis_prompt(
+    notice_and_criteria: Any,
+    user_idea: Any,
+    all_messages: Any,
+    consensus_so_far: Any,
+    unresolved_issues: Any,
+    discovery_history: Any | None = None,
+) -> str:
+    """사용자가 "주제 확정하고 초안 받기"를 눌렀을 때만 호출되는 최종 종합 프롬프트.
+    배치형 build_ideation_synthesis_prompt와 출력 스키마는 동일(idea_proposal)하지만,
+    입력 섹션 이름을 all_turns가 아니라 all_messages(대화 메시지 스키마)로 명확히 한다.
+
+    discovery_history는 discovery(아이디어 발굴) 모드에서 finalize할 때만 채워 넘긴다
+    (요청 8번 — 최초 생성 후보/선택된 후보/선택 이유를 최종 결과에 포함). refinement
+    세션은 이 인자를 넘기지 않으므로(기본값 None) 기존 호출부는 전혀 바뀌지 않는다."""
+    card = get_persona_card("ideation_facilitator")
+    template = _read_text(IDEATION_CONV_SYNTHESIS_TEMPLATE)
+    replacements = {
+        "<<FACILITATOR_BLOCK>>": render_persona_block(card),
+        "<<NOTICE_AND_CRITERIA_JSON>>": _as_text(notice_and_criteria),
+        "<<USER_IDEA_JSON>>": _as_text(user_idea),
+        "<<ALL_MESSAGES_JSON>>": _as_text(all_messages),
+        "<<CONSENSUS_SO_FAR_JSON>>": _as_text(consensus_so_far if consensus_so_far is not None else []),
+        "<<UNRESOLVED_ISSUES_JSON>>": _as_text(unresolved_issues if unresolved_issues is not None else []),
+        "<<DISCOVERY_HISTORY_JSON>>": _as_text(discovery_history),
+    }
+    for token, value in replacements.items():
+        template = template.replace(token, value)
+    return template
+
+
+# ============================================================================
+# 용준/Claude(2026-07-21): discovery(아이디어 발굴) 모드 프롬프트 빌더 3종.
+# refinement 전용 빌더(build_ideation_conv_question_prompt 등)는 무수정.
+# ============================================================================
+
+
+def build_ideation_conv_candidate_planning_prompt(
+    notice_and_criteria: Any,
+    retrieved_evidence: Any,
+    previous_candidates: Any | None = None,
+    regeneration_reason: str | None = None,
+) -> str:
+    """기획 전문가의 "후보 생성" 프롬프트를 조립한다(공모전 분석 + 서로 다른 후보 2~3개)."""
+    card = get_persona_card("planning_expert")
+    template = _read_text(IDEATION_CONV_CANDIDATE_PLANNING_TEMPLATE)
+    replacements = {
+        "<<PERSONA_BLOCK>>": render_persona_block(card),
+        "<<NOTICE_AND_CRITERIA_JSON>>": _as_text(notice_and_criteria),
+        "<<RETRIEVED_EVIDENCE_JSON>>": _as_text(retrieved_evidence),
+        "<<PREVIOUS_CANDIDATES_JSON>>": _as_text(previous_candidates if previous_candidates is not None else []),
+        "<<REGENERATION_REASON>>": _as_text(regeneration_reason),
+    }
+    for token, value in replacements.items():
+        template = template.replace(token, value)
+    return template
+
+
+def build_ideation_conv_candidate_feasibility_prompt(
+    notice_and_criteria: Any,
+    candidates: Any,
+    retrieved_evidence: Any,
+) -> str:
+    """개발 전문가의 "후보별 실현 가능성 검토" 프롬프트를 조립한다."""
+    card = get_persona_card("dev_expert")
+    template = _read_text(IDEATION_CONV_CANDIDATE_FEASIBILITY_TEMPLATE)
+    replacements = {
+        "<<PERSONA_BLOCK>>": render_persona_block(card),
+        "<<NOTICE_AND_CRITERIA_JSON>>": _as_text(notice_and_criteria),
+        "<<CANDIDATES_JSON>>": _as_text(candidates),
+        "<<RETRIEVED_EVIDENCE_JSON>>": _as_text(retrieved_evidence),
+    }
+    for token, value in replacements.items():
+        template = template.replace(token, value)
+    return template
+
+
+def build_ideation_conv_candidate_selection_prompt(
+    notice_and_criteria: Any,
+    candidates: Any,
+    user_message: str,
+) -> str:
+    """번호/제목 단순 선택이 아닌 결합·전문가 추천·모호한 답변을 해석하는 프롬프트를 조립한다.
+    단순 선택은 코드가 결정적으로 처리하므로 이 프롬프트를 부르지 않는다(ideation_conv_discovery.py 참고)."""
+    card = get_persona_card("ideation_facilitator")
+    template = _read_text(IDEATION_CONV_CANDIDATE_SELECTION_TEMPLATE)
+    replacements = {
+        "<<FACILITATOR_BLOCK>>": render_persona_block(card),
+        "<<NOTICE_AND_CRITERIA_JSON>>": _as_text(notice_and_criteria),
+        "<<CANDIDATES_JSON>>": _as_text(candidates),
+        "<<USER_MESSAGE>>": _as_text(user_message),
+    }
+    for token, value in replacements.items():
+        template = template.replace(token, value)
+    return template
+
+
 if __name__ == "__main__":
     # 스모크 테스트: 실제 LLM 호출 없이 프롬프트 조립만 확인한다.
     demo_rubric = {

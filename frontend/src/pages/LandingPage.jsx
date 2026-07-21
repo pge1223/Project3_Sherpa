@@ -24,9 +24,16 @@ export default function LandingPage() {
           ))}
         </p>
 
-        {/* 가은/Claude(2026-07-20): 서비스 방향 전환 — "시작하기"는 이제 신규
-            작성 전/작성 후 2-모드 프로토타입(/board)으로 바로 들어간다. */}
-        <button className="landing-cta" onClick={() => navigate('/board')}>
+        {/* 가은/Claude(2026-07-21): "내 프로젝트"가 실제로 사용자별로 구분되려면
+            로그인을 거쳐야 한다 — /board로 바로 보내면 인증 헤더가 없어 백엔드가
+            전부 guest@local 하나로 묶어버린다(get_current_user() 게스트 폴백).
+            다만 "한 번 로그인하면 그다음부턴 자동 로그인"을 원해서, 이미
+            localStorage에 토큰이 있으면(그 컴퓨터에서 로그인한 적 있으면) 로그인
+            화면을 또 거치지 않고 바로 board로 보낸다. */}
+        <button
+          className="landing-cta"
+          onClick={() => navigate(localStorage.getItem('auth_token') ? '/board' : '/login')}
+        >
           시작하기
         </button>
       </div>

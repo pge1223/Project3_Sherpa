@@ -1,4 +1,3 @@
-from datetime import datetime
 from typing import Optional
 from app.db.mongodb import get_db
 from app.models.user import UserModel

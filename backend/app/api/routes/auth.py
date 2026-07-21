@@ -51,5 +51,9 @@ async def login(request: UserLoginRequest):
     if not checkpw(request.password.encode("utf-8"), user["password"].encode("utf-8")):
         raise HTTPException(status_code=401, detail="이메일 또는 비밀번호가 틀렸습니다")
 
+    # 가은/Claude(2026-07-21): 로그인 기록 저장은 요청으로 붙였다가("로그인마다 기록은
+    # 필요없고, 자동로그인 되게 해줘") 필요 없다고 확인돼 다시 뺐다 — JWT_EXPIRE_MINUTES
+    # 동안 프론트가 localStorage의 토큰으로 재로그인 없이 계속 쓰는 쪽으로 방향을 잡았다
+    # (LandingPage.jsx/LoginPage.jsx의 자동 로그인 처리 참고).
     token = create_access_token({"sub": user["email"]})
     return TokenResponse(access_token=token)

@@ -4,8 +4,9 @@ import {
   Link2, Upload, FileText, Sparkles,
   CheckCircle2, Circle, AlertCircle, Send, Award, Target, ShieldCheck,
   ArrowRight, TrendingUp, ChevronDown, ChevronUp, Calendar, FolderOpen, X,
+  Menu, User, LogOut,
 } from "lucide-react";
-import { createProject } from "../../api/projectApi";
+import { createProject, getProject, updateProject } from "../../api/projectApi";
 import {
   fetchUrl as fetchCriteriaUrl,
   uploadDocument,
@@ -17,6 +18,7 @@ import {
 import { analyzeProject, getAnalyzeProgress, getMentorCandidates } from "../../api/projectApi";
 import { isAcceptedDocument, formatFileSize, ACCEPTED_DOCUMENT_EXTENSIONS } from "../../utils/file";
 import { assessCriteriaContent } from "../../utils/criteriaAssessment";
+import WorkbenchScreen from "./WorkbenchScreen";
 
 // 가은/Claude(2026-07-20, INF-007): fetch-url이 색인을 백그라운드로 넘기면서
 // document_status가 "indexing"으로 오면 폴링해야 한다 — DocumentUploadPage.jsx와 동일 값.
@@ -40,12 +42,23 @@ const STAGE_LABELS = {
   ideation: "주제 아이디어 회의",
   ideation_result: "주제 확정",
   upload: "기획서 업로드 · 분석",
+  // 재인/Claude(2026-07-21): docs/REVIEW_BOARD_서비스_방향성_정리_20260720.md의
+  // "5. 핵심 UI: 시각적 인터랙티브 워크벤치" 구현 — 실제 화면은
+  // WorkbenchScreen.jsx(신규 파일)에 분리해서, 이 파일(가은님 소유)의 변경은
+  // 이 라벨/흐름 추가 정도로 최소화했다.
+  workbench: "AI 피드백",
 };
 
 const FLOW_BY_MODE = {
   pre: ["entry", "analysis", "ideation", "ideation_result"],
-  post: ["entry", "analysis", "upload"],
+  post: ["entry", "analysis", "upload", "workbench"],
 };
+
+// 가은/Claude(2026-07-21): "작성 전" 흐름에서 확정한 아이디어 프로젝트를 표시하는 마커.
+// 아직 실제 주제 발굴 회의 API가 없어(더미) 확정 주제도 IdeationResultScreen과 동일한
+// 고정 값을 쓴다 — 실제 회의 API가 붙으면 이 상수 대신 회의 결과의 주제명을 저장한다.
+const IDEA_PROJECT_MARKER = "작성 전 주제 발굴 흐름에서 확정한 아이디어 프로젝트입니다.";
+const IDEA_PROJECT_TOPIC = "예비창업인 재고관리 AI 비서";
 
 const MIN_MENTORS = 2
 const MAX_MENTORS = 4
@@ -64,6 +77,13 @@ function _resumedDocStatus(backendStatus) {
 function Shell({ children, active, mode, onNavigate, showNav }) {
   const flow = mode ? FLOW_BY_MODE[mode] : ["entry"];
   const navigate = useNavigate();
+  const [menuOpen, setMenuOpen] = useState(false);
+
+  function handleLogout() {
+    localStorage.removeItem('auth_token');
+    setMenuOpen(false);
+    navigate('/login');
+  }
 
   return (
     <div className="rb-root">
@@ -110,9 +130,19 @@ function Shell({ children, active, mode, onNavigate, showNav }) {
         .rb-root .card{ border-radius:16px; padding:20px; }
         .rb-root .progress-track{ height:8px; border-radius:999px; background:var(--bg-2); overflow:hidden; }
         .rb-root .progress-fill{ height:100%; border-radius:999px; background:linear-gradient(135deg, var(--purple), #8b6ef0); transition:width .5s ease; }
-        .rb-root .rb-my-projects{ position:absolute; top:20px; right:24px; z-index:10; display:flex; align-items:center; gap:6px; }
+        .rb-root .rb-top-menu{ position:absolute; top:20px; right:24px; z-index:10; }
+        .rb-root .rb-icon-btn{ width:40px; height:40px; display:inline-flex; align-items:center; justify-content:center; padding:0; border:none; background:transparent; color:var(--text-1); border-radius:10px; cursor:pointer; }
+        .rb-root .rb-icon-btn:hover{ background:var(--bg-2); color:var(--text-0); }
+        .rb-root .rb-menu-panel{ position:absolute; top:48px; right:0; width:168px; border-radius:12px; padding:6px; }
+        .rb-root .rb-menu-item{ width:100%; display:flex; align-items:center; gap:8px; padding:10px 11px; border:none; border-radius:9px; background:transparent; color:var(--text-1); font-size:13px; cursor:pointer; text-align:left; }
+        .rb-root .rb-menu-item:hover{ background:var(--bg-2); color:var(--text-0); }
+        .rb-root .rb-entry-actions{ display:flex; justify-content:flex-end; margin-bottom:10px; }
+        .rb-root .rb-inline-projects{ display:inline-flex; align-items:center; gap:6px; padding:8px 12px; font-size:14px; font-family:inherit; font-weight:400; letter-spacing:0; }
+        .rb-root .rb-back-title{ display:flex; align-items:center; gap:8px; }
+        .rb-root .rb-back-button{ width:26px; height:26px; display:inline-flex; align-items:center; justify-content:center; border:none; background:transparent; color:var(--text-1); border-radius:8px; cursor:pointer; font-size:22px; line-height:1; padding:0; flex-shrink:0; }
+        .rb-root .rb-back-button:hover{ background:var(--bg-2); color:var(--text-0); }
         @media (max-width: 780px){
-          .rb-root .rb-my-projects{ top:10px; right:12px; padding:8px 12px; font-size:12px; }
+          .rb-root .rb-top-menu{ top:10px; right:12px; }
           .rb-root{ flex-direction:column; }
           .rb-root .navrail{ display:none; }
           .rb-root .main{ padding:20px; }
@@ -122,9 +152,27 @@ function Shell({ children, active, mode, onNavigate, showNav }) {
 
       {/* 가은/Claude(2026-07-21): 기존 /projects 페이지(레거시 스타일 그대로 유지)로
           돌아갈 수 있는 진입점 — 버튼 자체만 board 톤(glass/badge 스타일)으로 맞춘다. */}
-      <button className="rb-my-projects btn-ghost mono" onClick={() => navigate('/projects')}>
-        <FolderOpen size={14} /> 내 프로젝트
-      </button>
+      <div className="rb-top-menu">
+        <button
+          type="button"
+          className="rb-icon-btn"
+          aria-label="메뉴 열기"
+          aria-expanded={menuOpen}
+          onClick={() => setMenuOpen((open) => !open)}
+        >
+          <Menu size={20} />
+        </button>
+        {menuOpen && (
+          <div className="rb-menu-panel glass">
+            <button type="button" className="rb-menu-item" onClick={() => { setMenuOpen(false); navigate('/mypage'); }}>
+              <User size={15} /> 마이페이지
+            </button>
+            <button type="button" className="rb-menu-item" onClick={handleLogout}>
+              <LogOut size={15} /> 로그아웃
+            </button>
+          </div>
+        )}
+      </div>
 
       {showNav && (
         <div className="navrail glass">
@@ -148,6 +196,20 @@ function Shell({ children, active, mode, onNavigate, showNav }) {
   );
 }
 
+function BackTitle({ children, onBack, level = 2, style }) {
+  const Heading = level === 1 ? 'h1' : 'h2';
+  return (
+    <div className="rb-back-title" style={style}>
+      <button type="button" className="rb-back-button" onClick={onBack} aria-label="이전 화면으로 이동">
+        &lt;
+      </button>
+      <Heading style={{ margin: 0, fontSize: level === 1 ? 26 : 22, fontWeight: 700 }}>
+        {children}
+      </Heading>
+    </div>
+  );
+}
+
 /* ---------------- 1. 진입화면 : 모드 선택 + 공고 입력 ---------------- */
 /* 가은/Claude(2026-07-20): 실측 버그 — "공모전 공고 URL 입력하면 안 먹어" 제보.
  * 원인은 이 화면 URL 입력창이 그냥 텍스트 필드였고, "분석 시작"을 눌러야만(그것도
@@ -157,6 +219,7 @@ function Shell({ children, active, mode, onNavigate, showNav }) {
  * 옮겨왔다.
  */
 function EntryScreen({ onEnter, loading, error, projectId, ensureProject, documents, setDocuments }) {
+  const navigate = useNavigate();
   const [mode, setMode] = useState(null);
   const [criteriaTab, setCriteriaTab] = useState('url');
   const [criteriaUrl, setCriteriaUrl] = useState('');
@@ -287,6 +350,12 @@ function EntryScreen({ onEnter, loading, error, projectId, ensureProject, docume
       <p style={{ color: "var(--text-2)", fontSize: 14, marginBottom: 28 }}>
         같은 공모전 데이터·평가 기준을 쓰지만, 두 흐름은 서로 다른 경험을 제공합니다.
       </p>
+
+      <div className="rb-entry-actions">
+        <button type="button" className="btn-ghost rb-inline-projects" onClick={() => navigate('/projects')}>
+          <FolderOpen size={14} /> 내 프로젝트
+        </button>
+      </div>
 
       <div className="rb-grid-2" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 32 }}>
         <div
@@ -439,11 +508,12 @@ const _CONFIDENCE_LABEL = { high: '확신 높음', medium: '확신 보통', low:
  *    리스크/출처)을 둔다. 수상작·유사사례 경향은 이 시스템에 그 데이터 소스 자체가
  *    없어서 항상 "자료 미확보" 상태로 고정 표시하고 LLM이 지어내지 않는다.
  */
-function AnalysisScreen({ mode, onNext, projectId }) {
+function AnalysisScreen({ mode, onNext, onBack, projectId }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [analysis, setAnalysis] = useState(null);
   const [detailOpen, setDetailOpen] = useState(false);
+  const [ideaTopic, setIdeaTopic] = useState(null);
 
   useEffect(() => {
     if (!projectId) {
@@ -458,6 +528,24 @@ function AnalysisScreen({ mode, onNext, projectId }) {
       .then((data) => { if (!cancelled) setAnalysis(data); })
       .catch((err) => { if (!cancelled) setError(err.message); })
       .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [projectId]);
+
+  // 가은/Claude(2026-07-21): 실측 요청 — "내 프로젝트"에서 아이디어 프로젝트를 불러오면
+  // 확정한 주제가 어디에도 안 보였다. 프로젝트 설명에 IDEA_PROJECT_MARKER가 있으면
+  // "작성 전" 흐름에서 주제를 확정한 프로젝트로 보고 제목을 주제로 표시, 없으면 "미정".
+  useEffect(() => {
+    if (!projectId) {
+      setIdeaTopic(null);
+      return;
+    }
+    let cancelled = false;
+    getProject(projectId)
+      .then((project) => {
+        if (cancelled) return;
+        setIdeaTopic(project.description === IDEA_PROJECT_MARKER ? project.title : null);
+      })
+      .catch(() => { if (!cancelled) setIdeaTopic(null); });
     return () => { cancelled = true; };
   }, [projectId]);
 
@@ -478,6 +566,7 @@ function AnalysisScreen({ mode, onNext, projectId }) {
 
   const cards = hasAnnouncement
     ? [
+        { icon: Sparkles, color: "purple", title: "아이디어 주제 선정", body: ideaTopic || "미정" },
         { icon: Target, color: "purple", title: "핵심 과제", body: strategy?.core_intent || "핵심 과제를 판단할 근거가 부족해요." },
         { icon: Award, color: "coral", title: "평가에서 갈리는 지점", list: facts?.evaluation_criteria },
         { icon: ShieldCheck, color: "green", title: "반드시 지켜야 할 조건", list: [...(facts?.eligibility || []), ...(facts?.submission_requirements || [])].slice(0, 4) },
@@ -488,9 +577,9 @@ function AnalysisScreen({ mode, onNext, projectId }) {
   return (
     <div style={{ maxWidth: 820 }}>
       <div className="badge purple mono">{hasAnnouncement ? "공고문 분석 결과" : "공고문 미등록"}</div>
-      <h1 style={{ fontSize: 26, fontWeight: 700, margin: "12px 0 24px" }}>
+      <BackTitle level={1} onBack={onBack} style={{ margin: "12px 0 24px" }}>
         {hasAnnouncement ? (analysis?.announcement_title || "등록한 공고문을 확인하세요") : "등록된 공고문이 없어요"}
-      </h1>
+      </BackTitle>
 
       {error && <p style={{ color: "var(--coral)", fontSize: 13, marginBottom: 16 }}>{error}</p>}
 
@@ -598,7 +687,7 @@ function AnalysisScreen({ mode, onNext, projectId }) {
 }
 
 /* ---------------- 3. 작성 전: 주제 아이디어 회의 (더미) ---------------- */
-function IdeationScreen({ onNext }) {
+function IdeationScreen({ onNext, onBack, saving, error }) {
   const [messages, setMessages] = useState([
     { role: "ai", persona: "기획", text: "이 문제를 실제로 겪은 대상이 누구인가요?" },
   ]);
@@ -622,7 +711,9 @@ function IdeationScreen({ onNext }) {
     <div className="rb-grid-2" style={{ maxWidth: 860, display: "grid", gridTemplateColumns: "1fr 300px", gap: 20 }}>
       <div>
         <div className="badge coral mono" style={{ marginBottom: 10 }}>주제 아이디어 회의</div>
-        <h2 style={{ fontSize: 20, fontWeight: 700, marginBottom: 16 }}>기획 위원 · 개발 위원과 함께 좁혀가는 중</h2>
+        <BackTitle onBack={onBack} style={{ marginBottom: 16 }}>
+          기획 위원 · 개발 위원과 함께 좁혀가는 중
+        </BackTitle>
         <div className="card glass" style={{ minHeight: 360, display: "flex", flexDirection: "column", gap: 12 }}>
           <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 12 }}>
             {messages.map((m, i) => (
@@ -660,14 +751,17 @@ function IdeationScreen({ onNext }) {
             <div style={{ fontSize: 11.5, color: "var(--text-2)" }}>적합성 상 · 차별성 중 · 리스크 낮음</div>
           </div>
         ))}
-        <button className="btn-ghost" style={{ width: "100%", marginTop: 8 }} onClick={onNext}>주제 확정하고 이어서 받기</button>
+        {error && <p style={{ color: "var(--coral)", fontSize: 12.5, margin: "0 0 10px" }}>{error}</p>}
+        <button className="btn-ghost" style={{ width: "100%", marginTop: 8 }} onClick={onNext} disabled={saving}>
+          {saving ? "프로젝트 저장 중..." : "주제 확정하고 이어서 받기"}
+        </button>
       </div>
     </div>
   );
 }
 
 /* ---------------- 4. 주제 확정 결과 (더미) ---------------- */
-function IdeationResultScreen() {
+function IdeationResultScreen({ onBack }) {
   const rows = [
     ["문제 정의", "예비창업인의 87%가 재고 파악을 감으로 처리해 결품·과잉재고가 반복됨"],
     ["해결안", "POS 연동 재고 예측 AI 비서 → 판매 패턴 학습 후 발주 시점 자동 알림"],
@@ -678,7 +772,9 @@ function IdeationResultScreen() {
   return (
     <div style={{ maxWidth: 760 }}>
       <div className="badge green mono" style={{ marginBottom: 12 }}>주제 확정 · 기획서 작성 출발점</div>
-      <h2 style={{ fontSize: 22, fontWeight: 700, marginBottom: 20 }}>예비창업인 재고관리 AI 비서</h2>
+      <BackTitle onBack={onBack} style={{ marginBottom: 20 }}>
+        {IDEA_PROJECT_TOPIC}
+      </BackTitle>
       <div className="card glass">
         {rows.map(([k, v], i) => (
           <div key={i} style={{ display: "grid", gridTemplateColumns: "110px 1fr", gap: 16, padding: "14px 0", borderTop: i > 0 ? "1px solid var(--glass-border)" : "none" }}>
@@ -718,7 +814,7 @@ function stageStatus(step, snapshot, mentorCount) {
  * MentorSelectionPage.jsx가 하던 getMentorCandidates → analyzeProject → getAnalyzeProgress
  * 폴링을 그대로 쓰되, 멘토 선택 화면 없이 추천 후보를 전부(최대 4명) 자동 선택한다.
  */
-function UploadAndAnalyzeScreen({ projectId, onFeedbackReady, initialDocuments }) {
+function UploadAndAnalyzeScreen({ projectId, onFeedbackReady, onBack, initialDocuments }) {
   const [documents, setDocuments] = useState(() => initialDocuments || [])
   const [isDragging, setIsDragging] = useState(false)
   const [fileError, setFileError] = useState('')
@@ -827,7 +923,9 @@ function UploadAndAnalyzeScreen({ projectId, onFeedbackReady, initialDocuments }
   return (
     <div style={{ maxWidth: 720 }}>
       <div className="badge coral mono" style={{ marginBottom: 12 }}>기획서 업로드 · 분석</div>
-      <h2 style={{ fontSize: 22, fontWeight: 700, marginBottom: 20 }}>평가 대상 문서를 업로드하세요</h2>
+      <BackTitle onBack={onBack} style={{ marginBottom: 20 }}>
+        평가 대상 문서를 업로드하세요
+      </BackTitle>
 
       {!analyzing && (
         <>
@@ -952,6 +1050,8 @@ export default function ReviewBoardPrototype() {
   const [targetDocuments, setTargetDocuments] = useState(null);
   const [entryLoading, setEntryLoading] = useState(false);
   const [entryError, setEntryError] = useState('');
+  const [ideaSaving, setIdeaSaving] = useState(false);
+  const [ideaSaveError, setIdeaSaveError] = useState('');
   // 가은/Claude(2026-07-20): 실측 버그 — URL로 실제 공고문을 수집해도 "공모전 분석"
   // 화면엔 항상 똑같은 고정 예시 카드만 나왔다(EntryScreen이 모은 문서 목록이 어디에도
   // 안 넘어갔음). AnalysisScreen에서 보여줄 수 있게 여기(부모)로 끌어올린다.
@@ -963,11 +1063,18 @@ export default function ReviewBoardPrototype() {
     if (i < seq.length - 1) setStage(seq[i + 1]);
   };
 
+  const goPrev = () => {
+    const seq = (mode && FLOW_BY_MODE[mode]) || ["entry"];
+    const i = seq.indexOf(stage);
+    if (i > 0) setStage(seq[i - 1]);
+  };
+
   // 가은/Claude(2026-07-20): projectId가 아직 없으면(공고 URL/파일을 하나도 안 넣고
   // 바로 "분석 시작"을 눌렀거나, EntryScreen의 URL/파일 액션이 이미 만들어뒀거나) 여기서
   // 한 번 더 보장한다 — DocumentUploadPage.jsx의 ensureProject()와 동일한 "지연 생성"
   // 패턴이라 URL/파일을 여러 번 넣어도 프로젝트가 중복 생성되지 않는다.
   const projectIdRef = useRef(null);
+  const ideaProjectSavedRef = useRef(false);
   projectIdRef.current = projectId;
   async function ensureProject() {
     if (projectIdRef.current) return projectIdRef.current;
@@ -975,6 +1082,38 @@ export default function ReviewBoardPrototype() {
     projectIdRef.current = project.id;
     setProjectId(project.id);
     return project.id;
+  }
+
+  async function handleConfirmIdeaProject() {
+    if (ideaSaving) return;
+    if (ideaProjectSavedRef.current) {
+      goNext();
+      return;
+    }
+
+    setIdeaSaveError('');
+    setIdeaSaving(true);
+    try {
+      // 가은/Claude(2026-07-21): 실측 버그 — EntryScreen에서 공고문을 먼저 등록해
+      // ensureProject()로 이미 프로젝트가 만들어져 있는데도 여기서 항상 새 프로젝트를
+      // 만들어버려서, 앞서 등록한 공고문이 붙은 프로젝트가 고아가 됐다. 이미 프로젝트가
+      // 있으면 새로 만들지 않고 제목·설명만 아이디어 확정 값으로 갱신한다.
+      const project = projectIdRef.current
+        ? await updateProject(projectIdRef.current, { title: IDEA_PROJECT_TOPIC, description: IDEA_PROJECT_MARKER })
+        : await createProject({
+            title: IDEA_PROJECT_TOPIC,
+            doc_type: "competition",
+            description: IDEA_PROJECT_MARKER,
+          });
+      ideaProjectSavedRef.current = true;
+      projectIdRef.current = project.id;
+      setProjectId(project.id);
+      goNext();
+    } catch (err) {
+      setIdeaSaveError(err.message);
+    } finally {
+      setIdeaSaving(false);
+    }
   }
 
   async function handleEnter(m) {
@@ -995,25 +1134,32 @@ export default function ReviewBoardPrototype() {
     }
   }
 
-  function handleFeedbackReady(pid) {
-    navigate(`/projects/${pid}/feedback-chat`);
+  // 재인/Claude(2026-07-21): 예전엔 분석 끝나면 기존 대화형 피드백 화면
+  // (/feedback-chat)으로 이동했는데, 이제 그 대신 "AI 피드백"(워크벤치) 단계로
+  // 이 페이지 안에서 이어지도록 바꿨다 - 워크벤치 안에서 필요하면 그 화면(위원
+  // 소집)을 다시 불러오는 방식이라, 여기서는 완전히 벗어나지 않는다.
+  function handleFeedbackReady() {
+    setStage('workbench');
   }
 
   // 가은/Claude(2026-07-21): ?projectId=가 있으면 기존 프로젝트를 불러와 이어서 한다.
-  // 기획서(target)가 이미 있으면 "기획서 업로드" 단계로, 공고문(criteria)만 있으면
-  // "공모전 분석" 단계로 보낸다(둘 다 있어도 분석 화면이 캐시로 즉시 뜨므로 거기서
-  // 시작). 아무 문서도 없으면 entry에 그대로 둔다.
+  // 프로젝트 설명이 IDEA_PROJECT_MARKER면 "작성 전" 흐름에서 주제를 확정한 프로젝트로
+  // 보고 mode를 pre로 두고 분석 화면부터 보여준다(문서가 없어도 entry에 멈추지 않도록).
+  // 그 외에는 기존대로: 기획서(target)가 있으면 "기획서 업로드" 단계로, 공고문
+  // (criteria)만 있으면 "공모전 분석" 단계로 보낸다. 아무 문서도 없으면 entry에 그대로 둔다.
   useEffect(() => {
     if (!resumeProjectId) return;
     let cancelled = false;
     setResuming(true);
     setResumeError('');
-    getDocuments(resumeProjectId)
-      .then((docs) => {
+    Promise.all([getDocuments(resumeProjectId), getProject(resumeProjectId)])
+      .then(([docs, project]) => {
         if (cancelled) return;
         projectIdRef.current = resumeProjectId;
         setProjectId(resumeProjectId);
-        setMode('post');
+        const isIdeaProject = project.description === IDEA_PROJECT_MARKER;
+        setMode(isIdeaProject ? 'pre' : 'post');
+        if (isIdeaProject) ideaProjectSavedRef.current = true;
 
         const criteriaDocs = docs.filter((d) => d.document_role === 'criteria');
         const targetDocs = docs.filter((d) => (d.document_role || 'target') === 'target');
@@ -1036,7 +1182,8 @@ export default function ReviewBoardPrototype() {
           })),
         );
 
-        if (targetDocs.length > 0) setStage('upload');
+        if (isIdeaProject) setStage('analysis');
+        else if (targetDocs.length > 0) setStage('upload');
         else if (criteriaDocs.length > 0) setStage('analysis');
       })
       .catch((err) => { if (!cancelled) setResumeError(err.message); })
@@ -1070,13 +1217,16 @@ export default function ReviewBoardPrototype() {
         />
       )}
       {stage === "analysis" && (
-        <AnalysisScreen mode={mode} onNext={goNext} projectId={projectId} />
+        <AnalysisScreen mode={mode} onNext={goNext} onBack={goPrev} projectId={projectId} />
       )}
-      {stage === "ideation" && <IdeationScreen onNext={goNext} />}
-      {stage === "ideation_result" && <IdeationResultScreen />}
+      {stage === "ideation" && (
+        <IdeationScreen onNext={handleConfirmIdeaProject} onBack={goPrev} saving={ideaSaving} error={ideaSaveError} />
+      )}
+      {stage === "ideation_result" && <IdeationResultScreen onBack={goPrev} />}
       {stage === "upload" && (
-        <UploadAndAnalyzeScreen projectId={projectId} onFeedbackReady={handleFeedbackReady} initialDocuments={targetDocuments} />
+        <UploadAndAnalyzeScreen projectId={projectId} onFeedbackReady={handleFeedbackReady} onBack={goPrev} initialDocuments={targetDocuments} />
       )}
+      {stage === "workbench" && <WorkbenchScreen projectId={projectId} />}
     </Shell>
   );
 }

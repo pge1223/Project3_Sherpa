@@ -17,6 +17,25 @@ from .ideation_build import assemble_ideation_graph
 from .ideation_run import continue_ideation_meeting, start_ideation_meeting
 from .ideation_state import IdeationStage, IdeationState, initial_ideation_state, resume_ideation_state
 
+# 용준/Claude(2026-07-20): "아이디어 발전 회의(ideation)" 대화형(conversational) 개발용
+# 프리뷰 — 배치형(위 ideation_* import들)과 완전히 분리된 병렬 서브시스템. 사용자가 질문
+# 하나마다 답하며 진행하는 구조라 State/그래프/실행부가 모두 별도 파일(ideation_conv_*)이다.
+from .ideation_conv_build import assemble_ideation_conversation_graph
+from .ideation_conv_run import (
+    finalize_ideation_conversation,
+    reply_ideation_conversation,
+    start_ideation_conversation,
+)
+from .ideation_conv_state import (
+    ROADMAP_PREREQUISITE_TOPICS,
+    TOPIC_PRIORITY,
+    ConvPhase,
+    IdeationConvState,
+    active_stage_for,
+    initial_conv_state,
+    remaining_topics_for,
+)
+
 __all__ = [
     "MeetingState",
     "MeetingStage",
@@ -38,4 +57,15 @@ __all__ = [
     "initial_ideation_state",
     "resume_ideation_state",
     "start_ideation_meeting",
+    "IdeationConvState",
+    "ConvPhase",
+    "active_stage_for",
+    "remaining_topics_for",
+    "TOPIC_PRIORITY",
+    "ROADMAP_PREREQUISITE_TOPICS",
+    "assemble_ideation_conversation_graph",
+    "initial_conv_state",
+    "start_ideation_conversation",
+    "reply_ideation_conversation",
+    "finalize_ideation_conversation",
 ]
