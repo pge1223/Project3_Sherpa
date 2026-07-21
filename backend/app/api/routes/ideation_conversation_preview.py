@@ -217,7 +217,14 @@ def _serialize_state(state: IdeationConvState) -> dict:
     세션) 각각 빈 배열/None으로 기본값을 준다. messages 안의 개별 메시지도 이제 선택적으로
     structured 필드(judgment/reason/suggestion/confirmed/unconfirmed)를 가질 수 있다 —
     content 문자열은 그대로 유지되므로 messages 자체의 필드 목록은 바뀌지 않는다(추가 키가
-    각 메시지 dict 안에 하나 늘었을 뿐)."""
+    각 메시지 dict 안에 하나 늘었을 뿐).
+
+    용준/Claude(2026-07-21, /board 실 연동): original_idea_candidates/selection_intent/
+    user_selection_message/source_candidates/merge_analysis도 순수 추가 필드다 —
+    ideation_conv_state.py/ideation_conv_discovery.py가 이미 state에 계산해 두는 값을
+    노출만 한다(새 로직 없음). /board의 결과 화면·후보 결합 컨텍스트 표시가 이 값들을
+    쓴다 — conversation_context의 최근 메시지에 우연히 남아있는 것에 기대지 않고 구조화된
+    필드로 직접 읽게 하기 위함이다."""
     return {
         "session_id": state["session_id"],
         "phase": state["phase"],
@@ -230,10 +237,15 @@ def _serialize_state(state: IdeationConvState) -> dict:
         "ideation_mode": state.get("ideation_mode", "refinement"),
         "active_stage": active_stage_for(state["phase"]),
         "idea_candidates": state.get("idea_candidates", []),
+        "original_idea_candidates": state.get("original_idea_candidates", []),
         "selected_idea": state.get("selected_idea"),
         "selection_reason": state.get("selection_reason"),
         "resolved_topics": state.get("resolved_topics", []),
         "pending_question_topic": state.get("pending_question_topic"),
+        "selection_intent": state.get("selection_intent"),
+        "user_selection_message": state.get("user_selection_message"),
+        "source_candidates": state.get("source_candidates", []),
+        "merge_analysis": state.get("merge_analysis"),
         "error": (
             {"code": "IDEATION_CONV_NODE_FAILED", "message": f"{state.get('failed_node')} 노드에서 실패했습니다."}
             if state["phase"] == "failed"
@@ -253,7 +265,7 @@ class StartRequest(BaseModel):
     max_rounds: int = 3
     use_rag: bool = False
     project_id: Optional[str] = None
-    model: str = Field(default="")  # 비워두면 settings.DEV_LLM_REVIEWER_MODEL 사용(개발용 오버라이드 허용).
+    model: str = Field(default="")  # 비워두면 settings.reviewer_model()(LLM_PROFILE 기준) 사용 — 개발용 오버라이드 허용.
 
 
 class ReplyRequest(BaseModel):
@@ -265,8 +277,13 @@ class FinalizeRequest(BaseModel):
     model: str = Field(default="")
 
 
+# 가은/Claude(2026-07-21): 실측 제보 — 이 화면(board "작성 전" 흐름)이 늘 DEV_LLM_REVIEWER_
+# MODEL로 고정돼 있어서, dev 프로필에 gpt-5-nano처럼 느린 추론 모델을 넣으면(파싱/JSON
+# 형식 테스트용으로 dev 프로필을 그렇게 쓰는 게 팀 의도) 실제 사용자가 쓰는 이 대화형
+# 회의까지 덩달아 느려졌다. 다른 LLM 호출(documents.py/meetings.py)과 똑같이
+# LLM_PROFILE(dev|quality|premium)을 그대로 따르게 통일한다.
 def _effective_model(requested: str) -> str:
-    return requested.strip() or settings.DEV_LLM_REVIEWER_MODEL
+    return requested.strip() or settings.reviewer_model()
 
 
 @router.post("/start")

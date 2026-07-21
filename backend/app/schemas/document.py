@@ -82,9 +82,41 @@ class AnnouncementEvidence(BaseModel):
     confidence: str = "medium"
 
 
-# 가은/Claude(2026-07-21): 수상작/유사 사례 경향은 이 시스템에 그 데이터 소스 자체가
-# 없어서(수상작 아카이브 미구축) LLM이 절대 지어내지 않는다 — has_similar_case_data는
-# 항상 False로 고정하고, 프론트가 이 값을 보고 "자료 미확보" 상태를 표시한다.
+# 가은/Claude(2026-07-21): kyh님이 크롤링(contest_works, 소통혁신24)해서 category/
+# source_org까지 채운(scripts/classify_contest_works.py) 수상작 아카이브가 생겨서, 여기
+# 붙였던 "데이터 소스 자체가 없다"는 이전 제약은 더 이상 사실이 아니다. LLM이 원문에서
+# 안 나오는 개별 수상작을 지어내는 건 여전히 막고, 대신 실제 DB에서 조회한 값만 담는다
+# (없으면 has_similar_case_data=False로 그대로 "미확보" 상태를 보여준다).
+class SimilarWork(BaseModel):
+    title: str
+    source_org: str = ""
+    award_grade: str = ""
+    selection_status: str = ""  # "winner" | "candidate"
+    # 가은/Claude(2026-07-21): 실측 요청 — 카드에서 이 항목을 클릭하면 같은 공모전
+    # (contest_title)의 다른 수상작/후보작을 옆 패널에서 더 보여준다. 프론트가 그 조회에
+    # 쓸 키를 여기서 같이 내려준다.
+    contest_title: str = ""
+
+
+# 가은/Claude(2026-07-21): SimilarWork 클릭 시 상세 패널 — 같은 contest_title 안에서
+# 어떤 아이디어가 수상하고 어떤 게 후보에 그쳤는지 전부 보여준다. ocr_text는 kyh님이
+# 대표작 일부만 검증 후 확대 예정이라 아직 전부 비어있을 수 있다(그때는 빈 문자열).
+class ContestWorkDetail(BaseModel):
+    work_title: str
+    award_grade: str = ""
+    selection_status: str = ""  # "winner" | "candidate"
+    images: list[str] = []
+    ocr_text: str = ""
+    # 가은/Claude(2026-07-21): kyh님이 크롤러에 추가한 필드 — 소통혁신24 원문 상세
+    # 페이지 링크. 없는(예전에 크롤링된) 문서도 있을 수 있어 빈 문자열 기본값.
+    source_url: str = ""
+
+
+class ContestWorksByTitleResponse(BaseModel):
+    contest_title: str
+    works: list[ContestWorkDetail] = []
+
+
 class AnnouncementAnalysisResponse(BaseModel):
     has_announcement: bool
     # 가은/Claude(2026-07-21): 실측 요청 — 화면 제목에 실제 공모전명이 나오게. 페이지
@@ -95,4 +127,5 @@ class AnnouncementAnalysisResponse(BaseModel):
     strategic_analysis: Optional[StrategicAnalysis] = None
     evidence: list[AnnouncementEvidence] = []
     has_similar_case_data: bool = False
+    similar_works: list[SimilarWork] = []
     source_document_names: list[str] = []

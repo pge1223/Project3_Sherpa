@@ -28,6 +28,25 @@ def is_it_related(title):
 BASE_URL = "https://sotong.go.kr"
 LIST_URL = "https://sotong.go.kr/front/epilogue/epilogueNewList.do"
 VIEW_URL = "https://sotong.go.kr/front/epilogue/epilogueNewView.do"
+VIEW_PAGE_URL = "https://sotong.go.kr/front/epilogue/epilogueNewViewPage.do"
+
+# selection_status별 실제 브라우저 접근용 상세 페이지 menu_id
+# (list 페이지 menu_id와는 다름 — winner=527, candidate=528이지만
+#  상세 페이지는 winner=529, candidate=528로 확인됨)
+SOURCE_PAGE_INFO = {
+    "winner": {"pagetype": "rslt", "menu_id": 529},
+    "candidate": {"pagetype": "cnddt", "menu_id": 528},
+}
+
+def build_source_url(bbs_id, selection_status):
+    """작품이 속한 공모전(bbs_id)의 소통혁신24 상세 페이지 URL.
+
+    작품(wrk_id) 단위 개별 페이지는 존재하지 않음 — 상세 페이지 안에서
+    JS 팝업(viewCnddtWrkCn)으로만 작품 내용을 보여주므로, 같은 bbs_id의
+    작품들은 동일한 source_url을 공유한다.
+    """
+    info = SOURCE_PAGE_INFO.get(selection_status, SOURCE_PAGE_INFO["winner"])
+    return f"{VIEW_PAGE_URL}?menu_id={info['menu_id']}&bbs_id={bbs_id}&pagetype={info['pagetype']}"
 
 session = requests.Session()
 session.headers.update({
@@ -145,6 +164,7 @@ def parse_works(html, bbs_id, contest_title, inst_nm, selection_status):
             "category": None,
             "images": images,
             "ocr_text": None,
+            "source_url": build_source_url(bbs_id, selection_status),
             "crawled_at": datetime.utcnow(),
         })
 
