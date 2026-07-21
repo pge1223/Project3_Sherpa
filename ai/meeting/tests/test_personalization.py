@@ -40,15 +40,23 @@ def test_major_is_easy_and_brief():
 
 
 def test_middle_profile_is_moderate():
-    # 전공은 아니지만 인턴+공모전 경험이 있는 중간 프로필 → moderate
+    # 전공은 아니지만 인턴+공모전 경험이 있는 중간 프로필 → moderate (score 2)
     mid = {
         "education": {"is_technical_major": False, "degree": "bachelor"},
-        "experience": {"it_internship_months": 6, "competition_participations": 1},
-        "github": {"has_backend_experience": False, "relevant_projects": 0, "total_commits": 50},
+        "experience": {"internship_months": 6, "competition_count": 1, "award_count": 0},
+        "github": {"public_repos": 2, "followers": 3, "total_stars": 0, "primary_languages": ["HTML"]},
     }
     c = classify_impl_difficulty(mid)
     assert c["level"] == "moderate"
     assert c["verbosity"] == "standard"
+
+
+def test_github_markup_only_languages_give_no_dev_signal():
+    # HTML/CSS만 쓰는 GitHub은 개발 언어 신호로 치지 않는다
+    markup = {"education": {}, "experience": {}, "github": {"primary_languages": ["HTML", "CSS"], "public_repos": 2}}
+    dev = {"education": {}, "experience": {}, "github": {"primary_languages": ["HTML", "Python"], "public_repos": 2}}
+    assert "GitHub 개발 언어 사용" not in classify_impl_difficulty(markup)["signals"]
+    assert "GitHub 개발 언어 사용" in classify_impl_difficulty(dev)["signals"]
 
 
 def test_no_profile_returns_none():
@@ -62,6 +70,12 @@ def test_missing_github_and_experience_defaults_to_hard():
     minimal = {"education": {"is_technical_major": False, "degree": "bachelor"}}
     c = classify_impl_difficulty(minimal)
     assert c["level"] == "hard"
+
+
+def test_master_degree_gives_signal():
+    # 학위 enum은 영문(bachelor/master/phd) — 석사 이상만 가점
+    assert "석사 이상 학위" in classify_impl_difficulty({"education": {"degree": "master"}})["signals"]
+    assert "석사 이상 학위" not in classify_impl_difficulty({"education": {"degree": "bachelor"}})["signals"]
 
 
 def test_resolved_feedback_gets_no_guide():
