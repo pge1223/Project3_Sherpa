@@ -107,6 +107,9 @@ class ContestWorkDetail(BaseModel):
     selection_status: str = ""  # "winner" | "candidate"
     images: list[str] = []
     ocr_text: str = ""
+    # 가은/Claude(2026-07-21): kyh님이 크롤러에 추가한 필드 — 소통혁신24 원문 상세
+    # 페이지 링크. 없는(예전에 크롤링된) 문서도 있을 수 있어 빈 문자열 기본값.
+    source_url: str = ""
 
 
 class ContestWorksByTitleResponse(BaseModel):
