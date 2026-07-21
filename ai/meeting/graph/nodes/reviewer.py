@@ -147,6 +147,7 @@ def make_reviewer_node(
             retrieved = state["retrieved_evidence"]
             guards = None
             expected_criteria = []
+            my_criterion_ids = None  # transform.py에 "범위를 모른다"로 전달 - 기존 동작 유지
 
         prompt = build_reviewer_prompt(
             persona_id,
@@ -170,7 +171,9 @@ def make_reviewer_node(
                     continue
                 criterion_evidence[cid] = evidence_callback(persona_id, cid, item)
 
-        v2_result = raw_reviewer_to_v2(raw, pool, criterion_evidence=criterion_evidence)
+        v2_result = raw_reviewer_to_v2(
+            raw, pool, criterion_evidence=criterion_evidence, expected_criterion_ids=my_criterion_ids,
+        )
         return {
             "reviewer_results": {persona_id: v2_result},
             "evidence": pool.as_list(),
