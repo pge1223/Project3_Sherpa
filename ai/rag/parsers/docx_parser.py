@@ -74,6 +74,21 @@ class DOCXParser(BaseParser):
             rows.append("\t".join(cells))
         return "\n".join(rows)
 
+    def _paragraph_runs(self, para: Paragraph) -> list[dict]:
+        """문단을 run 단위로 쪼개 굵게/기울임 서식을 유지한다. content(순수 텍스트)는
+        RAG 청킹·임베딩이 그대로 쓰므로 안 건드리고, 이 정보는 metadata["runs"]에만
+        추가로 담는다 - 원문을 워드처럼 보여주는 화면(재인/Claude, 2026-07-21)에서만 씀."""
+        runs = []
+        for run in para.runs:
+            if not run.text:
+                continue
+            runs.append({
+                "text": run.text,
+                "bold": bool(run.bold),
+                "italic": bool(run.italic),
+            })
+        return runs
+
     def _is_list_item(self, para: Paragraph) -> bool:
         """목록 항목인지 확인"""
         if not para.text.strip():
@@ -130,6 +145,7 @@ class DOCXParser(BaseParser):
                     order=order,
                     metadata={
                         "style": para.style.name if para.style else None,
+                        "runs": self._paragraph_runs(para),
                     },
                 )
                 blocks.append(block_obj)

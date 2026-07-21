@@ -16,7 +16,7 @@ import { useNavigate } from 'react-router-dom'
 import {
   ArrowLeft, TrendingUp, TrendingDown, CheckCircle2, AlertCircle, Plus,
   Lightbulb, Compass, Cpu, FlaskConical,
-  GitBranch, GraduationCap, FileText, AlertTriangle, Zap, ChevronDown,
+  AlertTriangle, Zap, ChevronDown,
 } from 'lucide-react'
 import './VersionTrackerTest.css'
 
@@ -472,49 +472,25 @@ function ScoreTrendChart({ versions, selectedIndex, onSelect }) {
   )
 }
 
-// 제출 정보(개인화 입력) + TEST 프로필 토글.
-function SubmissionCard({ profileKey, onChange }) {
-  const p = PROFILES[profileKey]
-  const rows = [
-    { Icon: FileText, label: '수정본 (기본)', value: '문서 재제출 — 버전 추적의 기본 입력', tag: '필수', tagCls: 'green' },
-    { Icon: GitBranch, label: 'GitHub 저장소', value: p.github, tag: '선택', tagCls: 'purple' },
-    { Icon: GraduationCap, label: '이력 · 교육 수준', value: `${p.education} · ${p.experience}`, tag: '선택', tagCls: 'purple' },
-  ]
+// TEST 프로필 토글 — "제출 정보 카드"는 MyPage(마이페이지)로 이동함(가은 요청, 2026-07-21).
+// 개발 위원 피드백의 구현 난이도 개인화 데모는 이 토글로 계속 확인 가능.
+function ProfileToggle({ profileKey, onChange }) {
   return (
-    <div className="card glass" style={{ marginBottom: 18, padding: '18px 20px' }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', marginBottom: 14 }}>
-        <div>
-          <h2 style={{ margin: 0, fontSize: 15.5, fontWeight: 700 }}>제출 정보</h2>
-          <span style={{ fontSize: 12, color: '#918d9f' }}>GitHub·이력을 함께 제출하면 개발 위원 피드백이 개인 맞춤형으로 바뀝니다</span>
-        </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-          <span className="badge amber mono"><FlaskConical size={11} /> TEST 프로필</span>
-          <div style={{ display: 'inline-flex', background: 'var(--bg-2)', borderRadius: 10, padding: 3, gap: 3 }}>
-            {['nonmajor', 'major'].map((k) => {
-              const active = profileKey === k
-              return (
-                <button key={k} className="vt-tab" onClick={() => onChange(k)}
-                  style={{ padding: '6px 12px', borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 12.5, fontWeight: 700, background: active ? '#fff' : 'transparent', color: active ? '#1c1a2e' : '#918d9f', boxShadow: active ? '0 1px 4px rgba(28,26,46,0.1)' : 'none' }}>
-                  {PROFILES[k].label} 제출
-                </button>
-              )
-            })}
-          </div>
-        </div>
+    <div className="card glass" style={{ marginBottom: 18, padding: '14px 20px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+        <span className="badge amber mono"><FlaskConical size={11} /> TEST 프로필</span>
+        <span style={{ fontSize: 12, color: '#918d9f' }}>제출자 프로필에 따라 개발 위원 피드백의 구현 난이도 · 상세도가 달라집니다</span>
       </div>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-        {rows.map((r) => (
-          <div key={r.label} style={{ display: 'flex', alignItems: 'center', gap: 11, padding: '10px 12px', borderRadius: 10, background: 'rgba(255,255,255,0.5)', border: '1px solid rgba(28,26,46,0.06)' }}>
-            <span style={{ flexShrink: 0, width: 32, height: 32, borderRadius: 9, background: 'var(--bg-2)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#7c5cea' }}>
-              <r.Icon size={16} />
-            </span>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontSize: 13, fontWeight: 700, color: '#3a3750' }}>{r.label}</div>
-              <div className="mono" style={{ fontSize: 11.5, color: '#918d9f', marginTop: 2, overflowWrap: 'anywhere' }}>{r.value}</div>
-            </div>
-            <span className={`badge ${r.tagCls} mono`} style={{ flexShrink: 0 }}>{r.tag}</span>
-          </div>
-        ))}
+      <div style={{ display: 'inline-flex', background: 'var(--bg-2)', borderRadius: 10, padding: 3, gap: 3 }}>
+        {['nonmajor', 'major'].map((k) => {
+          const active = profileKey === k
+          return (
+            <button key={k} className="vt-tab" onClick={() => onChange(k)}
+              style={{ padding: '6px 12px', borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 12.5, fontWeight: 700, background: active ? '#fff' : 'transparent', color: active ? '#1c1a2e' : '#918d9f', boxShadow: active ? '0 1px 4px rgba(28,26,46,0.1)' : 'none' }}>
+              {PROFILES[k].label} 제출
+            </button>
+          )
+        })}
       </div>
     </div>
   )
@@ -583,8 +559,8 @@ export default function VersionTrackerTestPage() {
           </div>
         </div>
 
-        {/* 제출 정보(개인화 입력) + TEST 프로필 토글 */}
-        <SubmissionCard profileKey={profileKey} onChange={setProfileKey} />
+        {/* TEST 프로필 토글 — 제출 정보 카드는 MyPage로 이동함 */}
+        <ProfileToggle profileKey={profileKey} onChange={setProfileKey} />
 
         {/* 점수 추이 그래프 */}
         <div className="card glass" style={{ padding: '20px 22px 10px', marginBottom: 18 }}>

@@ -54,6 +54,7 @@ async def create_project(request: ProjectCreateRequest, authorization: Optional[
         created_at=result["created_at"],
         updated_at=result["updated_at"],
         flow_mode=result.get("flow_mode"),
+        has_announcement_analysis=bool(result.get("announcement_analysis_cache")),
     )
 
 # PRJ-002 프로젝트 목록 조회
@@ -73,6 +74,7 @@ async def get_projects(authorization: Optional[str] = Header(None, alias="author
             created_at=p["created_at"],
             updated_at=p["updated_at"],
             flow_mode=p.get("flow_mode"),
+            has_announcement_analysis=bool(p.get("announcement_analysis_cache")),
         )
         for p in projects
     ]
@@ -96,6 +98,7 @@ async def get_project(project_id: str, authorization: Optional[str] = Header(Non
         created_at=project["created_at"],
         updated_at=project["updated_at"],
         flow_mode=project.get("flow_mode"),
+        has_announcement_analysis=bool(project.get("announcement_analysis_cache")),
     )
 
 # PRJ-004 프로젝트 삭제
