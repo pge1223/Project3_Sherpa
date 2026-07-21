@@ -1,4 +1,4 @@
-import { API_BASE_URL } from './client'
+import { API_BASE_URL, parseApiResponse, clearExpiredSession } from './client'
 
 function authHeaders() {
   const token = localStorage.getItem('auth_token')
@@ -9,22 +9,14 @@ export async function getProjects() {
   const res = await fetch(`${API_BASE_URL}/projects/`, {
     headers: { ...authHeaders() },
   })
-  const data = await res.json()
-  if (!res.ok) {
-    throw new Error(data.detail || '프로젝트 목록을 불러오지 못했습니다.')
-  }
-  return data
+  return parseApiResponse(res, '프로젝트 목록을 불러오지 못했습니다.')
 }
 
 export async function getProject(projectId) {
   const res = await fetch(`${API_BASE_URL}/projects/${projectId}`, {
     headers: { ...authHeaders() },
   })
-  const data = await res.json()
-  if (!res.ok) {
-    throw new Error(data.detail || '프로젝트를 불러오지 못했습니다.')
-  }
-  return data
+  return parseApiResponse(res, '프로젝트를 불러오지 못했습니다.')
 }
 
 export async function createProject({ title, doc_type, description }) {
@@ -33,11 +25,16 @@ export async function createProject({ title, doc_type, description }) {
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify({ title, doc_type, description }),
   })
-  const data = await res.json()
-  if (!res.ok) {
-    throw new Error(data.detail || '프로젝트를 생성하지 못했습니다.')
-  }
-  return data
+  return parseApiResponse(res, '프로젝트를 생성하지 못했습니다.')
+}
+
+export async function updateProject(projectId, { title, description }) {
+  const res = await fetch(`${API_BASE_URL}/projects/${projectId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ title, description }),
+  })
+  return parseApiResponse(res, '프로젝트를 수정하지 못했습니다.')
 }
 
 // PRJ-004 — 벡터 청크/문서/회의/프로젝트를 백엔드가 한 번에 정리한다(projects.py 참고).
@@ -46,11 +43,7 @@ export async function deleteProject(projectId) {
     method: 'DELETE',
     headers: { ...authHeaders() },
   })
-  const data = await res.json()
-  if (!res.ok) {
-    throw new Error(data.detail || '프로젝트를 삭제하지 못했습니다.')
-  }
-  return data
+  return parseApiResponse(res, '프로젝트를 삭제하지 못했습니다.')
 }
 
 // committee: 선택한 멘토 persona_id 2~4개(MentorSelectionPage). 생략하면 백엔드가
@@ -65,22 +58,21 @@ export async function analyzeProject(projectId, committee, progressToken) {
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: body ? JSON.stringify(body) : undefined,
   })
-  const data = await res.json()
-  if (!res.ok) {
-    throw new Error(data.detail || '분석을 시작하지 못했습니다.')
-  }
-  return data
+  return parseApiResponse(res, '분석을 시작하지 못했습니다.')
 }
 
 // FeedbackProgressPage가 analyzeProject() 진행 중 주기적으로 불러 실제 진행 상황(위원별
 // 검토/채점/위원장 종합 단계)을 읽는다. 토큰을 아직 서버가 모르거나(POST가 아직 도착 전)
 // 이미 끝나서 지워졌으면 백엔드가 빈 기본값을 준다 — 최종 완료 판단은 이 값이 아니라
 // analyzeProject()의 resolve/reject로 한다.
+// 가은/Claude(2026-07-21): 폴링 호출이라 실패해도 조용히 null만 반환하던 기존 계약은
+// 그대로 두되, 401(토큰 만료)만은 로그인 화면으로 보내도록 따로 잡는다.
 export async function getAnalyzeProgress(projectId, progressToken) {
   const res = await fetch(
     `${API_BASE_URL}/projects/${projectId}/analyze/progress?token=${encodeURIComponent(progressToken)}`,
     { headers: { ...authHeaders() } },
   )
+  if (res.status === 401) clearExpiredSession()
   if (!res.ok) return null
   return res.json()
 }
@@ -94,11 +86,7 @@ export async function askCommittee(projectId, question, history) {
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify({ question, history }),
   })
-  const data = await res.json()
-  if (!res.ok) {
-    throw new Error(data.detail || '답변을 받아오지 못했습니다.')
-  }
-  return data
+  return parseApiResponse(res, '답변을 받아오지 못했습니다.')
 }
 
 // 가은/Claude(2026-07-17): "결과 정리"(ProjectDetailPage)가 위원장 종합(백그라운드로
@@ -109,11 +97,7 @@ export async function getProjectReport(projectId) {
   const res = await fetch(`${API_BASE_URL}/projects/${projectId}/report`, {
     headers: { ...authHeaders() },
   })
-  const data = await res.json()
-  if (!res.ok) {
-    throw new Error(data.detail || '결과를 불러오지 못했습니다.')
-  }
-  return data
+  return parseApiResponse(res, '결과를 불러오지 못했습니다.')
 }
 
 // STEP4 "공모전 분석" 화면 — 문서 성격 태그 + 추천 멘토 후보(도메인 고정 4명 + LLM이 붙인
@@ -123,9 +107,5 @@ export async function getMentorCandidates(projectId) {
     method: 'POST',
     headers: { ...authHeaders() },
   })
-  const data = await res.json()
-  if (!res.ok) {
-    throw new Error(data.detail || '추천 멘토를 불러오지 못했습니다.')
-  }
-  return data
+  return parseApiResponse(res, '추천 멘토를 불러오지 못했습니다.')
 }

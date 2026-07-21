@@ -1,4 +1,4 @@
-import { API_BASE_URL } from './client'
+import { API_BASE_URL, parseApiResponse } from './client'
 
 function authHeaders() {
   const token = localStorage.getItem('auth_token')
@@ -18,9 +18,6 @@ export async function getQuoteMatches(projectId, lookups) {
       lookups: lookups.map((l) => ({ id: l.id, chunk_id: l.chunkId })),
     }),
   })
-  const data = await res.json()
-  if (!res.ok) {
-    throw new Error(data.detail || '인용 조회에 실패했습니다.')
-  }
+  const data = await parseApiResponse(res, '인용 조회에 실패했습니다.')
   return data.matches // [{id, quote, found}]
 }

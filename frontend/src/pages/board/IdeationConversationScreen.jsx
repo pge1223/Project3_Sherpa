@@ -241,7 +241,16 @@ function ErrorBanner({ error, onRetry }) {
   )
 }
 
-export function IdeationScreen({ projectId, criteriaDocuments, ideationConv, setIdeationConv, onFinalized }) {
+export function IdeationScreen({
+  projectId,
+  criteriaDocuments,
+  ideationConv,
+  setIdeationConv,
+  onFinalized,
+  onBack,
+  saving = false,
+  saveError = '',
+}) {
   const [starting, setStarting] = useState(!ideationConv)
   const [sending, setSending] = useState(false)
   const [finalizing, setFinalizing] = useState(false)
@@ -306,7 +315,7 @@ export function IdeationScreen({ projectId, criteriaDocuments, ideationConv, set
   }, [ideationConv?.messages?.length])
 
   const phase = ideationConv?.phase
-  const busy = starting || sending || finalizing
+  const busy = starting || sending || finalizing || saving
   // awaiting_user_decision도 입력을 막지 않는다("더 이야기하기") — 백엔드
   // apply_user_answer가 이 경우도 받아 두 전문가 보완 의견으로 이어간다.
   const canReplyOrContinue = !!ideationConv && REPLYABLE_PHASES.has(phase) && !busy
@@ -338,7 +347,7 @@ export function IdeationScreen({ projectId, criteriaDocuments, ideationConv, set
       const data = await finalizeIdeationConversation(ideationConv.session_id)
       setIdeationConv(data)
       if (data.phase === 'finalized') {
-        onFinalized()
+        await onFinalized(data)
       }
     } catch (err) {
       setError(classifyIdeationConvError(err))
@@ -363,8 +372,14 @@ export function IdeationScreen({ projectId, criteriaDocuments, ideationConv, set
       <div style={{ maxWidth: 860 }}>
         <div className="badge green mono" style={{ marginBottom: 10 }}>주제 확정 완료</div>
         <h2 style={{ fontSize: 20, fontWeight: 700, marginBottom: 16 }}>이미 이 회의로 주제를 확정했어요</h2>
-        <button className="btn-primary" style={{ display: 'flex', alignItems: 'center', gap: 8 }} onClick={onFinalized}>
-          확정 결과 보기
+        {saveError && <p style={{ color: 'var(--coral)', fontSize: 13, marginBottom: 12 }}>{saveError}</p>}
+        <button
+          className="btn-primary"
+          style={{ display: 'flex', alignItems: 'center', gap: 8 }}
+          onClick={() => onFinalized(ideationConv)}
+          disabled={saving}
+        >
+          {saving ? '프로젝트 저장 중...' : saveError ? '프로젝트 저장 다시 시도' : '확정 결과 보기'}
         </button>
       </div>
     )
@@ -374,6 +389,11 @@ export function IdeationScreen({ projectId, criteriaDocuments, ideationConv, set
     <div className="rb-grid-2" style={{ maxWidth: 900, display: 'grid', gridTemplateColumns: '1fr 320px', gap: 20 }}>
       <div>
         <div className="badge coral mono" style={{ marginBottom: 10 }}>주제 아이디어 회의</div>
+        {onBack && (
+          <button className="btn-ghost" style={{ marginBottom: 10, padding: '5px 10px', fontSize: 12 }} onClick={onBack} disabled={busy}>
+            ← 이전
+          </button>
+        )}
         <h2 style={{ fontSize: 20, fontWeight: 700, marginBottom: 10 }}>기획 위원 · 개발 위원과 함께 좁혀가는 중</h2>
         <div style={{ display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
           {ideationConv && (
@@ -538,7 +558,7 @@ function proposalValueDisplay(value) {
   return String(value)
 }
 
-export function IdeationResultScreen({ ideationConv }) {
+export function IdeationResultScreen({ ideationConv, onBack }) {
   if (!ideationConv || ideationConv.phase !== 'finalized' || !ideationConv.idea_proposal) {
     return (
       <div style={{ maxWidth: 760 }}>
@@ -558,6 +578,11 @@ export function IdeationResultScreen({ ideationConv }) {
   return (
     <div style={{ maxWidth: 780 }}>
       <div className="badge green mono" style={{ marginBottom: 12 }}>주제 확정 · 기획서 작성 출발점</div>
+      {onBack && (
+        <button className="btn-ghost" style={{ marginBottom: 12, padding: '5px 10px', fontSize: 12 }} onClick={onBack}>
+          ← 이전
+        </button>
+      )}
       <h2 style={{ fontSize: 22, fontWeight: 700, marginBottom: 20 }}>{proposal.idea_name || '확정된 주제'}</h2>
 
       <div className="card glass">
