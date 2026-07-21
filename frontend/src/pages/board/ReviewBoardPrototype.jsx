@@ -17,6 +17,7 @@ import {
 import { analyzeProject, getAnalyzeProgress, getMentorCandidates } from "../../api/projectApi";
 import { isAcceptedDocument, formatFileSize, ACCEPTED_DOCUMENT_EXTENSIONS } from "../../utils/file";
 import { assessCriteriaContent } from "../../utils/criteriaAssessment";
+import WorkbenchScreen from "./WorkbenchScreen";
 
 // 가은/Claude(2026-07-20, INF-007): fetch-url이 색인을 백그라운드로 넘기면서
 // document_status가 "indexing"으로 오면 폴링해야 한다 — DocumentUploadPage.jsx와 동일 값.
@@ -40,11 +41,16 @@ const STAGE_LABELS = {
   ideation: "주제 아이디어 회의",
   ideation_result: "주제 확정",
   upload: "기획서 업로드 · 분석",
+  // 재인/Claude(2026-07-21): docs/REVIEW_BOARD_서비스_방향성_정리_20260720.md의
+  // "5. 핵심 UI: 시각적 인터랙티브 워크벤치" 구현 — 실제 화면은
+  // WorkbenchScreen.jsx(신규 파일)에 분리해서, 이 파일(가은님 소유)의 변경은
+  // 이 라벨/흐름 추가 정도로 최소화했다.
+  workbench: "AI 피드백",
 };
 
 const FLOW_BY_MODE = {
   pre: ["entry", "analysis", "ideation", "ideation_result"],
-  post: ["entry", "analysis", "upload"],
+  post: ["entry", "analysis", "upload", "workbench"],
 };
 
 const MIN_MENTORS = 2
@@ -995,8 +1001,12 @@ export default function ReviewBoardPrototype() {
     }
   }
 
-  function handleFeedbackReady(pid) {
-    navigate(`/projects/${pid}/feedback-chat`);
+  // 재인/Claude(2026-07-21): 예전엔 분석 끝나면 기존 대화형 피드백 화면
+  // (/feedback-chat)으로 이동했는데, 이제 그 대신 "AI 피드백"(워크벤치) 단계로
+  // 이 페이지 안에서 이어지도록 바꿨다 - 워크벤치 안에서 필요하면 그 화면(위원
+  // 소집)을 다시 불러오는 방식이라, 여기서는 완전히 벗어나지 않는다.
+  function handleFeedbackReady() {
+    setStage('workbench');
   }
 
   // 가은/Claude(2026-07-21): ?projectId=가 있으면 기존 프로젝트를 불러와 이어서 한다.
@@ -1077,6 +1087,7 @@ export default function ReviewBoardPrototype() {
       {stage === "upload" && (
         <UploadAndAnalyzeScreen projectId={projectId} onFeedbackReady={handleFeedbackReady} initialDocuments={targetDocuments} />
       )}
+      {stage === "workbench" && <WorkbenchScreen projectId={projectId} />}
     </Shell>
   );
 }
