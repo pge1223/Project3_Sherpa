@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Optional
 from app.db.mongodb import get_db
 from app.models.user import UserModel
@@ -18,3 +19,16 @@ class UserRepository:
         result = await collection.insert_one(user_data)
         user_data["_id"] = result.inserted_id
         return user_data
+
+    async def upsert_profile(self, email: str, profile_data: dict) -> dict:
+        collection = self.get_collection()
+        now = datetime.utcnow()
+        await collection.update_one(
+            {"email": email},
+            {
+                "$set": {"profile": profile_data, "updated_at": now},
+                "$setOnInsert": {"email": email, "created_at": now},
+            },
+            upsert=True,
+        )
+        return await collection.find_one({"email": email})
