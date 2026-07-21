@@ -2,11 +2,10 @@ import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { getProjects, deleteProject } from '../api/projectApi'
 import StatusBadge from '../components/common/StatusBadge'
-import StepSidebar from '../components/wizard/StepSidebar'
 
 function FolderIcon() {
   return (
-    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#7c4dff" strokeWidth="1.8">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--purple)" strokeWidth="1.8">
       <path d="M3 6.5C3 5.67 3.67 5 4.5 5h4.4c.35 0 .68.14.93.38L11 6.5h8.5c.83 0 1.5.67 1.5 1.5v9.5c0 .83-.67 1.5-1.5 1.5h-15C3.67 19 3 18.33 3 17.5v-11Z" />
     </svg>
   )
@@ -14,7 +13,7 @@ function FolderIcon() {
 
 function ChevronIcon() {
   return (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#a1a5b8" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--text-2)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <path d="M9 6l6 6-6 6" />
     </svg>
   )
@@ -90,12 +89,12 @@ function SwipeableRow({ project, isOpen, isLast, deleting, onOpenChange, onDelet
   const buttonWidth = Math.max(REVEAL_WIDTH, dragX)
 
   return (
-    <div style={{ position: 'relative', overflow: 'hidden', borderBottom: isLast ? 'none' : '1px solid #f2f1f8' }}>
+    <div style={{ position: 'relative', overflow: 'hidden', borderBottom: isLast ? 'none' : '1px solid var(--glass-border)' }}>
       <button
         style={{
           ...styles.deleteButton,
           width: buttonWidth,
-          background: pastFull ? '#b52f2f' : '#d64545',
+          background: pastFull ? '#a8432e' : '#c05339',
           transition: dragging ? 'none' : 'width 0.2s ease, background 0.15s ease',
         }}
         disabled={deleting}
@@ -173,22 +172,48 @@ export default function ProjectListPage() {
       .finally(() => setDeletingId(null))
   }
 
+  const doneCount = projects.filter((p) => p.status === 'reviewed').length
+
   return (
-    <div style={styles.page}>
-      <StepSidebar activeIndex={0} />
+    <div className="pl-root" style={styles.page}>
+      {/* 가은/Claude(2026-07-21): 실측 요청 — "projects 테마도 board처럼" + 오른쪽 패널
+          추가. board(ReviewBoardPrototype.jsx)의 --bg-0/--purple 등 팔레트·글래스 카드
+          룩을 그대로 옮겨왔다. 이 페이지는 이제 board에서만 진입하는 게 자연스러워
+          기존 StepSidebar(다른 레거시 화면들과 공유하는 컴포넌트라 직접 안 건드림) 대신
+          board와 같은 톤의 자체 헤더로 바꿨다. */}
+      <style>{`
+        .pl-root{
+          --bg-0:#faf8f4; --bg-1:#ffffff; --bg-2:#f1eee5;
+          --glass: rgba(255,255,255,0.72); --glass-border: rgba(28,26,46,0.10);
+          --purple:#7c5cea; --purple-dim: rgba(124,92,234,0.12);
+          --coral:#e0603d; --coral-dim: rgba(224,96,61,0.12);
+          --green:#16a37a; --green-dim: rgba(22,163,122,0.12);
+          --text-0:#1c1a2e; --text-1:#5b5770; --text-2:#918d9f;
+          --mono: 'JetBrains Mono', ui-monospace, monospace;
+        }
+        .pl-glass{ background:var(--glass); border:1px solid var(--glass-border); backdrop-filter: blur(14px); box-shadow: 0 2px 14px rgba(28,26,46,0.05); }
+        .pl-row:hover{ background:var(--bg-2); }
+        @media (max-width: 860px){
+          .pl-root{ flex-direction:column !important; }
+          .pl-panel{ display:none; }
+        }
+      `}</style>
 
       <main style={styles.main}>
-        <div style={styles.stepLabel}>STEP 1 / 5</div>
+        <div style={styles.headerRow}>
+          <div className="badge-wrap" style={styles.brand}>AI Review Board</div>
+        </div>
+
         <div style={styles.header}>
-          <h1 style={styles.title}>내 프로젝트</h1>
-          <button style={styles.newButton} onClick={() => navigate('/projects/new')}>
-            + 새 프로젝트
-          </button>
+          <div style={styles.titleRow}>
+            <button style={styles.backButton} onClick={() => navigate('/board')} aria-label="board로 돌아가기">&lt;</button>
+            <h1 style={styles.title}>내 프로젝트</h1>
+          </div>
         </div>
 
         {deleteError && <p style={styles.deleteErrorText}>{deleteError}</p>}
 
-        <div style={styles.card}>
+        <div className="pl-glass" style={styles.card}>
           {loading && <p style={styles.empty}>불러오는 중...</p>}
           {!loading && error && <p style={styles.empty}>{error}</p>}
           {!loading && !error && projects.length === 0 && <p style={styles.empty}>아직 프로젝트가 없습니다.</p>}
@@ -203,57 +228,92 @@ export default function ProjectListPage() {
                 deleting={deletingId === project.id}
                 onOpenChange={setOpenRowId}
                 onDelete={handleDelete}
-                onNavigate={(id) => navigate(`/projects/${id}`)}
+                // 가은/Claude(2026-07-21): 실측 요청 — "내 프로젝트"에서 프로젝트를
+                // 열면 board에서 올린 공고문·기획서·분석결과가 보여야 한다. 구
+                // ProjectDetailPage(/projects/:id)는 board와 무관한 레거시 화면이라
+                // 대신 /board로 이어서 하기(ReviewBoardPrototype.jsx의 ?projectId=
+                // 처리부 참고) 보낸다.
+                onNavigate={(id) => navigate(`/board?projectId=${id}`)}
               />
             ))}
         </div>
       </main>
+
+      <aside className="pl-panel" style={styles.assistantPanel}>
+        <div style={styles.assistantBubbleRow}>
+          <div style={styles.assistantIcon}>✨</div>
+          <div className="pl-glass" style={styles.assistantBubble}>
+            지금까지 등록한 공모전 프로젝트예요. 프로젝트를 누르면 이전에 올린 공고문·기획서와
+            분석 결과를 그대로 이어서 볼 수 있어요.
+          </div>
+        </div>
+
+        <div className="pl-glass" style={styles.overviewBox}>
+          <div style={styles.overviewTitle}>요약</div>
+          <div style={styles.overviewRow}>
+            <span style={styles.overviewLabel}>전체 프로젝트</span>
+            <span style={styles.overviewValue}>{projects.length}개</span>
+          </div>
+          <div style={styles.overviewRow}>
+            <span style={styles.overviewLabel}>검토 완료</span>
+            <span style={styles.overviewValue}>{doneCount}개</span>
+          </div>
+        </div>
+      </aside>
     </div>
   )
 }
 
-const ACCENT = '#7c4dff'
-
 const styles = {
   page: {
     minHeight: '100vh',
-    display: 'grid',
-    gridTemplateColumns: '260px 1fr',
-    background: '#f7f7fb',
-    color: '#1f2333',
+    display: 'flex',
+    background:
+      'radial-gradient(1100px 600px at 12% -10%, rgba(124,92,234,0.10), transparent 60%), ' +
+      'radial-gradient(900px 500px at 100% 10%, rgba(22,163,122,0.07), transparent 55%), ' +
+      'radial-gradient(800px 500px at 50% 110%, rgba(224,96,61,0.06), transparent 55%), ' +
+      '#faf8f4',
+    color: '#1c1a2e',
+    fontFamily: "'Pretendard', -apple-system, sans-serif",
   },
-  main: { padding: '24px 32px', maxWidth: 760, overflowY: 'auto' },
-  stepLabel: { fontSize: 12, fontWeight: 700, color: ACCENT, letterSpacing: 0.5 },
+  main: { flex: 1, minWidth: 0, padding: '32px 40px', maxWidth: 760, overflowY: 'auto' },
+  headerRow: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 },
+  brand: { fontSize: 13, fontWeight: 700, letterSpacing: '0.02em', color: '#1c1a2e' },
   header: {
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'space-between',
     margin: '4px 0 20px',
   },
+  titleRow: { display: 'flex', alignItems: 'center', gap: 10 },
+  backButton: {
+    background: 'transparent',
+    border: 'none',
+    borderRadius: 10,
+    width: 32,
+    height: 32,
+    fontSize: 18,
+    fontWeight: 700,
+    lineHeight: 1,
+    color: '#5b5770',
+    cursor: 'pointer',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+  },
   title: {
     margin: 0,
-    fontSize: 22,
+    fontSize: 24,
     fontWeight: 700,
   },
-  newButton: {
-    padding: '8px 16px',
-    borderRadius: 999,
-    background: ACCENT,
-    border: 'none',
-    color: '#fff',
-    fontSize: 13,
-    fontWeight: 600,
-    cursor: 'pointer',
-  },
-  deleteErrorText: { color: '#d64545', fontSize: 13, marginBottom: 10 },
+  deleteErrorText: { color: '#c05339', fontSize: 13, marginBottom: 10 },
   card: {
-    background: '#fff',
-    border: '1px solid #ece9f7',
-    borderRadius: 14,
+    borderRadius: 16,
     padding: '4px 20px',
   },
   empty: {
-    color: '#8b8fa3',
+    color: '#918d9f',
     fontSize: 14,
     padding: '24px 0',
     textAlign: 'center',
@@ -264,7 +324,7 @@ const styles = {
     justifyContent: 'space-between',
     padding: '16px 4px',
     cursor: 'pointer',
-    background: '#fff',
+    background: '#ffffff',
     touchAction: 'pan-y',
     userSelect: 'none',
   },
@@ -276,11 +336,11 @@ const styles = {
   rowTitle: {
     fontSize: 15,
     fontWeight: 600,
-    color: '#1f2333',
+    color: '#1c1a2e',
   },
   rowDate: {
     fontSize: 13,
-    color: '#8b8fa3',
+    color: '#918d9f',
     marginTop: 4,
   },
   rowRight: {
@@ -295,10 +355,49 @@ const styles = {
     bottom: 0,
     width: REVEAL_WIDTH,
     border: 'none',
-    background: '#d64545',
+    background: '#c05339',
     color: '#fff',
     fontSize: 13,
     fontWeight: 700,
     cursor: 'pointer',
   },
+  assistantPanel: {
+    width: 300,
+    flexShrink: 0,
+    padding: '32px 20px',
+  },
+  assistantBubbleRow: { display: 'flex', gap: 10, marginBottom: 20 },
+  assistantIcon: {
+    width: 28,
+    height: 28,
+    borderRadius: '50%',
+    background: 'linear-gradient(135deg, #7c5cea, #8b6ef0)',
+    color: '#0b0a16',
+    fontSize: 13,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+  },
+  assistantBubble: {
+    borderRadius: 12,
+    padding: 12,
+    fontSize: 12.5,
+    lineHeight: 1.6,
+    color: '#5b5770',
+  },
+  overviewBox: {
+    borderRadius: 12,
+    padding: 14,
+  },
+  overviewTitle: { fontSize: 12, fontWeight: 700, color: '#918d9f', marginBottom: 10 },
+  overviewRow: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    fontSize: 12.5,
+    padding: '6px 0',
+    borderTop: '1px solid rgba(28,26,46,0.10)',
+  },
+  overviewLabel: { color: '#918d9f' },
+  overviewValue: { fontWeight: 600, color: '#1c1a2e' },
 }
