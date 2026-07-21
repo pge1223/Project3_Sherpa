@@ -57,11 +57,16 @@ function ideationSessionStorageKey(projectId) {
 // 호출이라(스트리밍 없음) 도착한 텍스트를 한 글자씩 풀어내는 클라이언트 사이드
 // 타이핑 효과만 낸다(진짜 토큰 스트리밍이 아니다). 이미 화면에 있던 메시지(이전 단계
 // 갔다 돌아오거나 세션을 이어받은 경우)까지 다시 타이핑되면 어색하므로, "새로 도착한"
-// 위원 메시지에만 적용한다 — 어디서 이 구분을 하는지는 IdeationScreen의
-// newMessageIds 참고.
-function useTypewriter(text, enabled) {
+// 위원 메시지에만 적용한다 — 어디서 이 구분을 하고, 여러 버블이 같이 왔을 때 어떻게
+// 순서대로(앞 버블이 끝나야 다음 버블) 치는지는 IdeationScreen의 animation/processedCount
+// 참고. onComplete는 이 버블 타이핑이 끝났을 때 호출돼 다음 버블 차례로 넘긴다.
+function useTypewriter(text, enabled, onComplete) {
   const [display, setDisplay] = useState(enabled ? '' : text)
   const [done, setDone] = useState(!enabled)
+  // onComplete는 렌더마다 새로 만들어지는(인라인 화살표) 콜백이라 effect deps에 넣으면
+  // 애니메이션이 매번 재시작된다 — ref로 최신 값만 참조하고 deps에서는 뺀다.
+  const onCompleteRef = useRef(onComplete)
+  onCompleteRef.current = onComplete
 
   useEffect(() => {
     if (!enabled) {
@@ -73,20 +78,27 @@ function useTypewriter(text, enabled) {
     setDone(false)
     if (!text) {
       setDone(true)
+      // 내용이 빈(오류) 위원 메시지도 타이핑 큐에서 즉시 다음으로 넘어가게 완료를 알린다.
+      onCompleteRef.current?.()
       return
     }
     let i = 0
-    const CHARS_PER_TICK = Math.max(1, Math.ceil(text.length / 120)) // 긴 답변도 과하게 오래 걸리지 않도록
+    // 가은/Claude(2026-07-21): 타이핑을 조금 더 천천히(요청). 틱 간격을 늘리고, 긴 답변도
+    // 과하게 오래 걸리지 않도록 잡아두는 글자수 상한(길이/N)의 N을 키웠다 — 짧은 답변은
+    // 틱 간격만큼, 긴 답변은 대략 (N × 틱 간격)만큼 걸린다.
+    const CHARS_PER_TICK = Math.max(1, Math.ceil(text.length / 150))
     const timer = setInterval(() => {
       i += CHARS_PER_TICK
       if (i >= text.length) {
         setDisplay(text)
         setDone(true)
         clearInterval(timer)
+        // 이 버블의 타이핑이 끝났음을 부모에게 알려 다음 버블 타이핑을 시작하게 한다.
+        onCompleteRef.current?.()
       } else {
         setDisplay(text.slice(0, i))
       }
-    }, 18)
+    }, 28)
     return () => clearInterval(timer)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [text, enabled])
@@ -94,11 +106,15 @@ function useTypewriter(text, enabled) {
   return { display, done }
 }
 
-function MessageBubble({ message, typing }) {
+function MessageBubble({ message, typing, hidden, onComplete }) {
   const meta = speakerMetaFor(message)
   const isRight = meta.align === 'right'
   const hasContent = !!message.content?.trim()
-  const { display, done } = useTypewriter(message.content || '', typing)
+  const { display, done } = useTypewriter(message.content || '', typing, onComplete)
+
+  // 앞 버블이 아직 타이핑 중이라 순서가 오지 않은 위원 버블 — 아직 화면에 띄우지 않는다
+  // (실제 채팅처럼 차례가 오면 그때 나타난다). 훅은 위에서 이미 다 호출한 뒤라 순서 안전.
+  if (hidden) return null
 
   if (!hasContent) {
     return (
@@ -305,16 +321,37 @@ export function IdeationScreen({
 
   // 가은/Claude(2026-07-21): 타이핑 효과는 "새로 도착한" 위원 메시지에만 건다 — 마운트
   // 시점(세션을 이어받아 이미 대화 내역이 있는 경우 포함)에 있던 메시지는 전부
-  // "이미 본 것"으로 미리 표시해 다시 타이핑되지 않게 한다. 렌더마다 새로 계산하고
-  // 커밋 후 effect에서 baseline을 갱신하는 방식이라 컴포넌트가 리렌더돼도 같은
-  // 메시지가 두 번 타이핑되지 않는다.
-  const seenMessageIdsRef = useRef(new Set((ideationConv?.messages || []).map((m) => m.message_id)))
+  // "이미 본 것"으로 미리 표시해 다시 타이핑되지 않게 한다.
+  //
+  // 가은/Claude(2026-07-21, 순차 타이핑): 한 턴에 진행자·기획 위원 두 버블이 같이
+  // 도착하면 예전엔 두 버블이 동시에 타이핑됐다. 진짜 채팅처럼 앞 버블(진행자)이 다
+  // 쳐지고 나서 다음 버블(기획 위원)이 이어서 쳐지도록, 새로 도착한 위원 메시지들을
+  // 도착 순서대로 큐(animation.ids)에 담고 지금 칠 차례인 하나(animation.index)만
+  // 타이핑하게 한다. 큐보다 뒤 차례인 버블은 차례가 올 때까지 화면에 띄우지 않는다.
   const currentMessages = ideationConv?.messages || []
-  const currentMessageIds = new Set(currentMessages.map((m) => m.message_id))
-  const newMessageIds = new Set([...currentMessageIds].filter((id) => !seenMessageIdsRef.current.has(id)))
-  useEffect(() => {
-    seenMessageIdsRef.current = currentMessageIds
-  })
+  const [animation, setAnimation] = useState(null) // { ids: string[], index: number } | null
+
+  // 렌더 도중 "직전 렌더 대비 새로 붙은 메시지"를 감지해 타이핑 큐를 세팅한다(React의
+  // "렌더 중 state 조정" 패턴). effect가 아니라 렌더에서 하므로 새 버블이 한 번이라도
+  // 완성본(typing=false)으로 커밋됐다가 다시 지워지며 타이핑되는 깜빡임이 없다.
+  // messages는 항상 뒤에 append되므로 processedCount 이후 꼬리만 새 메시지다. 마운트
+  // 시점(=이어받은 세션)에 있던 메시지는 processedCount 초깃값에 포함돼 타이핑되지 않는다.
+  const [processedCount, setProcessedCount] = useState(currentMessages.length)
+  if (currentMessages.length !== processedCount) {
+    const appended = currentMessages.slice(processedCount)
+    const newCommitteeIds = appended.filter((m) => m.speaker_id !== 'user').map((m) => m.message_id)
+    setProcessedCount(currentMessages.length)
+    setAnimation(newCommitteeIds.length > 0 ? { ids: newCommitteeIds, index: 0 } : null)
+  }
+
+  // 지금 칠 차례의 버블이 끝나면 다음 차례로 넘어가고, 마지막까지 끝나면 큐를 비운다.
+  function advanceTyping() {
+    setAnimation((a) => {
+      if (!a) return a
+      const next = a.index + 1
+      return next >= a.ids.length ? null : { ...a, index: next }
+    })
+  }
 
   async function runStart() {
     setStarting(true)
@@ -368,7 +405,7 @@ export function IdeationScreen({
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
-  }, [ideationConv?.messages?.length])
+  }, [ideationConv?.messages?.length, animation?.index])
 
   const phase = ideationConv?.phase
   const busy = starting || sending || finalizing || saving
@@ -450,7 +487,15 @@ export function IdeationScreen({
             ← 이전
           </button>
         )}
-        <h2 style={{ fontSize: 20, fontWeight: 700, marginBottom: 10 }}>기획 위원 · 개발 위원과 함께 좁혀가는 중</h2>
+        {ideationConv?.competition_name ? (
+          <>
+            <div style={{ fontSize: 12, color: 'var(--text-2)', fontFamily: 'var(--mono)', marginBottom: 4 }}>공모전 주제</div>
+            <h2 style={{ fontSize: 20, fontWeight: 700, marginBottom: 4 }}>{ideationConv.competition_name}</h2>
+            <div style={{ fontSize: 13, color: 'var(--text-2)', marginBottom: 10 }}>기획 위원 · 개발 위원과 함께 좁혀가는 중</div>
+          </>
+        ) : (
+          <h2 style={{ fontSize: 20, fontWeight: 700, marginBottom: 10 }}>기획 위원 · 개발 위원과 함께 좁혀가는 중</h2>
+        )}
         <div style={{ display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
           {ideationConv && (
             <span className="badge amber mono">
@@ -468,13 +513,18 @@ export function IdeationScreen({
           {starting && !ideationConv && (
             <p style={{ color: 'var(--text-2)', fontSize: 13 }}>공모전 분석을 바탕으로 아이디어 후보를 만들고 있어요...</p>
           )}
-          {currentMessages.map((m) => (
-            <MessageBubble
-              key={m.message_id}
-              message={m}
-              typing={m.speaker_id !== 'user' && newMessageIds.has(m.message_id)}
-            />
-          ))}
+          {currentMessages.map((m) => {
+            const animPos = animation ? animation.ids.indexOf(m.message_id) : -1
+            return (
+              <MessageBubble
+                key={m.message_id}
+                message={m}
+                typing={animPos !== -1 && animPos === animation.index}
+                hidden={animPos !== -1 && animPos > animation.index}
+                onComplete={advanceTyping}
+              />
+            )
+          })}
           {(sending || finalizing) && (
             <p style={{ fontSize: 12.5, color: 'var(--text-2)' }}>
               {statusLabelFor({ phase, starting, sending, finalizing })}...

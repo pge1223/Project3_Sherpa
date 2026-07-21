@@ -230,6 +230,10 @@ def _serialize_state(state: IdeationConvState) -> dict:
         "phase": state["phase"],
         "round": state["round"],
         "max_rounds": state["max_rounds"],
+        # 가은/Claude(2026-07-21): /board "주제 아이디어 회의" 화면 헤더에 지금 어떤 공모전
+        # 주제로 좁혀가는 중인지 보여주려고 노출한다. notice_and_criteria는 start 시점에
+        # 넣어둔 값이라 세션을 이어받아(resume) 다시 그려도 그대로 유지된다 — 순수 추가 필드.
+        "competition_name": (state.get("notice_and_criteria") or {}).get("competition_name", ""),
         "messages": state["messages"],
         "consensus": state["consensus"],
         "unresolved_issues": state["unresolved_issues"],
