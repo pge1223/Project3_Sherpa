@@ -708,8 +708,7 @@ evidence는 official_facts/strategic_analysis 중 실제로 중요한 판단 3~6
 
 
 def _call_announcement_analysis_llm(prompt: str) -> str:
-    profile = (settings.LLM_PROFILE or "dev").lower()
-    model = settings.QUALITY_LLM_REVIEWER_MODEL if profile == "quality" else settings.DEV_LLM_REVIEWER_MODEL
+    model = settings.reviewer_model()
     client = OpenAI(api_key=settings.OPENAI_API_KEY, max_retries=1)
     resp = client.chat.completions.create(
         model=model,
