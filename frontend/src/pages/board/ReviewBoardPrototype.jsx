@@ -53,7 +53,11 @@ const STAGE_LABELS = {
 
 const FLOW_BY_MODE = {
   pre: ["entry", "analysis", "ideation", "ideation_result"],
-  post: ["entry", "analysis", "upload", "workbench"],
+  // 가은/Claude(2026-07-21): 실측 요청 — "작성 후(문서 피드백)"로 들어오면 공모전 분석
+  // 화면 없이 바로 기획서 업로드·분석으로 간다. 공모전 분석은 주제를 정하기 전(작성 전)
+  // 에나 필요한 단계라서다. entry에서 등록한 공고문(criteria)은 화면만 안 거칠 뿐,
+  // 색인은 그대로 되어 피드백 때 심사기준 근거로 쓰인다.
+  post: ["entry", "upload", "workbench"],
 };
 
 // 가은/Claude(2026-07-21): "작성 전" 흐름에서 확정한 아이디어 프로젝트를 표시하는 마커.
@@ -74,6 +78,43 @@ function _resumedDocStatus(backendStatus) {
   if (backendStatus === 'indexed_empty') return 'warning'
   if (backendStatus === 'indexing_failed' || backendStatus === 'conversion_failed' || backendStatus === 'indexing_timeout') return 'error'
   return 'done'
+}
+
+// 가은/Claude(2026-07-21): 원래 EntryScreen(공고문 URL) 전용이던 색인 폴링을 모듈 레벨로
+// 올렸다 — 파일 업로드(공고문 파일·평가 대상 기획서)도 색인이 백그라운드로 바뀌면서
+// (백엔드 upload_document, INF-007과 동일 패턴) 같은 폴링이 필요해져서다. updateDoc은
+// 각 화면의 문서 행 갱신 함수를 받는다. conversion_failed(HWP/HWPX 변환 실패)는 폴링
+// 응답의 conversion_metadata.conversion_error(사용자용 한국어 메시지)를 그대로 보여준다.
+function pollDocumentIndexing(pid, documentId, rowId, contentStatus, contentMeta, updateDoc) {
+  let attempts = 0;
+  const timer = setInterval(async () => {
+    attempts += 1;
+    try {
+      const statusResult = await getDocumentStatus(pid, documentId);
+      if (statusResult.status === 'indexing') {
+        if (attempts >= _DOCUMENT_STATUS_POLL_MAX_ATTEMPTS) {
+          clearInterval(timer);
+          updateDoc(rowId, { status: 'error', meta: '색인 상태 확인이 너무 오래 걸리고 있어요 — 새로고침해서 다시 확인해주세요.' });
+        }
+        return;
+      }
+      clearInterval(timer);
+      if (statusResult.status === 'indexing_failed') {
+        updateDoc(rowId, { status: 'error', meta: '문서 색인 중 오류가 발생했습니다.' });
+      } else if (statusResult.status === 'indexing_timeout') {
+        updateDoc(rowId, { status: 'error', meta: '색인이 시간 내에 끝나지 않았습니다 — 다시 시도해주세요.' });
+      } else if (statusResult.status === 'conversion_failed') {
+        updateDoc(rowId, { status: 'error', meta: statusResult.conversion_metadata?.conversion_error || '문서를 변환하지 못했습니다.' });
+      } else if (statusResult.status === 'indexed_empty') {
+        updateDoc(rowId, { status: 'warning', meta: '문서에서 읽을 수 있는 텍스트를 찾지 못했어요 — 파일을 확인해주세요.' });
+      } else {
+        updateDoc(rowId, { status: contentStatus, meta: contentMeta });
+      }
+    } catch (err) {
+      clearInterval(timer);
+      updateDoc(rowId, { status: 'error', meta: err.message });
+    }
+  }, _DOCUMENT_STATUS_POLL_INTERVAL_MS);
 }
 
 function Shell({ children, active, mode, onNavigate, showNav }) {
@@ -264,34 +305,6 @@ function EntryScreen({ onEnter, onModeSelect, loading, error, projectId, ensureP
     }
   }
 
-  function pollDocumentIndexing(pid, documentId, rowId, contentStatus, contentMeta) {
-    let attempts = 0;
-    const timer = setInterval(async () => {
-      attempts += 1;
-      try {
-        const statusResult = await getDocumentStatus(pid, documentId);
-        if (statusResult.status === 'indexing') {
-          if (attempts >= _DOCUMENT_STATUS_POLL_MAX_ATTEMPTS) {
-            clearInterval(timer);
-            updateDoc(rowId, { status: 'error', meta: '색인 상태 확인이 너무 오래 걸리고 있어요 — 새로고침해서 다시 확인해주세요.' });
-          }
-          return;
-        }
-        clearInterval(timer);
-        if (statusResult.status === 'indexing_failed') {
-          updateDoc(rowId, { status: 'error', meta: '공고문 색인 중 오류가 발생했습니다.' });
-        } else if (statusResult.status === 'indexing_timeout') {
-          updateDoc(rowId, { status: 'error', meta: '색인이 시간 내에 끝나지 않았습니다 — 다시 시도해주세요.' });
-        } else {
-          updateDoc(rowId, { status: contentStatus, meta: contentMeta });
-        }
-      } catch (err) {
-        clearInterval(timer);
-        updateDoc(rowId, { status: 'error', meta: err.message });
-      }
-    }, _DOCUMENT_STATUS_POLL_INTERVAL_MS);
-  }
-
   async function handleFetchCriteriaUrl() {
     if (!criteriaUrl.trim()) {
       setCriteriaError('URL을 입력해주세요.');
@@ -312,7 +325,7 @@ function EntryScreen({ onEnter, onModeSelect, loading, error, projectId, ensureP
       // 보여주므로, 여기서는 원문 슬라이스를 더 이상 안 만든다.
       if (result.document_status === 'indexing' && result.document_id) {
         setDocuments((prev) => [...prev, { id, backendId: result.document_id, name: title, meta: '공고문을 색인하는 중...', status: 'embedding' }]);
-        pollDocumentIndexing(pid, result.document_id, id, contentStatus, contentMeta);
+        pollDocumentIndexing(pid, result.document_id, id, contentStatus, contentMeta, updateDoc);
       } else {
         setDocuments((prev) => [...prev, { id, backendId: result.document_id, name: title, meta: contentMeta, status: contentStatus }]);
       }
@@ -332,6 +345,13 @@ function EntryScreen({ onEnter, onModeSelect, loading, error, projectId, ensureP
       const doc = await uploadDocument(pid, file, 'pdf', 'criteria');
       if (doc.status === 'conversion_failed') {
         updateDoc(id, { backendId: doc.id, status: 'error', meta: doc.conversion_metadata?.conversion_error || '문서를 변환하지 못했습니다.' });
+        return;
+      }
+      // 가은/Claude(2026-07-21): 색인이 백그라운드로 바뀌어 업로드 응답이 "indexing"으로
+      // 즉시 돌아온다 — 행은 "색인 중" 그대로 두고 폴링으로 완료를 확인한다.
+      if (doc.status === 'indexing') {
+        updateDoc(id, { backendId: doc.id });
+        pollDocumentIndexing(pid, doc.id, id, 'done', formatFileSize(file.size), updateDoc);
         return;
       }
       updateDoc(id, { backendId: doc.id, status: 'done', meta: formatFileSize(file.size) });
@@ -890,6 +910,15 @@ function UploadAndAnalyzeScreen({ projectId, onFeedbackReady, onBack, initialDoc
         updateDoc(id, { status: 'error', meta: doc.conversion_metadata?.conversion_error || '문서를 변환하지 못했습니다.' })
         return
       }
+      // 가은/Claude(2026-07-21): 실측 요청("업로드가 느리다") — 색인이 백그라운드로 바뀌어
+      // 업로드 응답이 "indexing"으로 즉시 돌아온다. 행을 "색인 중"으로 바꾸고 폴링으로
+      // 완료를 확인한다. "분석 시작" 버튼은 계속 status==='done'(색인 완료)에만 열린다 —
+      // 분석(멘토 추천·리뷰)이 색인된 청크를 근거로 쓰기 때문이다.
+      if (doc.status === 'indexing') {
+        updateDoc(id, { backendId: doc.id, status: 'embedding', meta: '문서를 색인하는 중...' })
+        pollDocumentIndexing(projectId, doc.id, id, 'done', formatFileSize(file.size), updateDoc)
+        return
+      }
       updateDoc(id, { status: 'done' })
     } catch (err) {
       updateDoc(id, { status: 'error', meta: err.message })
@@ -1003,7 +1032,9 @@ function UploadAndAnalyzeScreen({ projectId, onFeedbackReady, onBack, initialDoc
                     <div style={{ fontSize: 12, color: 'var(--text-2)' }}>{doc.meta}</div>
                   </div>
                   {doc.status === 'uploading' && <span className="badge amber mono">업로드 중</span>}
+                  {doc.status === 'embedding' && <span className="badge amber mono">색인 중</span>}
                   {doc.status === 'done' && <span className="badge green mono">✓ 완료</span>}
+                  {doc.status === 'warning' && <span className="badge amber mono">확인 필요</span>}
                   {doc.status === 'error' && <span className="badge coral mono">실패</span>}
                 </div>
               ))}
@@ -1174,7 +1205,8 @@ export default function ReviewBoardPrototype() {
     setEntryLoading(true);
     try {
       await ensureProject();
-      setStage("analysis");
+      // 작성 후(문서 피드백)는 공모전 분석을 거치지 않고 바로 기획서 업로드·분석으로.
+      setStage(m === "post" ? "upload" : "analysis");
     } catch (err) {
       setEntryError(err.message);
     } finally {
@@ -1193,8 +1225,8 @@ export default function ReviewBoardPrototype() {
   // 가은/Claude(2026-07-21): ?projectId=가 있으면 기존 프로젝트를 불러와 이어서 한다.
   // 프로젝트 설명이 IDEA_PROJECT_MARKER면 "작성 전" 흐름에서 주제를 확정한 프로젝트로
   // 보고 mode를 pre로 두고 분석 화면부터 보여준다(문서가 없어도 entry에 멈추지 않도록).
-  // 그 외에는 기존대로: 기획서(target)가 있으면 "기획서 업로드" 단계로, 공고문
-  // (criteria)만 있으면 "공모전 분석" 단계로 보낸다. 아무 문서도 없으면 entry에 그대로 둔다.
+  // 그 외(post)는 문서가 하나라도 있으면 "기획서 업로드·분석" 단계로 보낸다(post 흐름에는
+  // 공모전 분석 단계가 없다). 아무 문서도 없으면 entry에 그대로 둔다.
   useEffect(() => {
     if (!resumeProjectId) return;
     let cancelled = false;
@@ -1233,9 +1265,10 @@ export default function ReviewBoardPrototype() {
           })),
         );
 
+        // post 흐름에는 이제 공모전 분석 단계가 없다 — 문서(기획서든 공고문이든)가
+        // 하나라도 있으면 기획서 업로드·분석으로 보낸다. 아무것도 없으면 entry 유지.
         if (isPreFlow) setStage('analysis');
-        else if (targetDocs.length > 0) setStage('upload');
-        else if (criteriaDocs.length > 0) setStage('analysis');
+        else if (targetDocs.length > 0 || criteriaDocs.length > 0) setStage('upload');
       })
       .catch((err) => { if (!cancelled) setResumeError(err.message); })
       .finally(() => { if (!cancelled) setResuming(false); });

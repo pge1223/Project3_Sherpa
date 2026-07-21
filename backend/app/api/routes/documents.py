@@ -262,6 +262,81 @@ async def _index_webpage_background(
     await document_repo.update_fields(document_id, {"status": status_value})
 
 
+# 가은/Claude(2026-07-21): 실측 요청 — 파일 업로드(평가 대상 기획서 포함)가 느리다.
+# 원인은 fetch-url(INF-007)과 달리 파일 업로드는 파싱→청킹→임베딩→Chroma 색인을 응답
+# 전에 동기로 다 끝내고 있어서다. 같은 패턴으로 색인을 백그라운드로 넘긴다 — 업로드
+# 응답은 즉시(status="indexing") 돌아가고, 프론트는 기존 status 엔드포인트(DOC-004)를
+# 폴링한다. 타임아웃은 웹페이지보다 여유 있게 둔다(HWP→PDF 변환 + 대용량 파일 고려).
+_FILE_INDEXING_TIMEOUT_SECONDS = 180
+
+
+async def _index_file_background(
+    *,
+    document_id: str,
+    project_id: str,
+    file_path: str,
+    filename: str,
+    document_role: str,
+) -> None:
+    """파일 파싱+색인을 백그라운드로 돌리고 끝나면 documents의 status/parsed_text/
+    conversion_metadata를 patch한다(_index_webpage_background와 동일 패턴). 동기 시절
+    응답에 실어 보내던 HWP/HWPX 변환 실패(user_message)도 여기서 conversion_metadata에
+    저장한다 — 프론트는 status 폴링 응답의 conversion_metadata로 같은 안내를 보여준다."""
+    _index_started = time.time()
+    logger.info("[upload] 색인(백그라운드) 시작 document_id=%s filename=%s", document_id, filename)
+    try:
+        stored_count, parsed_text, conversion_metadata = await asyncio.wait_for(
+            run_in_threadpool(_parse_chunk_and_index, document_id, project_id, file_path, filename, document_role),
+            timeout=_FILE_INDEXING_TIMEOUT_SECONDS,
+        )
+        await document_repo.update_fields(
+            document_id,
+            {
+                "status": "indexed" if stored_count > 0 else "indexed_empty",
+                "parsed_text": parsed_text,
+                "conversion_metadata": conversion_metadata,
+            },
+        )
+        logger.info(
+            "[upload] === 색인(백그라운드) 완료 === document_id=%s elapsed=%.1fs stored_count=%d",
+            document_id,
+            time.time() - _index_started,
+            stored_count,
+        )
+        return
+    except asyncio.TimeoutError:
+        logger.warning(
+            "[upload] 색인(백그라운드) 타임아웃: document_id=%s (%ds 초과) elapsed=%.1fs",
+            document_id,
+            _FILE_INDEXING_TIMEOUT_SECONDS,
+            time.time() - _index_started,
+        )
+        await document_repo.update_fields(document_id, {"status": "indexing_timeout"})
+    except DocumentConversionError as exc:
+        logger.warning("[upload] 문서 변환 실패(백그라운드): document_id=%s error=%s", document_id, exc)
+        await document_repo.update_fields(
+            document_id,
+            {
+                "status": "conversion_failed",
+                "conversion_metadata": {
+                    "original_file_type": os.path.splitext(filename)[1].lstrip(".").lower(),
+                    "processing_file_type": None,
+                    "conversion_status": "failed",
+                    "conversion_error": exc.user_message,
+                    "converter_name": None,
+                    "conversion_duration_ms": None,
+                },
+            },
+        )
+    except Exception:
+        logger.exception(
+            "[upload] 색인(백그라운드) 실패: document_id=%s elapsed=%.1fs",
+            document_id,
+            time.time() - _index_started,
+        )
+        await document_repo.update_fields(document_id, {"status": "indexing_failed"})
+
+
 # 가은/Claude (2026-07-15): 비회원 로그인은 Authorization 헤더 없이 그대로 들어온다 —
 # 헤더가 없으면 401 대신 고정 게스트 사용자로 통과시킨다 (projects.py와 동일 컨벤션).
 GUEST_USER_EMAIL = "guest@local"
@@ -444,44 +519,26 @@ async def upload_document(
         mime_type=file.content_type or "application/octet-stream",
         source_type=source_type,
         document_role=document_role,
+        status="indexing",
     )
 
     result = await document_repo.create(document)
 
-    # RAG-001~003: 파싱 -> 청킹 -> 임베딩 -> Chroma 색인 (실패해도 업로드 자체는 성공으로 유지)
-    try:
-        stored_count, parsed_text, conversion_metadata = await run_in_threadpool(
-            _parse_chunk_and_index, result, project_id, file_path, file.filename, document_role
+    # RAG-001~003: 파싱 -> 청킹 -> 임베딩 -> Chroma 색인.
+    # 가은/Claude(2026-07-21): 색인이 끝날 때까지 응답을 막지 않는다(INF-007과 동일 패턴,
+    # 위 _index_file_background 주석 참고) — status="indexing"으로 즉시 응답하고, 프론트가
+    # GET /{project_id}/{document_id}/status(DOC-004)를 폴링해 완료를 확인한다. HWP/HWPX
+    # 변환 실패(DocumentConversionError.user_message)도 이제 폴링 응답의
+    # conversion_metadata로 전달된다.
+    asyncio.create_task(
+        _index_file_background(
+            document_id=result,
+            project_id=project_id,
+            file_path=file_path,
+            filename=file.filename,
+            document_role=document_role,
         )
-        document.status = "indexed" if stored_count > 0 else "indexed_empty"
-        document.parsed_text = parsed_text
-        document.conversion_metadata = conversion_metadata
-        await document_repo.update_fields(
-            result,
-            {"status": document.status, "parsed_text": parsed_text, "conversion_metadata": conversion_metadata},
-        )
-    # 가은/Claude(2026-07-16): HWP/HWPX 변환 실패는 일반 색인 실패와 구분한다 —
-    # DocumentConversionError.user_message는 서버 경로/명령어 없이 그대로 프론트에
-    # 보여줘도 되는 한국어 메시지라(ai/rag/converters/exceptions.py), conversion_metadata에
-    # 담아 응답에 실어 보낸다(INTEGRATION.md 6번).
-    except DocumentConversionError as exc:
-        logger.warning("문서 변환 실패: document_id=%s error=%s", result, exc)
-        document.status = "conversion_failed"
-        document.conversion_metadata = {
-            "original_file_type": os.path.splitext(file.filename)[1].lstrip(".").lower(),
-            "processing_file_type": None,
-            "conversion_status": "failed",
-            "conversion_error": exc.user_message,
-            "converter_name": None,
-            "conversion_duration_ms": None,
-        }
-        await document_repo.update_fields(
-            result, {"status": document.status, "conversion_metadata": document.conversion_metadata}
-        )
-    except Exception:
-        logger.exception("문서 색인 중 오류가 발생했습니다: document_id=%s", result)
-        document.status = "indexing_failed"
-        await document_repo.update_status(result, document.status)
+    )
 
     return DocumentResponse(
         id=result,
@@ -606,6 +663,10 @@ async def get_document_status(
         "original_filename": document["original_filename"],
         "status": document["status"],
         "updated_at": document["updated_at"],
+        # 가은/Claude(2026-07-21): 파일 업로드 색인이 백그라운드로 바뀌면서(위 upload_document
+        # 참고) HWP/HWPX 변환 실패 안내(user_message)를 업로드 응답에 실을 수 없게 됐다 —
+        # 폴링하는 프론트가 여기서 읽는다. 순수 추가 필드(기존 폴링 클라이언트는 무시하면 그대로 동작).
+        "conversion_metadata": document.get("conversion_metadata"),
     }
 
 

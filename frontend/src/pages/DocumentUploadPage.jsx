@@ -148,6 +148,14 @@ export default function DocumentUploadPage() {
         })
         return
       }
+      // 가은/Claude(2026-07-21): 파일 색인이 백그라운드로 바뀌어(백엔드 upload_document,
+      // INF-007과 동일 패턴) 업로드 응답이 "indexing"으로 즉시 돌아온다 — URL 흐름과
+      // 똑같이 status 폴링으로 완료를 확인한다.
+      if (doc.status === 'indexing') {
+        updateDoc(id, { progress: 75 })
+        pollDocumentIndexing(pid, doc.id, id, 'done', formatFileSize(file.size))
+        return
+      }
       updateDoc(id, { status: 'done', progress: 100 })
     } catch (err) {
       updateDoc(id, { status: 'error', progress: 100, meta: err.message })
@@ -193,14 +201,23 @@ export default function DocumentUploadPage() {
         }
         clearInterval(timer)
         if (statusResult.status === 'indexing_failed') {
-          updateDoc(rowId, { status: 'error', meta: '공고문 색인 중 오류가 발생했습니다.' })
+          updateDoc(rowId, { status: 'error', progress: 100, meta: '문서 색인 중 오류가 발생했습니다.' })
         } else if (statusResult.status === 'indexing_timeout') {
           updateDoc(rowId, {
             status: 'error',
+            progress: 100,
             meta: '색인이 시간 내에 끝나지 않았습니다 — 다시 시도해주세요.',
           })
+        } else if (statusResult.status === 'conversion_failed') {
+          // 가은/Claude(2026-07-21): 파일 색인 백그라운드화로 HWP/HWPX 변환 실패도 이제
+          // 폴링 응답(conversion_metadata, DOC-004에 추가된 필드)으로 도착한다.
+          updateDoc(rowId, {
+            status: 'error',
+            progress: 100,
+            meta: statusResult.conversion_metadata?.conversion_error || '문서를 변환하지 못했습니다.',
+          })
         } else {
-          updateDoc(rowId, { status: contentStatus, meta: contentMeta })
+          updateDoc(rowId, { status: contentStatus, progress: 100, meta: contentMeta })
         }
       } catch (err) {
         clearInterval(timer)
