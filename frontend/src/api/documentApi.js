@@ -86,3 +86,14 @@ export async function getDocumentPreview(projectId, documentId) {
   })
   return parseApiResponse(res, '문서 원문을 불러오지 못했습니다.')
 }
+
+// 재인/Claude(2026-07-21): "AI 피드백" 워크벤치가 기획서를 워드/한글 원본처럼(굵게·
+// 기울임 서식 살려서) 보여주기 위해 추가 - 완전히 새 백엔드 엔드포인트(GET
+// /{project_id}/{document_id}/preview-html, ai/rag/parsers/html_render.py가 만든 HTML을
+// 반환)를 호출한다. 기존 getDocumentPreview(순수 텍스트)는 그대로 두고 별도로 추가.
+export async function getDocumentPreviewHtml(projectId, documentId) {
+  const res = await fetch(`${API_BASE_URL}/documents/${projectId}/${documentId}/preview-html`, {
+    headers: { ...authHeaders() },
+  })
+  return parseApiResponse(res, '문서 원문(서식)을 불러오지 못했습니다.')
+}

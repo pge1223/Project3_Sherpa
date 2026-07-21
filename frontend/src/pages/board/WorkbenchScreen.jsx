@@ -1,29 +1,38 @@
 import { useEffect, useMemo, useState } from 'react'
-import { AlertCircle, Lightbulb, MessageSquare, Sparkles } from 'lucide-react'
-import { getDocuments, getDocumentPreview } from '../../api/documentApi'
-import { getQuoteMatches } from '../../api/workbenchApi'
+import { AlertCircle, AlertTriangle, Lightbulb, MessageSquare, Sparkles } from 'lucide-react'
+import { getDocuments } from '../../api/documentApi'
+import { getQuoteMatches, getContextCheck } from '../../api/workbenchApi'
+import { API_BASE_URL } from '../../api/client'
+import PdfDocumentView from './PdfDocumentView'
 
 // 재인/Claude(2026-07-21): docs/REVIEW_BOARD_서비스_방향성_정리_20260720.md의
-// "5. 핵심 UI: 시각적 인터랙티브 워크벤치" 1차 구현.
+// "5. 핵심 UI: 시각적 인터랙티브 워크벤치" 구현.
 //
 // 데이터 출처:
-// - 기획서 원문: 기존 DOC-006 문서 미리보기 엔드포인트(parsed_text)를 그대로 가져다 씀
-//   (ReviewBoardPrototype.jsx의 UploadAndAnalyzeScreen이 올린 target 문서를
-//   getDocuments()로 다시 찾아서 preview 호출).
+// - 기획서 원문: /documents/{project_id}/{document_id}/preview-pdf(backend/app/api/routes/
+//   documents.py, LibreOffice로 원본을 PDF로 변환)를 pdf.js(PdfDocumentView.jsx)로 그린다.
+//   HTML 재구성 방식을 먼저 시도했으나, docx 원본엔 "몇 페이지에서 어떻게 줄바꿈되는지"
+//   정보가 없어(렌더러가 그릴 때 계산하는 값) 워드/한글 원본과 완전히 같은 페이지 모습을
+//   못 만들었다 - 그래서 PDF 변환 + pdf.js로 바꿨다.
 // - 위원 피드백(issues/suggestions): UploadAndAnalyzeScreen이 분석 끝나고
-//   sessionStorage에 저장해둔 review_output(JSON, MentorFeedbackChatPage.jsx가 쓰던
-//   것과 동일한 캐시 키)을 그대로 읽는다.
+//   sessionStorage에 저장해둔 review_output(JSON)을 그대로 읽는다.
 //
-// 하이라이트 위치: 위원이 애초에 인용한 evidence.chunk_id로 벡터DB에서 청크 원문을
-// ID 직접 조회한다(backend/app/api/routes/workbench.py, 완전히 새 파일 - AI 재호출
-// 없이 항상 원문 그대로 반환). GPT에게 원문을 다시 찾아달라고 재질문하는 방식도
-// 만들어서 비교해봤으나, 청크 조회 쪽이 AI 호출 없이도 항상 정확해 이 방식만 남겼다.
-// evidence_ids가 criterion(평가기준) 단위로만 달려 있어(issue/suggestion 문장 하나하나가
-// 아님), 한 기준 아래 모든 항목이 같은 청크를 하이라이트로 공유한다.
+// 하이라이트 위치: 위원이 인용한 evidence.chunk_id로 벡터DB에서 청크 원문을 ID
+// 직접 조회한다(backend/app/api/routes/workbench.py, AI 재호출 없이 항상 원문 그대로).
+// 실제 하이라이트 그리기는 PdfDocumentView.jsx가 pdf.js의 textLayer 위에서 한다.
+//
+// 겹치는 하이라이트: 같은 청크를 가리키는 피드백이 여러 개면(evidence_ids가 issue/
+// suggestion 문장 하나하나가 아니라 criterion 단위라 자주 그렇다) 전부 한 곳에 묶어서
+// 보여준다 - "먼저 온 것만 남기고 버림"으로 나머지가 화면에서 사라지는 문제를 고쳤다.
 //
 // 아바타 연동은 아직 1차 버전이 아님 - 오른쪽엔 자리만 잡아두고, 실제 스트리밍은
 // ai/media/musetalk/committee_video_streaming_architecture.md의 하위 배관을 재사용해서
 // 다음 단계에서 붙인다.
+
+function authHeader() {
+  const token = localStorage.getItem('auth_token')
+  return token ? { Authorization: `Bearer ${token}` } : {}
+}
 
 // review_output.evidence는 evidence_id -> {chunk_id, source_type, ...} 배열이다.
 // rubric_score.evidence_ids(criterion 단위)에서 "submission"(기획서 본문, 공고문/criteria
@@ -76,57 +85,39 @@ function extractFeedbackItems(reviewOutput) {
   return items
 }
 
-// 원문(text)을 quoteMatches(백엔드 /workbench/{id}/quotes 응답) 위치 기준으로 쪼갠다 -
-// 매칭된 구간은 { highlighted: true, feedbackId }를, 나머지는 일반 텍스트 구간을
-// 반환한다. 겹치는 인용은 먼저 나온 것이 이긴다.
-function buildHighlightSegments(text, quoteMatches, feedbackById) {
-  if (!text || !quoteMatches) return []
+// 재인/Claude(2026-07-21): "맥락 이상 감지"(backend/app/api/routes/workbench.py의
+// /context-check) 결과를 위원 피드백과 똑같은 feedbackItems 모양으로 바꾼다 - 그래야
+// 아래 하이라이트/우측 상세 패널 로직을 위원 피드백과 그대로 같이 쓸 수 있다.
+function extractContextFeedbackItems(contextFindings) {
+  return (contextFindings || []).map((f) => ({
+    id: f.id,
+    kind: 'context',
+    text: f.message,
+    criterionName: '맥락 이상',
+    reviewerName: 'AI 검토',
+  }))
+}
 
-  const spans = [] // { start, end, feedbackId, kind }
-  for (const match of quoteMatches) {
-    const quote = (match.quote || '').trim()
-    if (!quote) continue
-    const idx = text.indexOf(quote)
-    if (idx === -1) continue
-    const item = feedbackById.get(match.id)
-    spans.push({ start: idx, end: idx + quote.length, feedbackId: match.id, kind: item?.kind })
-  }
-  spans.sort((a, b) => a.start - b.start)
-
-  const cleanSpans = []
-  let cursor = 0
-  for (const span of spans) {
-    if (span.start < cursor) continue
-    cleanSpans.push(span)
-    cursor = span.end
-  }
-
-  const segments = []
-  let pos = 0
-  for (const span of cleanSpans) {
-    if (span.start > pos) segments.push({ text: text.slice(pos, span.start), highlighted: false })
-    segments.push({
-      text: text.slice(span.start, span.end),
-      highlighted: true,
-      feedbackId: span.feedbackId,
-      kind: span.kind,
-    })
-    pos = span.end
-  }
-  if (pos < text.length) segments.push({ text: text.slice(pos), highlighted: false })
-
-  return segments
+const KIND_BADGE = {
+  issue: { label: '지적사항', bg: 'var(--coral-dim)', fg: 'var(--coral)', icon: <AlertCircle size={12} /> },
+  suggestion: { label: '제안', bg: 'var(--green-dim)', fg: 'var(--green)', icon: <Lightbulb size={12} /> },
+  context: { label: '맥락 이상', bg: 'var(--amber-dim)', fg: 'var(--amber)', icon: <AlertTriangle size={12} /> },
 }
 
 export default function WorkbenchScreen({ projectId }) {
-  const [docText, setDocText] = useState(null)
+  const [pdfUrl, setPdfUrl] = useState(null)
   const [docError, setDocError] = useState('')
   const [reviewOutput, setReviewOutput] = useState(null)
-  const [selectedFeedbackId, setSelectedFeedbackId] = useState(null)
+  const [selectedFeedbackIds, setSelectedFeedbackIds] = useState([])
 
   const [quoteMatches, setQuoteMatches] = useState(null)
   const [matchingLoading, setMatchingLoading] = useState(false)
   const [matchingError, setMatchingError] = useState('')
+
+  // 맥락 이상 감지는 위원 회의 결과와 무관하게 독립적으로 돌아간다(문서만 있으면 됨) -
+  // 그래서 reviewOutput을 기다리지 않고 프로젝트가 정해지는 즉시 따로 불러온다. 실패해도
+  // 위원 피드백 화면 자체는 정상 동작해야 하므로 조용히 콘솔에만 남긴다(치명적이지 않음).
+  const [contextFindings, setContextFindings] = useState(null)
 
   useEffect(() => {
     if (!projectId) return
@@ -139,8 +130,7 @@ export default function WorkbenchScreen({ projectId }) {
           if (!cancelled) setDocError('업로드된 기획서를 찾지 못했습니다.')
           return
         }
-        const preview = await getDocumentPreview(projectId, target.id)
-        if (!cancelled) setDocText(preview.parsed_text || '')
+        if (!cancelled) setPdfUrl(`${API_BASE_URL}/documents/${projectId}/${target.id}/preview-pdf`)
       } catch (err) {
         if (!cancelled) setDocError(err.message)
       }
@@ -160,17 +150,26 @@ export default function WorkbenchScreen({ projectId }) {
     }
   }, [projectId])
 
-  const feedbackItems = useMemo(() => extractFeedbackItems(reviewOutput), [reviewOutput])
-  const feedbackById = useMemo(() => new Map(feedbackItems.map((f) => [f.id, f])), [feedbackItems])
-
-  // 재인/Claude(2026-07-21): 워크벤치 진입 시(원문+피드백이 둘 다 준비되면) 자동으로
-  // 인용 조회를 호출한다 - 사용자가 따로 버튼을 안 눌러도 된다. 로딩 중엔 기획서
-  // 패널에만 로딩 표시를 하고(아바타 쪽은 나중에 붙어도 계속 idle 루프가 돌아야 하므로
-  // 전체 화면을 막지 않는다), 끝나면 하이라이트가 나타난다. chunkId가 없는 항목(evidence가
-  // criteria/notice뿐이거나 없음)은 애초에 요청에서 뺀다 - 하이라이트가 없을 뿐 다른
-  // 항목 조회에는 영향 없다.
   useEffect(() => {
-    if (docText === null || feedbackItems.length === 0) return
+    if (!projectId) return
+    let cancelled = false
+    getContextCheck(projectId)
+      .then((findings) => { if (!cancelled) setContextFindings(findings) })
+      .catch((err) => { console.error('[WorkbenchScreen] 맥락 이상 감지 실패', err) })
+    return () => { cancelled = true }
+  }, [projectId])
+
+  const feedbackItems = useMemo(() => extractFeedbackItems(reviewOutput), [reviewOutput])
+  const contextFeedbackItems = useMemo(() => extractContextFeedbackItems(contextFindings), [contextFindings])
+  const allFeedbackItems = useMemo(
+    () => [...feedbackItems, ...contextFeedbackItems],
+    [feedbackItems, contextFeedbackItems],
+  )
+  const feedbackById = useMemo(() => new Map(allFeedbackItems.map((f) => [f.id, f])), [allFeedbackItems])
+
+  // 워크벤치 진입 시(원문+피드백이 둘 다 준비되면) 자동으로 인용 조회를 호출한다.
+  useEffect(() => {
+    if (pdfUrl === null || feedbackItems.length === 0) return
     const lookups = feedbackItems.filter((f) => f.chunkId)
     if (lookups.length === 0) return
     let cancelled = false
@@ -181,109 +180,115 @@ export default function WorkbenchScreen({ projectId }) {
       .catch((err) => { if (!cancelled) setMatchingError(err.message) })
       .finally(() => { if (!cancelled) setMatchingLoading(false) })
     return () => { cancelled = true }
-    // feedbackItems는 reviewOutput이 바뀔 때만 내용이 바뀌므로 reviewOutput을 의존성으로 둔다
-    // (매 렌더마다 새 배열 참조가 생겨 무한 재호출되는 것을 방지).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectId, docText, reviewOutput])
+  }, [projectId, pdfUrl, reviewOutput])
 
-  const segments = useMemo(
-    () => buildHighlightSegments(docText, quoteMatches, feedbackById),
-    [docText, quoteMatches, feedbackById],
-  )
+  // context-check는 자체 검증된 인용문(quote)을 이미 들고 있어 /quotes 왕복이 필요
+  // 없다 - 위원 피드백의 quoteMatches와 그대로 합쳐서 PdfDocumentView에 하나로 넘긴다.
+  // 둘 다 아직 준비 안 됐을 때만 null을 유지해 "아직 하이라이트 시도할 거 없음" 신호를
+  // 보존한다(빈 배열은 truthy라 null과 구분해야 함).
+  const combinedQuoteMatches = useMemo(() => {
+    const contextQuoteMatches = (contextFindings || []).map((f) => ({ id: f.id, quote: f.quote, found: true }))
+    if (quoteMatches === null && contextQuoteMatches.length === 0) return null
+    return [...(quoteMatches || []), ...contextQuoteMatches]
+  }, [quoteMatches, contextFindings])
 
-  const selectedFeedback = feedbackItems.find((f) => f.id === selectedFeedbackId) || null
+  const selectedFeedbackItems = selectedFeedbackIds
+    .map((id) => feedbackById.get(id))
+    .filter(Boolean)
 
   return (
     <div style={{ display: 'flex', gap: 20, height: 'calc(100vh - 64px)' }}>
-      {/* 중앙: 기획서 원문 + 하이라이트 */}
+      <style>{`
+        .wb-pdf-page { position: relative; background: #fff; box-shadow: 0 2px 18px rgba(0,0,0,0.12); }
+        .wb-pdf-page canvas { display: block; }
+        /* 재인/Claude(2026-07-21): 하이라이트는 pdf.js textLayer의 개별 텍스트 조각(span)
+           하나하나에 붙는다 - 조각마다 outline/border-radius를 따로 그리면 이어지는
+           문장이어도 조각 경계마다 끊긴 것처럼 보인다("|"로 잘린 느낌). 배경색만 칠하고
+           테두리·모서리를 없애면 인접한 조각들이 하나로 이어져 보인다. */
+        .wb-pdf-highlight { cursor: pointer; pointer-events: auto; }
+        .wb-pdf-highlight-issue { background: var(--coral-dim); }
+        .wb-pdf-highlight-suggestion { background: var(--green-dim); }
+        .wb-pdf-highlight-context { background: var(--amber-dim); }
+        /* "선택됨" 표시는 조각(span)마다 칠하지 않고, PdfDocumentView.jsx가 줄 단위로
+           묶어 계산한 통짜 사각형을 이 레이어 위에 그린다(Google Docs/Notion 댓글
+           표시 느낌) - pointer-events:none이라 클릭은 그대로 아래 textLayer가 받는다. */
+        .wb-pdf-selection-layer { position: absolute; inset: 0; pointer-events: none; }
+        .wb-pdf-selection-box {
+          position: absolute;
+          border: 1.5px solid var(--purple);
+          background: rgba(124, 92, 234, 0.14);
+          border-radius: 5px;
+          box-shadow: 0 2px 10px rgba(124, 92, 234, 0.22);
+          animation: wb-selection-in 0.16s ease-out;
+        }
+        @keyframes wb-selection-in {
+          from { opacity: 0; transform: scale(0.97); }
+          to { opacity: 1; transform: scale(1); }
+        }
+      `}</style>
+
+      {/* 중앙: 기획서 원문(PDF, 워드/한글 원본과 같은 페이지 모습) + 하이라이트 */}
       <div
         className="card glass"
-        style={{ flex: 2, minWidth: 0, overflowY: 'auto', padding: 28, lineHeight: 1.8, fontSize: 14.5, position: 'relative' }}
+        style={{ flex: 2, minWidth: 0, overflowY: 'auto', position: 'relative', padding: '28px 0' }}
       >
-        <div className="badge coral mono" style={{ marginBottom: 14 }}>기획서 원문</div>
-        {docError && <p style={{ color: 'var(--coral)', fontSize: 13 }}>{docError}</p>}
-        {matchingError && <p style={{ color: 'var(--coral)', fontSize: 13 }}>인용 조회 실패: {matchingError}</p>}
-        {!docError && docText === null && <p style={{ color: 'var(--text-2)', fontSize: 13 }}>불러오는 중...</p>}
+        <div className="badge coral mono" style={{ marginBottom: 14, marginLeft: 28 }}>기획서 원문</div>
+        {docError && <p style={{ color: 'var(--coral)', fontSize: 13, marginLeft: 28 }}>{docError}</p>}
+        {matchingError && <p style={{ color: 'var(--coral)', fontSize: 13, marginLeft: 28 }}>인용 조회 실패: {matchingError}</p>}
+        {!docError && pdfUrl === null && <p style={{ color: 'var(--text-2)', fontSize: 13, marginLeft: 28 }}>불러오는 중...</p>}
 
-        {docText !== null && matchingLoading && (
+        {pdfUrl !== null && matchingLoading && (
           <div style={{
             position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center',
             background: 'rgba(250,248,244,0.85)', backdropFilter: 'blur(2px)', fontSize: 13, color: 'var(--text-1)',
+            zIndex: 10,
           }}>
             AI 위원이 기획서를 짚어보는 중...
           </div>
         )}
 
-        {docText !== null && (
-          <div style={{ whiteSpace: 'pre-wrap' }}>
-            {segments.length === 0 && !matchingLoading
-              ? docText
-              : segments.map((seg, i) =>
-                seg.highlighted ? (
-                  <mark
-                    key={i}
-                    onClick={() => setSelectedFeedbackId(seg.feedbackId)}
-                    style={{
-                      cursor: 'pointer',
-                      padding: '1px 2px',
-                      borderRadius: 3,
-                      background: seg.feedbackId === selectedFeedbackId
-                        ? 'var(--purple-dim)'
-                        : seg.kind === 'issue' ? 'var(--coral-dim)' : 'var(--green-dim)',
-                      outline: seg.feedbackId === selectedFeedbackId ? '2px solid var(--purple)' : 'none',
-                    }}
-                  >
-                    {seg.text}
-                  </mark>
-                ) : (
-                  <span key={i}>{seg.text}</span>
-                ),
-              )}
-          </div>
+        {pdfUrl !== null && (
+          <PdfDocumentView
+            pdfUrl={pdfUrl}
+            authHeaders={authHeader()}
+            quoteMatches={combinedQuoteMatches}
+            feedbackById={feedbackById}
+            selectedFeedbackIds={selectedFeedbackIds}
+            onSelectFeedback={setSelectedFeedbackIds}
+          />
         )}
       </div>
 
-      {/* 오른쪽: 아바타(자리만) + 선택한 피드백 상세 */}
+      {/* 오른쪽: 선택한 피드백 상세 (재인/Claude 2026-07-21: 아바타 D 연동 자리는
+          팀 논의로 이 화면에서 빼기로 함 - committee_video_streaming_architecture.md
+          쪽 스트리밍 연동은 이 워크벤치가 아닌 다른 화면에서 다룰 예정) */}
       <div style={{ flex: 1, minWidth: 280, display: 'flex', flexDirection: 'column', gap: 16 }}>
-        <div
-          className="card glass"
-          style={{
-            aspectRatio: '9 / 12',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            color: 'var(--text-2)',
-            fontSize: 13,
-          }}
-        >
-          {/* TODO(재인): committee_video_streaming_architecture.md 5장 참고해서
-              위원 1명짜리 스트리밍 재생(WS+MSE 하위 배관)을 여기 연결 - 기획서
-              패널만 로딩 표시되는 동안에도 이 자리는 계속 idle 루프가 돌아야 함 */}
-          아바타 D 자리 (연동 예정)
-        </div>
-
-        <div className="card glass" style={{ flex: 1, overflowY: 'auto', padding: 18 }}>
-          {!selectedFeedback && (
+        <div className="card glass" style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 18, display: 'flex', flexDirection: 'column', gap: 14 }}>
+          {selectedFeedbackItems.length === 0 && (
             <div style={{ color: 'var(--text-2)', fontSize: 13, display: 'flex', alignItems: 'center', gap: 8 }}>
               <MessageSquare size={16} /> 원문의 하이라이트를 클릭하면 상세 코멘트가 여기 표시됩니다.
             </div>
           )}
-          {selectedFeedback && (
-            <div>
+          {selectedFeedbackItems.map((item) => {
+            const badge = KIND_BADGE[item.kind] || KIND_BADGE.issue
+            return (
+            <div key={item.id} style={{ paddingBottom: 14, borderBottom: '1px solid var(--border, #eee)' }}>
               <div className="badge mono" style={{
                 marginBottom: 10,
-                background: selectedFeedback.kind === 'issue' ? 'var(--coral-dim)' : 'var(--green-dim)',
-                color: selectedFeedback.kind === 'issue' ? 'var(--coral)' : 'var(--green)',
+                background: badge.bg,
+                color: badge.fg,
               }}>
-                {selectedFeedback.kind === 'issue' ? <AlertCircle size={12} /> : <Lightbulb size={12} />}
-                {selectedFeedback.kind === 'issue' ? '지적사항' : '제안'} · {selectedFeedback.criterionName}
+                {badge.icon}
+                {badge.label} · {item.criterionName}
               </div>
-              <p style={{ fontSize: 13.5, lineHeight: 1.6, marginBottom: 12 }}>{selectedFeedback.text}</p>
+              <p style={{ fontSize: 13.5, lineHeight: 1.6, marginBottom: 12 }}>{item.text}</p>
               <div style={{ fontSize: 11.5, color: 'var(--text-2)', display: 'flex', alignItems: 'center', gap: 6 }}>
-                <Sparkles size={12} /> {selectedFeedback.reviewerName}
+                <Sparkles size={12} /> {item.reviewerName}
               </div>
             </div>
-          )}
+            )
+          })}
         </div>
       </div>
     </div>

@@ -21,3 +21,14 @@ export async function getQuoteMatches(projectId, lookups) {
   const data = await parseApiResponse(res, '인용 조회에 실패했습니다.')
   return data.matches // [{id, quote, found}]
 }
+
+// 재인/Claude(2026-07-21): "맥락 이상 감지" - 문서 자체 임베딩 통계 + LLM 재판단으로
+// 걸러진 결과를 가져온다(사용자 확인: 오탈자 검출은 보류, 이것만 먼저 구현). AI 호출
+// 없이 캐시된 값이 있으면 그대로 재사용되므로, 워크벤치 진입마다 불러도 무방하다.
+export async function getContextCheck(projectId) {
+  const res = await fetch(`${API_BASE_URL}/workbench/${projectId}/context-check`, {
+    headers: { ...authHeaders() },
+  })
+  const data = await parseApiResponse(res, '맥락 이상 감지에 실패했습니다.')
+  return data.findings // [{id, quote, message}]
+}
