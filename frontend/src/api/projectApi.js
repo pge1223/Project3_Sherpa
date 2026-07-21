@@ -40,6 +40,19 @@ export async function createProject({ title, doc_type, description }) {
   return data
 }
 
+export async function updateProject(projectId, { title, description }) {
+  const res = await fetch(`${API_BASE_URL}/projects/${projectId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ title, description }),
+  })
+  const data = await res.json()
+  if (!res.ok) {
+    throw new Error(data.detail || '프로젝트를 수정하지 못했습니다.')
+  }
+  return data
+}
+
 // PRJ-004 — 벡터 청크/문서/회의/프로젝트를 백엔드가 한 번에 정리한다(projects.py 참고).
 export async function deleteProject(projectId) {
   const res = await fetch(`${API_BASE_URL}/projects/${projectId}`, {
