@@ -844,25 +844,12 @@ function AnalysisScreen({ mode, onNext, onBack, projectId }) {
   );
 }
 
-const STAGE_STEPS = [
-  { key: 'reviews', label: '멘토별 독립 검토' },
-  { key: 'score', label: '채점 집계' },
-  { key: 'chair', label: '위원장 종합' },
-]
-
 function overallPercent(snapshot) {
   if (!snapshot) return 0
   if (snapshot.chair_done) return 100
   if (snapshot.score_done) return 85
   if (snapshot.reviews_total) return 10 + (snapshot.reviews_done / snapshot.reviews_total) * 60
   return 5
-}
-
-function stageStatus(step, snapshot, mentorCount) {
-  const reviewsDone = !!snapshot && snapshot.reviews_total > 0 && snapshot.reviews_done >= mentorCount
-  if (step.key === 'reviews') return reviewsDone ? 'done' : (snapshot ? 'active' : 'pending')
-  if (step.key === 'score') return snapshot?.score_done ? 'done' : (reviewsDone ? 'active' : 'pending')
-  return snapshot?.chair_done ? 'done' : (snapshot?.score_done ? 'active' : 'pending')
 }
 
 /* ---------------- 5. 작성 후: 기획서 업로드 → 분석 시작 → 피드백 확인 (실제 API) ----------------
@@ -990,7 +977,7 @@ function UploadAndAnalyzeScreen({ projectId, onFeedbackReady, onBack, initialDoc
     <div style={{ maxWidth: 720 }}>
       <div className="badge coral mono" style={{ marginBottom: 12 }}>기획서 업로드 · 분석</div>
       <BackTitle onBack={onBack} style={{ marginBottom: 20 }}>
-        평가 대상 문서를 업로드하세요
+        {analyzing ? '평가 대상 문서를 분석중이에요' : '평가 대상 문서를 업로드하세요'}
       </BackTitle>
 
       {!analyzing && (
@@ -1058,42 +1045,17 @@ function UploadAndAnalyzeScreen({ projectId, onFeedbackReady, onBack, initialDoc
       {analyzing && (
         <div className="card glass">
           <p style={{ fontSize: 13, color: 'var(--text-1)', marginBottom: 16 }}>
-            {mentorCount > 0
-              ? `추천 위원 ${mentorCount}명이 기획서를 바탕으로 독립적으로 피드백을 준비하고 있어요.`
-              : '어울리는 위원을 찾는 중이에요...'}
+            문서 피드백 준비중
           </p>
           <div className="progress-track" style={{ marginBottom: 6 }}>
             <div className="progress-fill" style={{ width: `${analyzePercent}%` }} />
           </div>
           <p style={{ fontSize: 12, color: 'var(--text-2)', marginBottom: 20 }}>{Math.round(analyzePercent)}%</p>
 
-          <div style={{ display: 'flex', gap: 18, marginBottom: 8 }}>
-            {STAGE_STEPS.map((step) => {
-              const status = stageStatus(step, snapshot, mentorCount)
-              return (
-                <div key={step.key} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12.5 }}>
-                  {status === 'done'
-                    ? <CheckCircle2 size={15} color="var(--green)" />
-                    : <Circle size={13} color={status === 'active' ? 'var(--purple)' : 'var(--text-2)'} />}
-                  <span style={{ color: status === 'pending' ? 'var(--text-2)' : 'var(--text-0)' }}>{step.label}</span>
-                </div>
-              )
-            })}
-          </div>
-
-          {!reviewsReady && (
-            <p style={{ fontSize: 12.5, color: 'var(--text-2)', marginTop: 16 }}>⏱ 평균 검토 시간 약 3~5분 · 잠시만 기다려주세요</p>
-          )}
-
           {reviewsReady && (
-            <>
-              <p style={{ fontSize: 12.5, color: 'var(--text-2)', marginTop: 16, marginBottom: 16 }}>
-                위원들의 검토가 끝났어요. 위원장 종합은 백그라운드에서 계속 진행돼요 — 대화 중 필요할 때 참고할게요.
-              </p>
-              <button className="btn-primary" style={{ width: '100%' }} onClick={() => onFeedbackReady(projectId)}>
-                피드백 확인하기 →
-              </button>
-            </>
+            <button className="btn-primary" style={{ width: '100%' }} onClick={() => onFeedbackReady(projectId)}>
+              피드백 확인하기 →
+            </button>
           )}
         </div>
       )}
