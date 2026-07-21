@@ -19,10 +19,10 @@ function decodeTokenEmail() {
   }
 }
 
-// --- 프로필 계약: 전공여부/학위/졸업, 인턴개월/공모전참여/수상, GitHub URL·통계 ---
-const MAJOR_OPTIONS = ['전공', '비전공']
-const DEGREE_OPTIONS = ['학사', '석사', '박사', '기타']
-const GRADUATION_OPTIONS = ['졸업', '재학', '휴학', '수료']
+// --- 프로필 계약(경이 분류기가 그대로 소비 — ai/meeting/tests/fixtures/user_profile_samples.json) ---
+// degree/graduation_status는 영문 enum으로 저장한다. 한글 라벨은 표시용일 뿐이다.
+const DEGREE_LABEL = { bachelor: '학사', master: '석사', phd: '박사', other: '기타' }
+const GRADUATION_LABEL = { graduated: '졸업', enrolled: '재학', leave: '휴학', completed: '수료' }
 
 function profileStorageKey(email) {
   return `mypage_profile_${email || 'anonymous'}`
@@ -30,13 +30,9 @@ function profileStorageKey(email) {
 
 function defaultProfile() {
   return {
-    majorStatus: MAJOR_OPTIONS[0],
-    degree: DEGREE_OPTIONS[0],
-    graduationStatus: GRADUATION_OPTIONS[0],
-    internMonths: '',
-    contestCount: '',
-    awardCount: '',
-    githubUrl: '',
+    education: { is_technical_major: false, degree: 'bachelor', graduation_status: 'graduated' },
+    experience: { internship_months: 0, competition_count: 0, award_count: 0 },
+    githubUrl: '', // 계약 밖 UI 편의 필드 — 재입력 방지용. github 통계는 저장 시 별도로 계약 형태(github{})로 채운다.
   }
 }
 
@@ -44,7 +40,13 @@ function loadProfile(email) {
   try {
     const raw = localStorage.getItem(profileStorageKey(email))
     if (!raw) return defaultProfile()
-    return { ...defaultProfile(), ...JSON.parse(raw) }
+    const parsed = JSON.parse(raw)
+    return {
+      ...defaultProfile(),
+      ...parsed,
+      education: { ...defaultProfile().education, ...parsed.education },
+      experience: { ...defaultProfile().experience, ...parsed.experience },
+    }
   } catch {
     return defaultProfile()
   }
@@ -88,7 +90,8 @@ function useGithubStats(username) {
           if (repo.language) langCounts[repo.language] = (langCounts[repo.language] || 0) + 1
           totalStars += repo.stargazers_count || 0
         }
-        const topLanguage = Object.entries(langCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || '—'
+        // 계약: github.primary_languages(예: ["Python","TypeScript"]) — 저장소 수 기준 상위 3개.
+        const primaryLanguages = Object.entries(langCounts).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([lang]) => lang)
 
         if (!cancelled) {
           setState({
@@ -97,7 +100,7 @@ function useGithubStats(username) {
               publicRepos: user.public_repos ?? repos.length,
               followers: user.followers ?? 0,
               totalStars,
-              topLanguage,
+              primaryLanguages,
             },
             error: '',
           })
@@ -140,8 +143,29 @@ export default function MyPage() {
     setProfile((prev) => ({ ...prev, [field]: value }))
   }
 
+  function updateEducation(field, value) {
+    setProfile((prev) => ({ ...prev, education: { ...prev.education, [field]: value } }))
+  }
+
+  function updateExperience(field, value) {
+    setProfile((prev) => ({ ...prev, experience: { ...prev.experience, [field]: Number(value) || 0 } }))
+  }
+
   function handleSave() {
-    localStorage.setItem(profileStorageKey(email), JSON.stringify(profile))
+    // 계약: github는 api.github.com 조회로 얻은 값만 담는다(commit 수·백엔드 이력 등 조회 불가 필드 제외).
+    const contractProfile = {
+      ...profile,
+      github: github.status === 'success' && github.data
+        ? {
+            connected: true,
+            public_repos: github.data.publicRepos,
+            followers: github.data.followers,
+            total_stars: github.data.totalStars,
+            primary_languages: github.data.primaryLanguages,
+          }
+        : { connected: false, public_repos: 0, followers: 0, total_stars: 0, primary_languages: [] },
+    }
+    localStorage.setItem(profileStorageKey(email), JSON.stringify(contractProfile))
     setSavedAt(new Date())
   }
 
@@ -151,8 +175,9 @@ export default function MyPage() {
   }
 
   const experienceSummary =
-    `인턴 ${profile.internMonths || 0}개월 · 공모전 참여 ${profile.contestCount || 0}회 · 수상 ${profile.awardCount || 0}회`
-  const educationSummary = `${profile.degree} ${profile.graduationStatus} · ${profile.majorStatus}`
+    `인턴 ${profile.experience.internship_months}개월 · 공모전 참여 ${profile.experience.competition_count}회 · 수상 ${profile.experience.award_count}회`
+  const educationSummary =
+    `${DEGREE_LABEL[profile.education.degree]} ${GRADUATION_LABEL[profile.education.graduation_status]} · ${profile.education.is_technical_major ? '전공' : '비전공'}`
 
   return (
     <div style={styles.page}>
@@ -181,20 +206,25 @@ export default function MyPage() {
             <div style={styles.fieldRow}>
               <label style={styles.field}>
                 <span style={styles.label}>전공여부</span>
-                <select style={styles.select} value={profile.majorStatus} onChange={(e) => updateField('majorStatus', e.target.value)}>
-                  {MAJOR_OPTIONS.map((opt) => <option key={opt} value={opt}>{opt}</option>)}
+                <select
+                  style={styles.select}
+                  value={profile.education.is_technical_major ? '전공' : '비전공'}
+                  onChange={(e) => updateEducation('is_technical_major', e.target.value === '전공')}
+                >
+                  <option value="전공">전공</option>
+                  <option value="비전공">비전공</option>
                 </select>
               </label>
               <label style={styles.field}>
                 <span style={styles.label}>학위</span>
-                <select style={styles.select} value={profile.degree} onChange={(e) => updateField('degree', e.target.value)}>
-                  {DEGREE_OPTIONS.map((opt) => <option key={opt} value={opt}>{opt}</option>)}
+                <select style={styles.select} value={profile.education.degree} onChange={(e) => updateEducation('degree', e.target.value)}>
+                  {Object.entries(DEGREE_LABEL).map(([enumVal, label]) => <option key={enumVal} value={enumVal}>{label}</option>)}
                 </select>
               </label>
               <label style={styles.field}>
                 <span style={styles.label}>졸업</span>
-                <select style={styles.select} value={profile.graduationStatus} onChange={(e) => updateField('graduationStatus', e.target.value)}>
-                  {GRADUATION_OPTIONS.map((opt) => <option key={opt} value={opt}>{opt}</option>)}
+                <select style={styles.select} value={profile.education.graduation_status} onChange={(e) => updateEducation('graduation_status', e.target.value)}>
+                  {Object.entries(GRADUATION_LABEL).map(([enumVal, label]) => <option key={enumVal} value={enumVal}>{label}</option>)}
                 </select>
               </label>
             </div>
@@ -207,24 +237,24 @@ export default function MyPage() {
                 <span style={styles.label}>인턴 (개월)</span>
                 <input
                   type="number" min="0" style={styles.input} placeholder="0"
-                  value={profile.internMonths}
-                  onChange={(e) => updateField('internMonths', e.target.value)}
+                  value={profile.experience.internship_months}
+                  onChange={(e) => updateExperience('internship_months', e.target.value)}
                 />
               </label>
               <label style={styles.field}>
                 <span style={styles.label}>공모전 참여 (회)</span>
                 <input
                   type="number" min="0" style={styles.input} placeholder="0"
-                  value={profile.contestCount}
-                  onChange={(e) => updateField('contestCount', e.target.value)}
+                  value={profile.experience.competition_count}
+                  onChange={(e) => updateExperience('competition_count', e.target.value)}
                 />
               </label>
               <label style={styles.field}>
                 <span style={styles.label}>수상 (회)</span>
                 <input
                   type="number" min="0" style={styles.input} placeholder="0"
-                  value={profile.awardCount}
-                  onChange={(e) => updateField('awardCount', e.target.value)}
+                  value={profile.experience.award_count}
+                  onChange={(e) => updateExperience('award_count', e.target.value)}
                 />
               </label>
             </div>
@@ -243,8 +273,8 @@ export default function MyPage() {
           </div>
 
           <div style={styles.saveRow}>
-            <button type="button" style={styles.saveButton} onClick={handleSave}>
-              <Save size={15} /> 제출 정보 저장
+            <button type="button" style={styles.saveButton} disabled={github.status === 'loading'} onClick={handleSave}>
+              <Save size={15} /> {github.status === 'loading' ? 'GitHub 통계 조회 중...' : '제출 정보 저장'}
             </button>
             {savedAt && <span style={styles.savedHint}>최근 저장 {savedAt.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })}</span>}
           </div>
@@ -287,7 +317,7 @@ export default function MyPage() {
                         <span style={styles.githubStatChip}>공개 저장소 {github.data.publicRepos}</span>
                         <span style={styles.githubStatChip}><Users size={11} /> 팔로워 {github.data.followers}</span>
                         <span style={styles.githubStatChip}><Star size={11} /> 스타 {github.data.totalStars}</span>
-                        <span style={styles.githubStatChip}>주요 언어 {github.data.topLanguage}</span>
+                        <span style={styles.githubStatChip}>주요 언어 {github.data.primaryLanguages.join(', ') || '—'}</span>
                       </>
                     )}
                   </div>
