@@ -42,12 +42,22 @@ _LABEL_BY_LEVEL = {
 }
 
 
+# 마크업/문서 전용 언어는 "개발 역량" 신호로 치지 않는다(HTML/CSS만으로는 구현 역량 판단 불가).
+# 마이페이지 GitHub 조회(api.github.com)가 주는 primary_languages 중 이 목록 밖의 언어가
+# 하나라도 있으면 실제 프로그래밍 언어를 쓴다고 본다.
+_NON_DEV_LANGUAGES = frozenset({"HTML", "CSS", "SCSS", "Less", "Markdown", "TeX", "Jupyter Notebook"})
+
+
 def _competence_signals(profile: dict[str, Any]) -> list[tuple[str, int]]:
     """프로필에서 (근거 문구, 가중치) 목록을 뽑는다. 가중치 합이 클수록 기술 역량이 높다.
 
-    각 신호는 마이페이지에서 사용자가 제출하는 값(전공/학위/경력/GitHub 통계)에서만
-    나온다 — 값이 없으면(키 누락) 0으로 취급해, GitHub·이력을 안 낸 사용자도 안전하게
-    동작한다(그 경우 신호가 적어 hard로 수렴).
+    필드는 마이페이지 제출 값과 1:1이다(가은 폼 + 윤한 users.profile 그대로 전달):
+      education{is_technical_major:bool, degree:'bachelor'|'master'|'phd'|'other', graduation_status}
+      experience{internship_months:int, competition_count:int, award_count:int}
+      github{connected, public_repos:int, followers:int, total_stars:int, primary_languages:[str]}
+    GitHub 값은 api.github.com 공개 조회로 얻을 수 있는 것만 쓴다(커밋 총수 등 조회 불가한 값은
+    쓰지 않는다). 값이 없으면(키 누락) 0/미보유로 취급 — GitHub·이력 미제출자도 안전하게
+    동작한다(신호가 적어 hard로 수렴).
     """
     education = profile.get("education") or {}
     experience = profile.get("experience") or {}
@@ -58,15 +68,18 @@ def _competence_signals(profile: dict[str, Any]) -> list[tuple[str, int]]:
         signals.append(("기술 계열 전공", 2))
     if str(education.get("degree")) in {"master", "phd"}:
         signals.append(("석사 이상 학위", 1))
-    if (experience.get("it_internship_months") or 0) >= 3:
+    if (experience.get("internship_months") or 0) >= 3:
         signals.append(("IT 실무(인턴) 경력", 1))
-    if (experience.get("competition_participations") or 0) >= 1:
+    if (experience.get("competition_count") or 0) >= 1:
         signals.append(("이전 공모전 참여 경험", 1))
-    if github.get("has_backend_experience"):
-        signals.append(("GitHub 백엔드 이력", 1))
-    if (github.get("relevant_projects") or 0) >= 1:
-        signals.append(("관련(RAG/AI) 프로젝트 이력", 1))
-    if (github.get("total_commits") or 0) >= 200:
+    if (experience.get("award_count") or 0) >= 1:
+        signals.append(("수상 경험", 1))
+    languages = github.get("primary_languages") or []
+    if any(lang not in _NON_DEV_LANGUAGES for lang in languages):
+        signals.append(("GitHub 개발 언어 사용", 1))
+    if (github.get("public_repos") or 0) >= 5:
+        signals.append(("공개 저장소 다수", 1))
+    if (github.get("followers") or 0) >= 50 or (github.get("total_stars") or 0) >= 50:
         signals.append(("활발한 GitHub 활동", 1))
     return signals
 
