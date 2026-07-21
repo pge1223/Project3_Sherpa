@@ -14,6 +14,7 @@ from scoring import (  # noqa: E402
     attach_impl_guides,
     build_impl_guide,
     classify_impl_difficulty,
+    is_technical_persona,
 )
 
 _FIXTURE = Path(__file__).resolve().parent / "fixtures" / "user_profile_samples.json"
@@ -96,6 +97,16 @@ def test_guide_with_malformed_llm_output_falls_back_to_none_prose():
     g = build_impl_guide(fb, _MAJOR, llm_call=lambda _p: "not json")
     assert g["prose"] is None
     assert g["level"] == "easy"
+
+
+def test_is_technical_persona_whitelist():
+    # 도메인 위원회의 기술 위원만 True — 기획/사업/완성도 위원은 False
+    assert is_technical_persona("technical_feasibility") is True
+    assert is_technical_persona("dev_expert") is True
+    assert is_technical_persona("business_strategy") is False
+    assert is_technical_persona("creativity_originality") is False
+    assert is_technical_persona("presentation_completeness") is False
+    assert is_technical_persona(None) is False
 
 
 def test_attach_skips_resolved_and_maps_rest():
