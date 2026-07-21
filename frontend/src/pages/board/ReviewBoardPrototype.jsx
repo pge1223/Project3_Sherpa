@@ -18,6 +18,7 @@ import {
 import { analyzeProject, getAnalyzeProgress, getMentorCandidates } from "../../api/projectApi";
 import { isAcceptedDocument, formatFileSize, ACCEPTED_DOCUMENT_EXTENSIONS } from "../../utils/file";
 import { assessCriteriaContent } from "../../utils/criteriaAssessment";
+import WorkbenchScreen from "./WorkbenchScreen";
 
 // 가은/Claude(2026-07-20, INF-007): fetch-url이 색인을 백그라운드로 넘기면서
 // document_status가 "indexing"으로 오면 폴링해야 한다 — DocumentUploadPage.jsx와 동일 값.
@@ -41,11 +42,16 @@ const STAGE_LABELS = {
   ideation: "주제 아이디어 회의",
   ideation_result: "주제 확정",
   upload: "기획서 업로드 · 분석",
+  // 재인/Claude(2026-07-21): docs/REVIEW_BOARD_서비스_방향성_정리_20260720.md의
+  // "5. 핵심 UI: 시각적 인터랙티브 워크벤치" 구현 — 실제 화면은
+  // WorkbenchScreen.jsx(신규 파일)에 분리해서, 이 파일(가은님 소유)의 변경은
+  // 이 라벨/흐름 추가 정도로 최소화했다.
+  workbench: "AI 피드백",
 };
 
 const FLOW_BY_MODE = {
   pre: ["entry", "analysis", "ideation", "ideation_result"],
-  post: ["entry", "analysis", "upload"],
+  post: ["entry", "analysis", "upload", "workbench"],
 };
 
 // 가은/Claude(2026-07-21): "작성 전" 흐름에서 확정한 아이디어 프로젝트를 표시하는 마커.
@@ -1128,8 +1134,68 @@ export default function ReviewBoardPrototype() {
     }
   }
 
-  function handleFeedbackReady(pid) {
-    navigate(`/projects/${pid}/feedback-chat`);
+  // 재인/Claude(2026-07-21): 예전엔 분석 끝나면 기존 대화형 피드백 화면
+  // (/feedback-chat)으로 이동했는데, 이제 그 대신 "AI 피드백"(워크벤치) 단계로
+  // 이 페이지 안에서 이어지도록 바꿨다 - 워크벤치 안에서 필요하면 그 화면(위원
+  // 소집)을 다시 불러오는 방식이라, 여기서는 완전히 벗어나지 않는다.
+  function handleFeedbackReady() {
+    setStage('workbench');
+  }
+
+  // 가은/Claude(2026-07-21): ?projectId=가 있으면 기존 프로젝트를 불러와 이어서 한다.
+  // 기획서(target)가 이미 있으면 "기획서 업로드" 단계로, 공고문(criteria)만 있으면
+  // "공모전 분석" 단계로 보낸다(둘 다 있어도 분석 화면이 캐시로 즉시 뜨므로 거기서
+  // 시작). 아무 문서도 없으면 entry에 그대로 둔다.
+  useEffect(() => {
+    if (!resumeProjectId) return;
+    let cancelled = false;
+    setResuming(true);
+    setResumeError('');
+    getDocuments(resumeProjectId)
+      .then((docs) => {
+        if (cancelled) return;
+        projectIdRef.current = resumeProjectId;
+        setProjectId(resumeProjectId);
+        setMode('post');
+
+        const criteriaDocs = docs.filter((d) => d.document_role === 'criteria');
+        const targetDocs = docs.filter((d) => (d.document_role || 'target') === 'target');
+
+        setCriteriaDocuments(
+          criteriaDocs.map((d) => ({
+            id: d.id,
+            backendId: d.id,
+            name: d.original_filename,
+            meta: '이전에 등록한 문서',
+            status: _resumedDocStatus(d.status),
+          })),
+        );
+        setTargetDocuments(
+          targetDocs.map((d) => ({
+            id: d.id,
+            name: d.original_filename,
+            meta: formatFileSize(d.file_size),
+            status: _resumedDocStatus(d.status),
+          })),
+        );
+
+        if (targetDocs.length > 0) setStage('upload');
+        else if (criteriaDocs.length > 0) setStage('analysis');
+      })
+      .catch((err) => { if (!cancelled) setResumeError(err.message); })
+      .finally(() => { if (!cancelled) setResuming(false); });
+    return () => { cancelled = true; };
+  }, [resumeProjectId]);
+
+  if (resuming) {
+    return (
+      <Shell active={stage} mode={mode} onNavigate={setStage} showNav={false}>
+        <div style={{ maxWidth: 760, margin: "40px auto" }}>
+          <div className="badge purple mono">불러오는 중</div>
+          <h1 style={{ fontSize: 26, fontWeight: 700, margin: "12px 0 24px" }}>이전에 등록한 프로젝트를 불러오고 있어요...</h1>
+        </div>
+      </Shell>
+    );
   }
 
   // 가은/Claude(2026-07-21): ?projectId=가 있으면 기존 프로젝트를 불러와 이어서 한다.
@@ -1216,6 +1282,7 @@ export default function ReviewBoardPrototype() {
       {stage === "upload" && (
         <UploadAndAnalyzeScreen projectId={projectId} onFeedbackReady={handleFeedbackReady} onBack={goPrev} initialDocuments={targetDocuments} />
       )}
+      {stage === "workbench" && <WorkbenchScreen projectId={projectId} />}
     </Shell>
   );
 }
