@@ -29,3 +29,10 @@ class ProjectResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     flow_mode: Optional[str] = None
+    # 가은/Claude(2026-07-21): "내 프로젝트" 목록이 "공모전 분석"(작성 전) 완료 여부를
+    # 판단할 신호가 없어서, 아이디어 확정 전 단계(분석은 끝났지만 회의 전)의 프로젝트까지
+    # 실수로 안 보이게(혹은 삭제 대상으로 오판) 되던 문제 — announcement_analysis_cache
+    # 존재 여부를 그대로 노출한다. POST /{id}/announcement-analysis를 다시 호출하면
+    # LLM이 재실행되므로(캐시 없을 때) 목록에서 "확인"용으로 그 엔드포인트를 부를 수 없어
+    # 여기 값을 그대로 싣는다.
+    has_announcement_analysis: bool = False
