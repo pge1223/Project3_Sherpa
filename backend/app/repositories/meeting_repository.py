@@ -27,6 +27,16 @@ class MeetingRepository:
             doc["_id"] = str(doc["_id"])
         return doc
 
+    async def find_by_meeting_id(self, project_id: str, meeting_id: str) -> dict | None:
+        """RPT-004 버전 비교(comparison.py)가 before/after 회의를 meeting_id(문서 자체의
+        고유 식별자, MongoDB _id와 별개)로 조회할 때 쓴다. project_id로도 함께 좁혀 다른
+        프로젝트의 회의를 잘못 비교하지 못하게 막는다."""
+        collection = self.get_collection()
+        doc = await collection.find_one({"project_id": project_id, "meeting_id": meeting_id})
+        if doc:
+            doc["_id"] = str(doc["_id"])
+        return doc
+
     async def find_by_project_id(self, project_id: str) -> list:
         collection = self.get_collection()
         cursor = collection.find({"project_id": project_id}).sort("created_at", -1)

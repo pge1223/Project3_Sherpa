@@ -45,12 +45,18 @@ const PROFILES = {
   },
 }
 
+// 백엔드 scoring.classify_impl_difficulty 와 동일한 3단계 → 색/아이콘.
 const DIFFICULTY = {
-  hard: { label: '구현 난이도 · 어려울 수 있음', color: '#e0603d', bg: 'rgba(224,96,61,0.1)', Icon: AlertTriangle },
-  easy: { label: '구현 난이도 · 쉬움', color: '#16a37a', bg: 'rgba(22,163,122,0.1)', Icon: Zap },
+  hard: { color: '#e0603d', bg: 'rgba(224,96,61,0.1)', Icon: AlertTriangle },
+  moderate: { color: '#b8830b', bg: 'rgba(184,131,11,0.12)', Icon: AlertTriangle },
+  easy: { color: '#16a37a', bg: 'rgba(22,163,122,0.1)', Icon: Zap },
 }
+// personalization.py 의 _LABEL_BY_LEVEL / _VERBOSITY_BY_LEVEL 과 1:1.
+const DIFFICULTY_LABEL = { hard: '구현 난이도 · 어려울 수 있음', moderate: '구현 난이도 · 보통', easy: '구현 난이도 · 쉬움' }
+const VERBOSITY_BY_LEVEL = { hard: 'detailed', moderate: 'standard', easy: 'brief' }
 
-// 개발 위원 지적(미해결/신규)에 대한 구현 가이드. profile별로 상세도가 다르다.
+// 개발 위원 지적(미해결/신규)에 대한 구현 가이드 산문(prose). profile별 상세도가 다르다.
+// 실서비스에선 이 산문을 scoring.build_impl_guide 의 llm_call 이 생성한다 — 여기선 mock.
 // nonmajor = 길고 친절한 단계별(자세히 보기), major = 짧고 간결한 한 줄.
 const IMPL_GUIDE = {
   'f-stack': {
@@ -309,8 +315,10 @@ function FeedbackItem({ f, guide }) {
   const [open, setOpen] = useState(false)
   const s = STATUS_META[f.status]
   const Icon = s.Icon
-  // guide: { level, detail, nonMajor } — 개발 위원의 미해결/신규 지적에만 주어진다.
+  // guide: { feedback_id, level, verbosity, label, prose } — 백엔드 attach_impl_guides 출력 형태.
+  // verbosity==='detailed'(비전공/입문)면 '자세히 보기'로 접고, 그 외(standard/brief)면 인라인.
   const diff = guide ? DIFFICULTY[guide.level] : null
+  const detailed = guide?.verbosity === 'detailed'
   return (
     <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '11px 13px', borderRadius: 11, background: s.bg, border: `1px solid ${s.border}` }}>
       <span style={{ flexShrink: 0, width: 20, height: 20, borderRadius: '50%', background: s.color, color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', marginTop: 1 }}>
@@ -333,23 +341,23 @@ function FeedbackItem({ f, guide }) {
           <div style={{ marginTop: 8 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
               <span className="mono" style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11.5, fontWeight: 700, padding: '4px 10px', borderRadius: 99, color: diff.color, background: diff.bg }}>
-                <diff.Icon size={12} /> {diff.label}
+                <diff.Icon size={12} /> {guide.label}
               </span>
-              {guide.nonMajor && (
+              {detailed && (
                 <button className="vt-tab" onClick={() => setOpen((v) => !v)}
                   style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 12, fontWeight: 700, color: '#7c5cea', background: 'transparent', border: 'none', cursor: 'pointer', padding: '2px 4px' }}>
                   자세히 보기 <ChevronDown size={13} style={{ transform: open ? 'rotate(180deg)' : 'none', transition: 'transform 0.18s ease' }} />
                 </button>
               )}
             </div>
-            {guide.nonMajor ? (
+            {detailed ? (
               open && (
                 <div style={{ marginTop: 8, fontSize: 12.5, lineHeight: 1.75, color: '#4a4660', background: 'rgba(224,96,61,0.06)', border: '1px solid rgba(224,96,61,0.16)', padding: '11px 13px', borderRadius: 10 }}>
-                  {guide.detail}
+                  {guide.prose}
                 </div>
               )
             ) : (
-              <div style={{ marginTop: 7, fontSize: 12.5, lineHeight: 1.6, color: '#5b5770' }}>{guide.detail}</div>
+              <div style={{ marginTop: 7, fontSize: 12.5, lineHeight: 1.6, color: '#5b5770' }}>{guide.prose}</div>
             )}
           </div>
         )}
@@ -365,14 +373,26 @@ function FeedbackItem({ f, guide }) {
   )
 }
 
+// ★ E2E 교체 지점 ★
+// 이 함수 하나가 백엔드 scoring.attach_impl_guides(dev_feedback, profile, llm_call) 의 응답으로
+// 대체된다. 반환 형태를 백엔드와 1:1로 맞춰둠: { feedback_id, level, verbosity, label, prose }.
+// 연동 시 여기 내부(mock)만 fetch 결과로 바꾸면 되고, 렌더링(FeedbackItem)은 그대로 동작한다.
+// level 은 백엔드 classify_impl_difficulty 결과와 동일(비전공자=hard, 전공자=easy).
+function personalizeGuide(feedback, profile) {
+  if (!profile) return null
+  if (feedback.status === 'resolved') return null // 해결된 지적은 구현할 게 없음
+  const prose = IMPL_GUIDE[feedback.id]?.[profile.key]
+  if (!prose) return null
+  const level = profile.difficulty
+  return { feedback_id: feedback.id, level, verbosity: VERBOSITY_BY_LEVEL[level], label: DIFFICULTY_LABEL[level], prose }
+}
+
 function CriterionCard({ c, before, index, animKey, isDev, profile }) {
   const delta = before == null ? null : c.score - before
   // 개발 위원의 미해결/신규 지적에만 구현 난이도 가이드를 붙인다(프로필 기반).
   const guideFor = (f) => {
     if (!isDev || (f.status !== 'open' && f.status !== 'new')) return null
-    const g = IMPL_GUIDE[f.id]
-    if (!g) return null
-    return { level: profile.difficulty, detail: g[profile.key], nonMajor: profile.key === 'nonmajor' }
+    return personalizeGuide(f, profile)
   }
   return (
     <div className="vt-fade card glass" style={{ animationDelay: `${index * 90}ms` }}>
