@@ -53,6 +53,14 @@ if settings.ENABLE_IDEATION_PREVIEW:
     app.include_router(ideation_preview_router)
     logger.info("[ideation-preview] 개발용 프리뷰 라우터 등록됨 (ENABLE_IDEATION_PREVIEW=true)")
 
+    # 용준/Claude(2026-07-20): 개발용 대화형 아이디어 발전 회의 프리뷰
+    # (POST /ideation-conversation/start 등). 같은 플래그를 공유한다 — 둘 다 같은
+    # "개발용 ideation 프리뷰" 묶음이라 별도 플래그를 새로 만들지 않았다.
+    from app.api.routes.ideation_conversation_preview import router as ideation_conversation_router
+
+    app.include_router(ideation_conversation_router)
+    logger.info("[ideation-conversation] 개발용 대화형 프리뷰 라우터 등록됨 (ENABLE_IDEATION_PREVIEW=true)")
+
 # HWP 업로드를 실제로 시도하기 전에 서버 시작 시 한 번만 변환 가능 상태를 점검해
 # app.state에 캐싱한다 — soffice/unopkg/java 서브프로세스를 /health 요청마다 반복
 # 실행하지 않기 위함(ai/rag/converters/diagnostics.py). 진단 자체가 예외를 던지지

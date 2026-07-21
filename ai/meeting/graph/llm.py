@@ -19,7 +19,11 @@ def parse_json_response(text: str) -> dict:
     """LLM 응답 문자열에서 JSON 객체를 파싱한다.
 
     프롬프트는 마크다운 코드블록 없이 JSON만 반환하라고 지시하지만, 실제 LLM은 종종
-    ```json ... ``` 로 감싸 응답하므로 방어적으로 벗겨낸다.
+    ```json ... ``` 로 감싸 응답하거나("코드블록") "물론이죠! ... {..} ... 도움이 되었길
+    바랍니다" 처럼 JSON 앞뒤에 설명 문장을 덧붙이기도 한다("전후 설명문"). 코드블록은
+    벗겨내고, 그래도 파싱이 안 되면 문자열에서 첫 '{'부터 마지막 '}'까지만 잘라 한 번 더
+    시도한다 — 두 시도 모두 실패하면 예외를 그대로 올려 호출부(_safe_call_json)가 재시도/
+    폴백 정책을 적용하게 한다(여기서 조용히 빈 dict를 반환하지 않는다).
     """
     cleaned = text.strip()
     if cleaned.startswith("```"):
@@ -27,7 +31,14 @@ def parse_json_response(text: str) -> dict:
         if cleaned.startswith("json"):
             cleaned = cleaned[4:]
         cleaned = cleaned.strip()
-    return json.loads(cleaned)
+    try:
+        return json.loads(cleaned)
+    except (json.JSONDecodeError, ValueError):
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            raise
+        return json.loads(cleaned[start : end + 1])
 
 
 def make_openai_llm_call(model: str, api_key: str | None = None, client: Any | None = None) -> LLMCall:
