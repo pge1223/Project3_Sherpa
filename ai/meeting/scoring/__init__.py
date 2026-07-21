@@ -7,12 +7,22 @@ from .calculator import calculate_score
 from .comparison import build_revision_comparison
 from .deductions import compute_penalties
 from .explanation import build_score_explanation
+from .personalization import (
+    attach_impl_guides,
+    build_impl_guide,
+    build_impl_guide_prompt,
+    classify_impl_difficulty,
+)
 from .weights import resolve_weights
 
 __all__ = [
+    "attach_impl_guides",
+    "build_impl_guide",
+    "build_impl_guide_prompt",
     "build_revision_comparison",
     "build_score_explanation",
     "calculate_score",
+    "classify_impl_difficulty",
     "compute_penalties",
     "resolve_weights",
 ]
