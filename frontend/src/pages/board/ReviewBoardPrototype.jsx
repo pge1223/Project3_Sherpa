@@ -143,6 +143,8 @@ function Shell({ children, active, mode, onNavigate, showNav }) {
         .rb-root .rb-back-title{ display:flex; align-items:center; gap:8px; }
         .rb-root .rb-back-button{ width:26px; height:26px; display:inline-flex; align-items:center; justify-content:center; border:none; background:transparent; color:var(--text-1); border-radius:8px; cursor:pointer; font-size:22px; line-height:1; padding:0; flex-shrink:0; }
         .rb-root .rb-back-button:hover{ background:var(--bg-2); color:var(--text-0); }
+        .rb-root .rb-typing-cursor{ display:inline-block; margin-left:1px; animation: rb-blink 0.9s steps(1) infinite; }
+        @keyframes rb-blink{ 0%,49%{ opacity:1; } 50%,100%{ opacity:0; } }
         @media (max-width: 780px){
           .rb-root .rb-top-menu{ top:10px; right:12px; }
           .rb-root{ flex-direction:column; }
