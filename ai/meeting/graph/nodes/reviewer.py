@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Callable
 
 from prompts import build_reviewer_prompt
@@ -19,6 +20,8 @@ from ..evidence import EvidencePool
 from ..llm import LLMCall, parse_json_response
 from ..state import MeetingState
 from ..transform import raw_reviewer_to_v2
+
+logger = logging.getLogger(__name__)
 
 # backend가 주입하는 근거 콜백:
 # (persona_id, criterion_id, review_item) -> {"linked_evidence_refs": [...],
@@ -39,6 +42,73 @@ def _dedupe_by_chunk(items: list[dict]) -> list[dict]:
             seen.add(cid)
         out.append(it)
     return out
+
+
+# 재인/Claude(2026-07-21, 사용자 확인 하에 진행 — 경이님 확인 필요): 위원이 맡은
+# criterion_id를 review_items에서 통째로 빼먹는 경우(GPT가 시킨 걸 안 지킨 것 - 근거
+# 부족 판단도, RAG 게이트 차단도 아니고 그냥 언급 자체가 없는 경우)가 실측으로 확인됐다
+# (transform.py의 unscored_criteria는 이 경우를 포함하지 않는다 - 위원이 시도조차 안 한
+# 항목이라 raw.review_items에 애초에 없음). 프롬프트 문구만 강화해서는 확률만 낮출 뿐
+# 보장이 안 되므로, 빠진 항목이 있으면 그 자리에서 바로 그 항목만 다시 짧게 물어봐서
+# 채운다 - 재질문 결과도 raw_reviewer_to_v2()의 같은 판정(insufficient_evidence/RAG
+# 게이트)을 그대로 거치므로, 최종적으로는 "점수가 매겨지거나 명확히 설명되는" 상태로
+# 수렴한다("아무 설명 없이 사라짐"이 없어진다).
+#
+# "빠짐"의 기준은 rubric 전체가 아니라 expected_criterion_ids(이 위원이 실제로 맡은
+# 범위)다 - rubric에는 다른 위원 담당 기준도 다 들어있어서(공통 입력), 전체 기준으로
+# 비교하면 "원래 내 담당이 아니라서 안 쓴" 정상적인 경우까지 죄다 재질문하게 되고,
+# 그러면 다른 전문가가 자기 분야도 아닌 기준에 억지 답을 내게 된다(설계상 원치 않는
+# 동작). RAG-003/004 연동 경로(evidence_context)에서는 (persona_id, criterion_id) 배정이
+# 이미 확정되어 my_ctx로 들어오므로 그 목록을 그대로 쓰고, 그 배정이 없는 레거시 경로
+# (evidence_context 없음)는 "이 위원의 담당 범위"를 알 방법이 없어 재질문을 시도하지
+# 않는다(잘못 강제하는 것보다 안 하는 게 안전).
+def _fill_missing_criteria(
+    persona_id: str,
+    raw: dict,
+    expected_criterion_ids: list[dict],
+    submission: dict,
+    retrieved: list[dict],
+    guards: list[tuple] | None,
+    llm_call: LLMCall,
+) -> dict:
+    if not expected_criterion_ids:
+        return raw
+
+    covered = {item.get("criterion_id") for item in raw.get("review_items", [])}
+    missing = [c for c in expected_criterion_ids if c.get("criterion_id") not in covered]
+    if not missing:
+        return raw
+
+    missing_ids = {c["criterion_id"] for c in missing}
+    logger.warning(
+        "[REVIEWER_MISSING_CRITERIA] persona_id=%s criteria=%s - 재질문 시도",
+        persona_id, sorted(missing_ids),
+    )
+    missing_rubric = {
+        "criteria": missing,
+        "total_max_score": sum(c.get("max_score", 0) for c in missing),
+    }
+    retry_prompt = build_reviewer_prompt(
+        persona_id, missing_rubric, submission, retrieved, evidence_guards=guards,
+    )
+    try:
+        retry_raw = parse_json_response(llm_call(retry_prompt))
+        retry_items = retry_raw.get("review_items", [])
+    except Exception:
+        logger.warning(
+            "[REVIEWER_MISSING_CRITERIA_RETRY_FAILED] persona_id=%s criteria=%s - 재질문도 실패, 원본 그대로 반환",
+            persona_id, sorted(missing_ids), exc_info=True,
+        )
+        return raw
+
+    still_missing = missing_ids - {item.get("criterion_id") for item in retry_items}
+    if still_missing:
+        logger.warning(
+            "[REVIEWER_MISSING_CRITERIA_AFTER_RETRY] persona_id=%s criteria=%s - 재질문 후에도 빠짐",
+            persona_id, sorted(still_missing),
+        )
+
+    return {**raw, "review_items": [*raw.get("review_items", []), *retry_items]}
 
 
 def make_reviewer_node(
@@ -62,10 +132,21 @@ def make_reviewer_node(
                 (e["criterion_id"], (e.get("sufficiency") or {}).get("prompt_guard", ""))
                 for e in my_ctx
             ]
+            # 재인/Claude(2026-07-21): my_ctx의 criterion_id가 곧 "이 위원이 실제로 맡은
+            # 범위"다(RAG-003/004가 이미 persona-criterion을 배정해서 evidence_context에
+            # 실어 보냄) - _fill_missing_criteria가 재질문 대상을 정할 때, rubric 전체가
+            # 아니라 이 범위만 봐야 다른 위원 담당 기준까지 억지로 재질문하지 않는다.
+            my_criterion_ids = {e["criterion_id"] for e in my_ctx}
+            expected_criteria = [
+                c for c in state["rubric"].get("criteria", []) if c.get("criterion_id") in my_criterion_ids
+            ]
         else:
-            # 레거시 경로: flat retrieved_evidence만 사용.
+            # 레거시 경로: flat retrieved_evidence만 사용. persona-criterion 배정 정보가
+            # 없어(evidence_context 자체가 없음) "이 위원 담당 범위"를 알 방법이 없으므로
+            # 재질문 대상도 비워둔다(_fill_missing_criteria가 빈 목록이면 그냥 넘어감).
             retrieved = state["retrieved_evidence"]
             guards = None
+            expected_criteria = []
 
         prompt = build_reviewer_prompt(
             persona_id,
@@ -75,6 +156,7 @@ def make_reviewer_node(
             evidence_guards=guards,
         )
         raw = parse_json_response(llm_call(prompt))
+        raw = _fill_missing_criteria(persona_id, raw, expected_criteria, state["submission"], retrieved, guards, llm_call)
 
         pool = EvidencePool(persona_id, retrieved)
 
