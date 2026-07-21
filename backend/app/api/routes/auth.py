@@ -1,16 +1,13 @@
 from datetime import datetime, timedelta
-from typing import Optional
-from fastapi import APIRouter, Header, HTTPException
-from jose import jwt, JWTError
+from fastapi import APIRouter, HTTPException
+from jose import jwt
 from bcrypt import hashpw, checkpw, gensalt
 from app.schemas.user import UserRegisterRequest, UserLoginRequest, TokenResponse
 from app.repositories.user_repository import UserRepository
-from app.repositories.login_log_repository import LoginLogRepository
 from app.config import settings
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 user_repo = UserRepository()
-login_log_repo = LoginLogRepository()
 
 SECRET_KEY = settings.JWT_SECRET_KEY
 ALGORITHM = settings.JWT_ALGORITHM
@@ -54,26 +51,9 @@ async def login(request: UserLoginRequest):
     if not checkpw(request.password.encode("utf-8"), user["password"].encode("utf-8")):
         raise HTTPException(status_code=401, detail="이메일 또는 비밀번호가 틀렸습니다")
 
+    # 가은/Claude(2026-07-21): 로그인 기록 저장은 요청으로 붙였다가("로그인마다 기록은
+    # 필요없고, 자동로그인 되게 해줘") 필요 없다고 확인돼 다시 뺐다 — JWT_EXPIRE_MINUTES
+    # 동안 프론트가 localStorage의 토큰으로 재로그인 없이 계속 쓰는 쪽으로 방향을 잡았다
+    # (LandingPage.jsx/LoginPage.jsx의 자동 로그인 처리 참고).
     token = create_access_token({"sub": user["email"]})
-    # 가은/Claude(2026-07-21): 로그인 성공마다 이력을 남긴다(로그인 기록 요청) — 토큰
-    # 발급 실패로 이어지면 안 되니 로그인 자체를 막지 않는 순서로 둔다.
-    await login_log_repo.create_log(user["email"])
-    await user_repo.update_last_login(user["email"])
     return TokenResponse(access_token=token)
-
-
-# 가은/Claude(2026-07-21): 본인 로그인 이력 조회 — 게스트(Authorization 헤더 없음)는
-# 기록 자체가 없으므로 여기서는 guest 폴백 없이 토큰을 명시적으로 요구한다.
-@router.get("/login-history")
-async def get_login_history(authorization: Optional[str] = Header(None, alias="authorization")):
-    if not authorization:
-        raise HTTPException(status_code=401, detail="로그인이 필요합니다")
-    try:
-        token = authorization.replace("Bearer ", "")
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        email = payload.get("sub")
-    except JWTError:
-        raise HTTPException(status_code=401, detail="유효하지 않은 토큰입니다")
-
-    logs = await login_log_repo.find_by_email(email)
-    return [{"email": log["email"], "logged_in_at": log["logged_in_at"]} for log in logs]

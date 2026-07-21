@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { login } from '../api/authApi'
 import SpaceBackground from '../components/landing/SpaceBackground'
@@ -10,6 +10,15 @@ export default function LoginPage() {
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+
+  // 가은/Claude(2026-07-21): "한 번 로그인하면 자동 로그인" — 뒤로가기/북마크 등으로
+  // 이미 로그인된 상태에서 이 화면에 들어오면 로그인 폼을 다시 보여주지 않고 바로
+  // board로 보낸다.
+  useEffect(() => {
+    if (localStorage.getItem('auth_token')) {
+      navigate('/board', { replace: true })
+    }
+  }, [navigate])
 
   async function handleSubmit(e) {
     e.preventDefault()
