@@ -610,7 +610,7 @@ function AnalysisScreen({ mode, onNext, onBack, projectId }) {
           ? {
               icon: TrendingUp, color: "amber", title: "수상작·유사사례 경향",
               list: similarWorks.map((w) => ({
-                label: [w.title, w.source_org, w.award_grade].filter(Boolean).join(" · "),
+                label: [w.contest_title, w.source_org].filter(Boolean).join(" · "),
                 onClick: () => handleSimilarWorkClick(w),
               })),
             }
