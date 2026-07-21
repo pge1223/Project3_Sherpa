@@ -1,45 +1,36 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { login } from '../api/authApi'
+import { register } from '../api/authApi'
 import SpaceBackground from '../components/landing/SpaceBackground'
 import './LoginPage.css'
 
-export default function LoginPage() {
+export default function RegisterPage() {
   const navigate = useNavigate()
+  const [name, setName] = useState('')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
+  const [passwordConfirm, setPasswordConfirm] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
-
-  // 가은/Claude(2026-07-21): "한 번 로그인하면 자동 로그인" — 뒤로가기/북마크 등으로
-  // 이미 로그인된 상태에서 이 화면에 들어오면 로그인 폼을 다시 보여주지 않고 바로
-  // board로 보낸다.
-  useEffect(() => {
-    if (localStorage.getItem('auth_token')) {
-      navigate('/board', { replace: true })
-    }
-  }, [navigate])
 
   async function handleSubmit(e) {
     e.preventDefault()
     setError('')
+
+    if (password !== passwordConfirm) {
+      setError('비밀번호가 일치하지 않습니다.')
+      return
+    }
+
     setLoading(true)
     try {
-      const { access_token } = await login(email, password)
-      localStorage.setItem('auth_token', access_token)
-      // 가은/Claude(2026-07-21): board가 이제 기본 진입점이라 로그인 후에도 board로
-      // 보낸다 — "내 프로젝트"는 board 우측 상단 버튼으로 들어간다.
-      navigate('/board')
+      await register({ name, email, password })
+      navigate('/login')
     } catch (err) {
       setError(err.message)
     } finally {
       setLoading(false)
     }
-  }
-
-  // 로그인하지 않은 사용자는 회원가입 화면에서 계정을 만든 뒤 입장한다.
-  function handleRegisterClick() {
-    navigate('/register')
   }
 
   return (
@@ -48,9 +39,21 @@ export default function LoginPage() {
       <div className="login-card-glow">
         <div style={styles.card}>
           <img src="/images/logo1.png" alt="AI Review Board" style={styles.logo} />
-          <p style={styles.subtitle}>문서를 놓고 전문가들이 회의하는 AI 위원회</p>
+          <p style={styles.subtitle}>계정을 만들고 AI 심사위원 회의실로 입장하세요.</p>
 
           <form onSubmit={handleSubmit} style={styles.form}>
+            <label style={styles.label}>
+              이름
+              <input
+                type="text"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="홍길동"
+                style={styles.input}
+                autoComplete="name"
+              />
+            </label>
+
             <label style={styles.label}>
               이메일
               <input
@@ -69,21 +72,33 @@ export default function LoginPage() {
                 type="password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                placeholder="••••••••"
+                placeholder="8자 이상 권장"
                 style={styles.input}
-                autoComplete="current-password"
+                autoComplete="new-password"
+              />
+            </label>
+
+            <label style={styles.label}>
+              비밀번호 확인
+              <input
+                type="password"
+                value={passwordConfirm}
+                onChange={(e) => setPasswordConfirm(e.target.value)}
+                placeholder="비밀번호를 다시 입력"
+                style={styles.input}
+                autoComplete="new-password"
               />
             </label>
 
             {error && <p style={styles.error}>{error}</p>}
 
             <button type="submit" disabled={loading} style={styles.button}>
-              {loading ? '로그인 중...' : '로그인'}
+              {loading ? '가입 중...' : '회원가입'}
             </button>
           </form>
 
-          <button type="button" style={styles.guestButton} onClick={handleRegisterClick}>
-            회원가입
+          <button type="button" style={styles.secondaryButton} onClick={() => navigate('/login')}>
+            로그인으로 돌아가기
           </button>
         </div>
       </div>
@@ -99,27 +114,29 @@ const styles = {
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
+    padding: '24px 16px',
   },
   card: {
     position: 'relative',
     zIndex: 2,
-    width: 360,
+    width: 380,
+    maxWidth: '100%',
     background: '#fff',
     borderRadius: 16,
     border: '1px solid #ece9f7',
     boxShadow: '0 8px 24px rgba(124, 77, 255, 0.12)',
-    padding: '40px 32px',
+    padding: '36px 32px',
   },
   logo: {
     display: 'block',
     width: '100%',
-    maxWidth: 240,
+    maxWidth: 220,
     height: 'auto',
     margin: '0 auto',
     borderRadius: 10,
   },
   subtitle: {
-    margin: '8px 0 32px',
+    margin: '8px 0 28px',
     fontSize: 13,
     color: '#5c7a95',
     textAlign: 'center',
@@ -127,7 +144,7 @@ const styles = {
   form: {
     display: 'flex',
     flexDirection: 'column',
-    gap: 16,
+    gap: 14,
   },
   label: {
     display: 'flex',
@@ -161,7 +178,7 @@ const styles = {
     borderRadius: 8,
     cursor: 'pointer',
   },
-  guestButton: {
+  secondaryButton: {
     marginTop: 10,
     width: '100%',
     padding: '12px',
