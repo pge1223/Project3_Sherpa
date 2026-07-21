@@ -32,6 +32,12 @@ from ai.rag.loaders.exceptions import (
 from ai.rag.preprocessing.html_cleaner import clean_page_content
 from ai.rag.preprocessing.schemas import CleanedWebContent
 from ai.rag.parsers import extract_document
+from ai.rag.parsers.html_render import render_blocks_to_html
+from ai.rag.converters.preview_pdf_converter import convert_to_preview_pdf
+from ai.rag.converters.config import HwpConversionConfig
+from ai.rag.converters.exceptions import DocumentConversionError
+from fastapi.responses import FileResponse
+from starlette.background import BackgroundTask
 from ai.rag.chunking.chunker import chunk_document
 from ai.rag.chunking.schemas import ChunkSourceContext, SourceType
 from ai.rag.domain.schemas import IndexingContext
@@ -689,6 +695,99 @@ async def preview_document(
         "parsed_text": document.get("parsed_text"),
         "status": document["status"],
     }
+
+
+# 재인/Claude(2026-07-21): "AI 피드백" 워크벤치가 기획서를 워드/한글 원본처럼(굵게·
+# 기울임 서식 살려서) 보여주기 위해 추가 - 기존 /preview(parsed_text, 순수 텍스트)는
+# 그대로 두고 완전히 새 엔드포인트만 추가한다. parsed_text는 업로드 시점에 DB에
+# 저장해두지만 서식 정보(블록 metadata["runs"])는 저장하지 않으므로, 여기서는
+# document["file_path"](업로드된 원본 파일, 업로드 후에도 uploads/에 그대로 남음)를
+# 요청마다 다시 파싱해서 HTML로 변환한다 - DB 스키마나 업로드 흐름(_parse_chunk_and_index)은
+# 하나도 안 건드림. docx는 ai/rag/parsers/docx_parser.py가 담은 runs 정보로 굵게/기울임이
+# 살아나오고, 그 외 형식(HWP 등 PDF로 변환되는 경로)은 runs가 없어 일반 문단으로만
+# 나온다(html_render.render_blocks_to_html의 폴백) - 크래시 없이 항상 뭔가는 반환됨.
+def _render_document_html(file_path: str) -> str:
+    source_path = Path(file_path)
+    conversion_result = None
+    try:
+        conversion_result = convert_if_needed(source_path)
+        processing_path = conversion_result.converted_path if conversion_result else source_path
+        extraction = extract_document(processing_path)
+        return render_blocks_to_html(extraction.blocks)
+    finally:
+        cleanup_converted_file(conversion_result)
+
+
+@router.get("/{project_id}/{document_id}/preview-html")
+async def preview_document_html(
+    project_id: str,
+    document_id: str,
+    authorization: Optional[str] = Header(None, alias="authorization"),
+):
+    user_email = get_current_user(authorization)
+    await verify_project_owner(project_id, user_email)
+
+    document = await document_repo.find_by_id(document_id)
+    if not document:
+        raise HTTPException(status_code=404, detail="문서를 찾을 수 없습니다")
+
+    file_path = document.get("file_path")
+    if not file_path or not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="원본 파일을 찾을 수 없습니다 (다시 업로드해주세요)")
+
+    try:
+        html = await run_in_threadpool(_render_document_html, file_path)
+    except Exception:
+        logger.exception("[PREVIEW_HTML_ERROR] document_id=%s 서식 변환 실패", document_id)
+        raise HTTPException(status_code=500, detail="원문을 서식과 함께 불러오지 못했습니다")
+
+    return {
+        "original_filename": document["original_filename"],
+        "html": html,
+    }
+
+
+# 재인/Claude(2026-07-21): "AI 피드백" 워크벤치가 기획서를 워드/한글 원본과 완전히 같은
+# 페이지 모습(줄바꿈·여백까지)으로 보여주기 위해 추가 - HTML 재구성(위 /preview-html)만으로는
+# docx가 실제로 몇 페이지에서 어떻게 줄바꿈되는지는 재현할 수 없다(그 정보는 원본 파일에
+# 없고 워드 같은 렌더러가 그릴 때 그때그때 계산하는 값이라서). 그래서 LibreOffice로 원본을
+# PDF로 변환해 그대로 내려주고, 프론트가 pdf.js로 그 PDF를 그린다 - 페이지 레이아웃까지
+# 원본 그대로 보장되는 유일한 방법. hwp/hwpx는 이미 이 방식(LibreOffice 변환)을 RAG
+# 색인에서도 쓰고 있어 같은 인프라(서버에 LibreOffice 필요)를 재사용하는 셈이다.
+@router.get("/{project_id}/{document_id}/preview-pdf")
+async def preview_document_pdf(
+    project_id: str,
+    document_id: str,
+    authorization: Optional[str] = Header(None, alias="authorization"),
+):
+    user_email = get_current_user(authorization)
+    await verify_project_owner(project_id, user_email)
+
+    document = await document_repo.find_by_id(document_id)
+    if not document:
+        raise HTTPException(status_code=404, detail="문서를 찾을 수 없습니다")
+
+    file_path = document.get("file_path")
+    if not file_path or not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="원본 파일을 찾을 수 없습니다 (다시 업로드해주세요)")
+
+    if Path(file_path).suffix.lower() == ".pdf":
+        return FileResponse(file_path, media_type="application/pdf")
+
+    output_dir = HwpConversionConfig().resolve_temp_dir() / "preview_pdf"
+    try:
+        pdf_path = await run_in_threadpool(
+            convert_to_preview_pdf, Path(file_path), output_dir=output_dir
+        )
+    except DocumentConversionError:
+        logger.exception("[PREVIEW_PDF_ERROR] document_id=%s 미리보기 PDF 변환 실패", document_id)
+        raise HTTPException(status_code=500, detail="원문을 페이지 형태로 불러오지 못했습니다")
+
+    return FileResponse(
+        pdf_path,
+        media_type="application/pdf",
+        background=BackgroundTask(lambda: pdf_path.unlink(missing_ok=True)),
+    )
 
 
 # 가은/Claude(2026-07-21): "공모전 분석" 화면 실제 데이터 연결 — 실측 제보(사용자,

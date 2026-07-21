@@ -100,6 +100,17 @@ export async function getProjectReport(projectId) {
   return parseApiResponse(res, '결과를 불러오지 못했습니다.')
 }
 
+// 가은/Claude(2026-07-21): "내 프로젝트"에서 이어서 열 때, 분석이 이미 끝난
+// 프로젝트인지(회의 존재 여부) 싸게 확인하는 용도 — MTG-005 기존 엔드포인트.
+// getProjectReport()와 달리 impl_guides(LLM 호출 포함)를 계산하지 않아 존재 확인
+// 용도로는 이쪽이 맞다. 회의가 없으면 백엔드가 404를 던진다.
+export async function getLatestMeeting(projectId) {
+  const res = await fetch(`${API_BASE_URL}/projects/${projectId}/meetings/latest`, {
+    headers: { ...authHeaders() },
+  })
+  return parseApiResponse(res, '회의 결과가 없습니다.')
+}
+
 // STEP4 "공모전 분석" 화면 — 문서 성격 태그 + 추천 멘토 후보(도메인 고정 4명 + LLM이 붙인
 // fit_tag)를 가져온다. 실제 OpenAI 호출 1회(짧은 프롬프트라 수 초 내).
 export async function getMentorCandidates(projectId) {
