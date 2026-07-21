@@ -224,6 +224,17 @@ class ChromaVectorStore:
             ))
         return results
 
+    def get_by_chunk_id(self, project_id: str, chunk_id: str) -> Optional[str]:
+        """project_id+chunk_id로 저장된 청크 원문을 정확히 하나 가져온다(유사도 검색이
+        아니라 ID 직접 조회). 재인/Claude(2026-07-21): "AI 피드백" 워크벤치가 위원이
+        인용한 청크(evidence.chunk_id)의 원문을 그대로(요약/재인용 없이) 하이라이트로
+        쓰기 위해 추가 - search()처럼 쿼리 임베딩이 필요 없어 AI 호출 없이 조회만 한다.
+        없으면 None."""
+        record_id = build_record_id(project_id, chunk_id)
+        result = self._collection.get(ids=[record_id], include=["documents"])
+        docs = result.get("documents") or []
+        return docs[0] if docs else None
+
     @staticmethod
     def _distance_to_score(distance: Optional[float]) -> Optional[float]:
         """

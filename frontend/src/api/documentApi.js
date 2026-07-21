@@ -102,3 +102,18 @@ export async function getAnnouncementAnalysis(projectId) {
   }
   return data
 }
+
+// 재인/Claude(2026-07-21): "AI 피드백"(워크벤치) 화면 — 기획서 원문(parsed_text)을
+// 가져와 중앙에 띄우는 용도. 백엔드에 이미 있던 GET /{project_id}/{document_id}/preview
+// (DOC-006, 원본 소유자는 이 문서 미리보기 기능을 만든 담당자)를 그대로 호출만 한다 -
+// 새 백엔드 엔드포인트를 추가한 게 아니라 기존 걸 프론트에서 처음 불러쓰는 것.
+export async function getDocumentPreview(projectId, documentId) {
+  const res = await fetch(`${API_BASE_URL}/documents/${projectId}/${documentId}/preview`, {
+    headers: { ...authHeaders() },
+  })
+  const data = await res.json()
+  if (!res.ok) {
+    throw new Error(data.detail || '문서 원문을 불러오지 못했습니다.')
+  }
+  return data
+}
