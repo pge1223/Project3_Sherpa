@@ -138,6 +138,7 @@ function Shell({ children, active, mode, onNavigate, showNav }) {
           --coral:#e0603d; --coral-dim: rgba(224,96,61,0.12);
           --green:#16a37a; --green-dim: rgba(22,163,122,0.12);
           --amber:#b8830b; --amber-dim: rgba(184,131,11,0.14);
+          --rose:#c23a6b; --rose-dim: rgba(194,58,107,0.12);
           --text-0:#1c1a2e; --text-1:#5b5770; --text-2:#918d9f;
           --cream:#f4efe2; --cream-line:#e7ddc4;
           --mono: 'JetBrains Mono', ui-monospace, monospace;
