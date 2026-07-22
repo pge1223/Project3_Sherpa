@@ -42,12 +42,19 @@ export function buildCompetitionDocumentText(analysis) {
     sections.push(`[핵심 과제]\n${strategy.core_intent.trim()}`)
   }
 
-  const evaluationCriteria = truncateList(facts.evaluation_criteria, 6)
+  const evaluationCriteria = truncateList(facts.evaluation_criteria, 12)
   if (evaluationCriteria.length > 0) {
     sections.push(`[심사 기준 · 평가에서 갈리는 지점]\n- ${evaluationCriteria.join('\n- ')}`)
   }
 
-  const musts = truncateList([...(facts.submission_requirements || []), ...(facts.disqualification_rules || [])], 6)
+  const musts = truncateList(
+    [
+      ...(facts.submission_requirements || []),
+      ...(facts.application_review_conditions || []),
+      ...(facts.disqualification_rules || []),
+    ],
+    12,
+  )
   if (musts.length > 0) {
     sections.push(`[반드시 지켜야 할 조건]\n- ${musts.join('\n- ')}`)
   }
@@ -55,6 +62,16 @@ export function buildCompetitionDocumentText(analysis) {
   const eligibility = truncateList(facts.eligibility, 5)
   if (eligibility.length > 0) {
     sections.push(`[지원 대상과 제한 조건]\n- ${eligibility.join('\n- ')}`)
+  }
+
+  const keyDates = truncateList(facts.key_dates, 6)
+  if (keyDates.length > 0) {
+    sections.push(`[주요 일정]\n- ${keyDates.join('\n- ')}`)
+  }
+
+  const benefits = truncateList(facts.selection_benefits, 8)
+  if (benefits.length > 0) {
+    sections.push(`[선정 혜택]\n- ${benefits.join('\n- ')}`)
   }
 
   // 수상작·유사사례 경향: 이 시스템은 그 데이터 소스 자체가 없다(AnalysisScreen과 동일
@@ -123,7 +140,9 @@ const PHASE_LABEL_KO = {
   failed: '실패',
 }
 
-export function statusLabelFor({ phase, starting, sending, finalizing }) {
+export function statusLabelFor({ phase, starting, sending, finalizing, interrupting }) {
+  // 용준/Claude(2026-07-22, 요청: "잠시만" 버튼) — 취소 확인을 기다리는 동안 보여줄 상태.
+  if (interrupting) return '회의를 잠시 멈추고 있어요...'
   if (starting) return '아이디어 후보 생성 중'
   if (finalizing) return '최종 결과 생성 중'
   if (sending) {
@@ -165,6 +184,20 @@ export function candidateSelectMessage(index) {
 // 지원되지만(요청 사항), 버튼으로도 같은 reply API를 타도록 제공한다.
 export const REGENERATE_MESSAGE = '다시 추천'
 export const EXPERT_RECOMMEND_MESSAGE = '전문가 추천'
+
+// 응답 캡션은 structured의 speaker_id만 신뢰하지 않고 실제 message_id가 가리키는 메시지와
+// 교차 검증한다. 불일치/누락/자기 참조면 잘못된 관계를 화면에 표시하지 않는다.
+export function resolveRespondingToSpeakerId(message, allMessages = []) {
+  const targetMessageId = message?.structured?.responding_to_message_id
+  const declaredSpeakerId = message?.structured?.responding_to_speaker_id
+  if (!targetMessageId || !declaredSpeakerId) return null
+  const targetMessage = allMessages.find((candidate) => candidate?.message_id === targetMessageId)
+  const actualSpeakerId = targetMessage?.speaker_id
+  if (!actualSpeakerId || actualSpeakerId !== declaredSpeakerId || actualSpeakerId === message?.speaker_id) {
+    return null
+  }
+  return actualSpeakerId
+}
 
 // fetch가 아예 실패한 경우(TypeError: Failed to fetch 등, 서버 자체에 연결할 수 없음),
 // ENABLE_IDEATION_PREVIEW=false로 라우터가 등록되지 않아 모든 요청이 404 "Not Found"를

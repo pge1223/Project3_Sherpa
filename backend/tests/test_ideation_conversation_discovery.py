@@ -116,6 +116,7 @@ def _stub_llm_call(session_id: str, model: str):
             is_planning = "당신은 AI Review Board의 기획 전문가입니다" in prompt
             speaker = "planning_expert" if is_planning else "dev_expert"
             payload = {
+                "spoken_text": f"[{speaker}] 발화 질문",
                 "judgment": f"[{speaker}] 판단",
                 "question": f"[{speaker}] 질문",
                 "question_topic": _topic_from_prompt(prompt),
@@ -141,6 +142,7 @@ def _stub_llm_call(session_id: str, model: str):
             speaker = "planning_expert" if is_planning else "dev_expert"
             return json.dumps(
                 {
+                    "spoken_text": f"[{speaker}] 발화 제안",
                     "proposal": f"[{speaker}] 임시 제안",
                     "reason": f"[{speaker}] 제안 이유",
                     "assumption": f"[{speaker}] 이 방향으로 진행",
@@ -159,6 +161,7 @@ def _stub_llm_call(session_id: str, model: str):
             return json.dumps(
                 {
                     "stance": "보완",
+                    "spoken_text": f"[{reviewer}] 발화 검토",
                     "judgment": f"[{reviewer}] 검토 판단",
                     "reason": f"[{reviewer}] 검토 근거",
                     "responding_to": "상대 전문가의 임시 제안",
@@ -176,6 +179,7 @@ def _stub_llm_call(session_id: str, model: str):
                     "agreements": ["제안 방향에 합의"],
                     "considerations": [],
                     "final_recommendation": "이 방향으로 진행하겠습니다.",
+                    "spoken_text": "이 방향으로 진행하겠습니다.",
                 },
                 ensure_ascii=False,
             )
@@ -183,23 +187,35 @@ def _stub_llm_call(session_id: str, model: str):
             # 용준/Claude(2026-07-21, 요청: 위원 간 실제 회의로 개편) — 사용자가 기획/개발
             # 두 질문에 모두 정상 답변하면(위임 없이) expert_discussion이 실행된다.
             is_planning = "당신은 AI Review Board의 기획 전문가입니다" in prompt
+            is_dev = not is_planning
             speaker = "planning_expert" if is_planning else "dev_expert"
-            is_review_stage = "[discussion_stage]\nreview" in prompt
+            is_response_stage = "[discussion_stage]\nresponse" in prompt
             return json.dumps(
                 {
                     "stance": "보완",
+                    "spoken_text": f"[{speaker}] 발화 판단",
                     "judgment": f"[{speaker}] 판단",
                     "reason": f"[{speaker}] 근거",
                     "suggestion": f"[{speaker}] 제안",
                     "interim_conclusion": f"[{speaker}] 현재 임시 결론",
-                    "responding_to": "상대 발언" if is_review_stage else None,
-                    "agreement": "동의 지점" if is_review_stage else "",
+                    "responding_to": "상대 발언" if is_response_stage else None,
+                    "agreement": "동의 지점" if is_response_stage else "",
                     "concern": "",
                     "confirmed": [],
                     "unconfirmed": [],
                     "referenced_message_ids": [],
                     "evidence": [],
-                    "next_action": "await_user_decision" if is_review_stage else None,
+                    "next_action": None,
+                    "active_issue_id": "mvp_scope",
+                    "active_issue_title": "MVP 범위",
+                    "new_information": [f"[{speaker}] 새로 확인된 내용"],
+                    "proposal": f"[{speaker}] 제안",
+                    "changed_position": False,
+                    "needs_counterpart_response": not is_dev,
+                    "recommended_next_speaker": "ideation_facilitator" if is_dev else "dev_expert",
+                    "issue_resolved": bool(is_dev),
+                    "needs_user_input": False,
+                    "user_question": None,
                 },
                 ensure_ascii=False,
             )
@@ -209,23 +225,23 @@ def _stub_llm_call(session_id: str, model: str):
                     "agreements": [],
                     "disagreements": [],
                     "facilitator_summary": "두 전문가가 이번 라운드 의견을 정리했습니다.",
+                    "spoken_text": "두 위원이 이번 라운드 의견을 정리했습니다.",
                     "needs_user_decision": False,
                     "user_question": None,
                 },
                 ensure_ascii=False,
             )
-        # 가은/Claude(2026-07-22, 캔버스 자동 갱신) — 매 라운드 끝의 canvas_update 노드 stub.
         if "[캔버스 갱신 규칙]" in prompt:
             return json.dumps(
                 {
-                    "problem": "[canvas] 문제 상황",
-                    "target_user": "[canvas] 타깃 사용자",
-                    "core_value": "[canvas] 핵심 가치",
-                    "solution": "[canvas] 해결 방식",
-                    "differentiation": "[canvas] 차별점",
+                    "problem": "문의 응대 부담",
+                    "target_user": "소상공인",
+                    "core_value": "응대 시간 절감",
+                    "solution": "FAQ 자동 응답",
+                    "differentiation": "저비용 구축",
                     "feasibility": "medium",
-                    "risks": ["[canvas] 리스크"],
-                    "contest_fit": "[canvas] 심사기준 대응",
+                    "risks": ["오답 위험"],
+                    "contest_fit": "실현가능성 기준 대응",
                 },
                 ensure_ascii=False,
             )
@@ -405,26 +421,6 @@ def test_start_with_user_idea_still_returns_refinement_mode_backward_compatible(
     assert body["pending_question_topic"] is None
 
 
-def test_start_response_includes_idea_canvas_after_roundtable(client: TestClient):
-    """가은/Claude(2026-07-22, 요청: 아이디어 기획 캔버스 자동 갱신 — 경이 협의 완료) —
-    라운드테이블 한 라운드가 끝나면 canvas_update 노드가 갱신한 idea_canvas(순수 추가
-    필드)가 API 응답에 노출된다. 프론트 IdeaCanvasPanel이 이 값을 우선 사용한다."""
-    resp = client.post(
-        "/ideation-conversation/start",
-        json={
-            "competition_name": "데모 공모전",
-            "competition_document": "실현가능성을 평가한다.",
-            "user_idea": "소상공인이 손님 문의에 자동으로 답하는 챗봇",
-        },
-    )
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["phase"] == "awaiting_user_decision"
-    assert body["idea_canvas"] is not None
-    assert body["idea_canvas"]["problem"] == "[canvas] 문제 상황"
-    assert body["idea_canvas"]["feasibility"] == "medium"
-
-
 def test_reply_response_includes_topic_fields_after_first_answer(client: TestClient):
     """/reply 응답에도 resolved_topics/pending_question_topic이 포함되고, 답변이 answer로
     판정되면 resolved_topics가 실제로 갱신되는지 확인한다."""
@@ -471,6 +467,22 @@ def test_start_response_includes_original_candidates_field(client: TestClient):
     assert body["selection_intent"] is None
     assert body["source_candidates"] == []
     assert body["merge_analysis"] is None
+
+
+def test_start_response_exposes_updated_idea_canvas(client: TestClient):
+    resp = client.post(
+        "/ideation-conversation/start",
+        json={
+            "competition_name": "데모 공모전",
+            "competition_document": "실현가능성을 평가한다.",
+            "user_idea": "소상공인 문의를 자동화하고 싶습니다.",
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["phase"] == "awaiting_user_decision"
+    assert body["idea_canvas"]["problem"] == "문의 응대 부담"
+    assert body["idea_canvas"]["feasibility"] == "medium"
 
 
 def test_reply_response_includes_merge_context_fields_after_combine(client: TestClient):
@@ -533,8 +545,11 @@ def test_reply_with_dont_know_advances_instead_of_repeating_question(client: Tes
     proposal_message = next(
         m for m in body["messages"] if m["speaker_id"] == "planning_expert" and m["message_type"] == "opinion"
     )
-    assert "[기획 전문가 제안]" in proposal_message["content"]
-    assert "임시 가정" in proposal_message["content"]
+    # 용준/Claude(2026-07-22, 요청: 보고서형 메시지 → 자연스러운 회의 발화 전환) — content는
+    # 이제 spoken_text + 고정 안내 문구다([기획 전문가 제안] 헤더는 더 이상 붙지 않는다).
+    # proposal/reason/assumption 원문은 structured에서 확인한다.
+    assert proposal_message["structured"]["proposal"]
+    assert "이 가정은 언제든 수정할 수 있습니다" in proposal_message["content"]
     assert any(m["speaker_id"] == "ideation_facilitator" and m["message_type"] == "summary" for m in body["messages"])
 
 
