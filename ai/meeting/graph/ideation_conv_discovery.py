@@ -27,14 +27,14 @@ from .ideation_conv_nodes import (
     _last_user_answer,
     _safe_call_structured_json,
 )
-from .ideation_conv_state import IdeationConvState
+from .ideation_conv_state import IdeationConvState, build_roundtable_opening_message
 from .ideation_nodes import EvidenceLookup
 from .llm import LLMCall
 
 # 요청: "후보 재생성이 무한 반복되거나 LLM 호출 제한을 우회하지 못하도록 상한을 두세요."
 # 재질문 상한(_MAX_ANSWER_RETRY)과 같은 원칙 — 상한 도달 시 LLM을 아예 호출하지 않고
 # 코드가 즉시 안내 메시지로 막는다(무한 루프뿐 아니라 LLM 호출 자체를 원천 차단).
-_MAX_CANDIDATE_REGENERATIONS = 2
+MAX_CANDIDATE_REGENERATIONS = 2
 
 _VALID_FEASIBILITY = {"high", "medium", "low"}
 _VALID_RESOLUTIONS = {"select", "combine", "recommend", "unclear"}
@@ -59,7 +59,25 @@ _SELECTION_QUESTION = (
     "'1번과 2번 결합', '다시 추천', '전문가 추천'처럼 답할 수 있습니다."
 )
 
-_REGENERATE_KEYWORDS = ("다시 추천", "다른 후보", "재추천", "다시 만들어", "다시 제안", "새로운 후보")
+_REGENERATE_KEYWORDS = (
+    "다시 추천",
+    "다른 후보",
+    "재추천",
+    "다시 만들어",
+    "다시 제안",
+    "새로운 후보",
+    # 후보를 선택한 뒤 refinement 질문에 들어간 상태에서도 사용자가
+    # 자연스럽게 쓰는 재생성 표현을 결정적으로 인식한다. "다시 설명"과 같은
+    # 일반 명확화 요청을 재생성으로 오판하지 않도록 아이디어/기획 대상 표현만 두었다.
+    "아이디어 다시 짜",
+    "아이디어를 다시 짜",
+    "아이디어 다시 만들",
+    "아이디어를 다시 만들",
+    "아이디어 새로",
+    "새 아이디어",
+    "기획 다시 짜",
+    "처음부터 다시 짜",
+)
 
 # "1", "1번", "1번째", "candidate_1", "candidate 1" 처럼 순수하게 번호만 가리키는 경우만
 # 코드가 결정적으로 처리한다 — 문장이 더 길거나 다른 말이 섞여 있으면(예: "1번인데 2번
@@ -178,7 +196,7 @@ def _normalize(text: str) -> str:
     return (text or "").strip()
 
 
-def _is_regenerate_request(text: str) -> bool:
+def is_regenerate_request(text: str) -> bool:
     normalized = _normalize(text)
     return any(keyword in normalized for keyword in _REGENERATE_KEYWORDS)
 
@@ -239,6 +257,18 @@ def _resolve_selection(
     idea["source"] = source
     idea["source_candidate_ids"] = source_ids
 
+    # 용준/Claude(2026-07-21, 요청: 전문가 라운드테이블 전환): 이전에는 candidate_selection
+    # 직후 planning_question(인터뷰) 노드가 require_combine_structure=True로 실행되어
+    # "1번과 2번을 결합..."을 원본 후보 제목·핵심 내용까지 재진술했다. 이제는 그 노드를
+    # 거치지 않고 곧바로 planning_expert_discussion(라운드테이블)으로 들어가므로, 원본
+    # 후보 정보가 사라지지 않도록 이 요약 메시지에 "결합/선택 대상 후보" 섹션을 추가한다 —
+    # planning_expert_discussion이 conversation_context.recent_messages로 이 메시지를 그대로
+    # 보므로 별도 LLM 호출 없이 컨텍스트가 보존된다.
+    source_lines = "\n".join(
+        f"- {c.get('title', '')}: {c.get('problem', '')}" for c in (source_candidates or []) if isinstance(c, dict)
+    )
+    source_section = f"\n\n[선택/결합 대상 후보]\n{source_lines}" if source_lines else ""
+
     summary_message = _build_message(
         persona_id="ideation_facilitator",
         round_number=state["round"],
@@ -247,6 +277,7 @@ def _resolve_selection(
             f"선택된 아이디어: {idea.get('title', '')}\n"
             f"문제: {idea.get('problem', '')}\n"
             f"선택 이유: {reason}"
+            f"{source_section}"
         ),
         referenced_message_ids=[],
         evidence=[],
@@ -255,8 +286,12 @@ def _resolve_selection(
     problem = idea.get("problem", "") or ""
     initial_idea_text = f"{title} — {problem}".strip(" —") or None
 
+    # 용준/Claude(2026-07-21, 요청: 전문가 라운드테이블 전환) — refinement 시작과 동일하게,
+    # 후보 확정 직후에도 라운드테이블 진입 전 진행자 안건 제시 메시지를 붙인다(LLM 호출 없음).
+    opening_message = build_roundtable_opening_message(initial_idea_text or title, round_number=state["round"])
+
     return {
-        "messages": [summary_message],
+        "messages": [summary_message, opening_message],
         "selected_idea": idea,
         "selection_reason": reason,
         "user_idea": idea,
@@ -371,15 +406,15 @@ def make_candidate_selection_node(
                 source_candidates=[matched],
             )
 
-        if _is_regenerate_request(text):
+        if is_regenerate_request(text):
             regen_count = state.get("candidate_regeneration_count", 0)
-            if regen_count >= _MAX_CANDIDATE_REGENERATIONS:
+            if regen_count >= MAX_CANDIDATE_REGENERATIONS:
                 notice = _build_message(
                     persona_id="ideation_facilitator",
                     round_number=state["round"],
                     message_type="summary",
                     content=(
-                        f"후보 재추천은 최대 {_MAX_CANDIDATE_REGENERATIONS}회까지 가능합니다. "
+                        f"후보 재추천은 최대 {MAX_CANDIDATE_REGENERATIONS}회까지 가능합니다. "
                         "현재 제시된 후보 중에서 선택하거나 '전문가 추천'을 요청해 주세요."
                     ),
                     referenced_message_ids=[],

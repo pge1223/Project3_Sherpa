@@ -92,3 +92,9 @@ data/raw/
 # SSH 키
 *.pem
 *.key
+
+# RAG 품질 평가 도구 judge 결과 캐시 (ai/rag/evaluation/rag_quality/cli.py)
+.judge_cache/
+
+# RAG 품질 평가 실행 결과
+reports/rag_eval/

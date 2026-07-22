@@ -134,6 +134,86 @@ def _stub_llm_call(session_id: str, model: str):
                 {"answer_type": "answer", "reason": "충분", "follow_up_question": None, "clarification_response": None},
                 ensure_ascii=False,
             )
+        if "[제안 규칙]" in prompt:
+            # 용준/Claude(2026-07-21, 요청: "모르겠다" UX 개선) — 전문가 위임(expert_delegation)
+            # 제안 생성 프롬프트.
+            is_planning = "당신은 AI Review Board의 기획 전문가입니다" in prompt
+            speaker = "planning_expert" if is_planning else "dev_expert"
+            return json.dumps(
+                {
+                    "proposal": f"[{speaker}] 임시 제안",
+                    "reason": f"[{speaker}] 제안 이유",
+                    "assumption": f"[{speaker}] 이 방향으로 진행",
+                    "responding_to": None,
+                    "revision": None,
+                    "referenced_message_ids": [],
+                    "evidence": [],
+                },
+                ensure_ascii=False,
+            )
+        if "[위임 검토 규칙]" in prompt:
+            # 용준/Claude(2026-07-21, 요청: expert_delegation도 위원 간 상호 검토로 확장) —
+            # stance="보완"(REVISION_TRIGGER_STANCES 밖)이라 수정 턴은 추가로 실행되지 않는다.
+            is_planning = "당신은 AI Review Board의 기획 전문가입니다" in prompt
+            reviewer = "planning_expert" if is_planning else "dev_expert"
+            return json.dumps(
+                {
+                    "stance": "보완",
+                    "judgment": f"[{reviewer}] 검토 판단",
+                    "reason": f"[{reviewer}] 검토 근거",
+                    "responding_to": "상대 전문가의 임시 제안",
+                    "agreement": f"[{reviewer}] 동의 지점",
+                    "concern": "",
+                    "recommendation": f"[{reviewer}] 채택 가능",
+                    "referenced_message_ids": [],
+                    "evidence": [],
+                },
+                ensure_ascii=False,
+            )
+        if "[위임 정리 규칙]" in prompt:
+            return json.dumps(
+                {
+                    "agreements": ["제안 방향에 합의"],
+                    "considerations": [],
+                    "final_recommendation": "이 방향으로 진행하겠습니다.",
+                },
+                ensure_ascii=False,
+            )
+        if "[의견 규칙]" in prompt:
+            # 용준/Claude(2026-07-21, 요청: 위원 간 실제 회의로 개편) — 사용자가 기획/개발
+            # 두 질문에 모두 정상 답변하면(위임 없이) expert_discussion이 실행된다.
+            is_planning = "당신은 AI Review Board의 기획 전문가입니다" in prompt
+            speaker = "planning_expert" if is_planning else "dev_expert"
+            is_review_stage = "[discussion_stage]\nreview" in prompt
+            return json.dumps(
+                {
+                    "stance": "보완",
+                    "judgment": f"[{speaker}] 판단",
+                    "reason": f"[{speaker}] 근거",
+                    "suggestion": f"[{speaker}] 제안",
+                    "interim_conclusion": f"[{speaker}] 현재 임시 결론",
+                    "responding_to": "상대 발언" if is_review_stage else None,
+                    "agreement": "동의 지점" if is_review_stage else "",
+                    "concern": "",
+                    "confirmed": [],
+                    "unconfirmed": [],
+                    "referenced_message_ids": [],
+                    "evidence": [],
+                    "next_action": "await_user_decision" if is_review_stage else None,
+                },
+                ensure_ascii=False,
+            )
+        if "[진행자 정리 규칙]" in prompt:
+            return json.dumps(
+                {
+                    "agreements": [],
+                    "disagreements": [],
+                    "facilitator_summary": "두 전문가가 이번 라운드 의견을 정리했습니다.",
+                    "needs_user_decision": False,
+                    "user_question": None,
+                },
+                ensure_ascii=False,
+            )
         if "[해석 규칙]" in prompt:
             # 용준/Claude(2026-07-21, /board 실 연동): 후보 결합(combine) 응답 — 이번
             # 확장(원본 후보/결합 분석을 API 응답에 노출)을 검증하는 테스트에서만 실제로
@@ -190,6 +270,31 @@ def client() -> TestClient:
     return TestClient(app)
 
 
+def _force_session_to_awaiting_planning_answer(session_id: str, llm_call) -> None:
+    """용준/Claude(2026-07-21, 요청: 전문가 라운드테이블 전환) 보존 검증용 헬퍼 — 새 세션은
+    더 이상 phase="awaiting_planning_answer"(1:1 인터뷰 진입점)로 시작하지 않지만
+    (start_ideation_conversation이 곧바로 라운드테이블로 진입한다), planning_question
+    노드와 그 정지 지점 자체는 하위 호환을 위해 코드에 그대로 남아 있다. 과거에 저장된
+    세션이 이 phase에 멈춰 있었다고 가정하고 세션 스토어에 직접 주입해, /reply API가 그
+    보존된 경로를 여전히 올바르게 처리하는지 검증한다."""
+    from graph.ideation_conv_nodes import make_conv_question_node
+    from graph.ideation_conv_state import initial_conv_state
+
+    state = dict(
+        initial_conv_state(
+            session_id,
+            {"competition_name": "데모 공모전"},
+            {"description": "소상공인이 손님 문의에 자동으로 답하는 챗봇"},
+        )
+    )
+    state["phase"] = "planning_question"
+    state["messages"] = []
+    node = make_conv_question_node("planning_expert", "awaiting_planning_answer", llm_call)
+    update = node(state)
+    state = {**state, **update, "messages": state["messages"] + update.get("messages", [])}
+    conv_route._store.update(session_id, state)
+
+
 def test_start_without_user_idea_returns_200_and_discovery_mode(client: TestClient):
     resp = client.post(
         "/ideation-conversation/start",
@@ -219,7 +324,9 @@ def test_active_stage_switches_to_refinement_after_candidate_selection(client: T
     assert reply_resp.status_code == 200
     body = reply_resp.json()
     assert body["ideation_mode"] == "discovery"
-    assert body["phase"] == "awaiting_planning_answer"
+    # 용준/Claude(2026-07-21, 요청: 전문가 라운드테이블 전환) — 후보 확정 직후 라운드테이블이
+    # 같은 요청 안에서 곧바로 끝까지 실행돼 "awaiting_user_decision"으로 멈춘다.
+    assert body["phase"] == "awaiting_user_decision"
     assert body["active_stage"] == "refinement"
 
 
@@ -252,7 +359,9 @@ def test_start_with_user_idea_still_returns_refinement_mode_backward_compatible(
     assert resp.status_code == 200
     body = resp.json()
     assert body["ideation_mode"] == "refinement"
-    assert body["phase"] == "awaiting_planning_answer"
+    # 용준/Claude(2026-07-21, 요청: 전문가 라운드테이블 전환) — 초기 아이디어가 있으면
+    # 곧바로 라운드테이블 한 라운드까지 실행된 뒤 "awaiting_user_decision"으로 멈춘다.
+    assert body["phase"] == "awaiting_user_decision"
     # 기존 필드가 하나도 빠지지 않았다.
     for field in (
         "session_id",
@@ -274,7 +383,11 @@ def test_start_with_user_idea_still_returns_refinement_mode_backward_compatible(
     # 용준/Claude(2026-07-21, 질문 주제 구조화): resolved_topics/pending_question_topic은
     # 순수 추가 필드다 — 요청 16번(기존 필드 유지) + 신규 필드 노출을 함께 확인한다.
     assert body["resolved_topics"] == []
-    assert body["pending_question_topic"] == "problem"  # 첫 질문은 항상 우선순위 최상위 주제.
+    # 용준/Claude(2026-07-21, 요청: 전문가 라운드테이블 전환) — pending_question_topic은
+    # 진행자가 실제로 사용자에게 직접 질문을 던졌을 때만 채워진다(discussion_facilitator
+    # stub은 needs_user_decision=False를 반환하므로 None이다). 1:1 인터뷰 질문 노드가 만드는
+    # "problem"이라는 고정값은 더 이상 첫 라운드에서 나오지 않는다.
+    assert body["pending_question_topic"] is None
 
 
 def test_reply_response_includes_topic_fields_after_first_answer(client: TestClient):
@@ -289,7 +402,10 @@ def test_reply_response_includes_topic_fields_after_first_answer(client: TestCli
     )
     assert start_resp.status_code == 200
     session_id = start_resp.json()["session_id"]
-    assert start_resp.json()["pending_question_topic"] == "problem"
+    # 용준/Claude(2026-07-21, 요청: 전문가 라운드테이블 전환) — 라운드테이블은 진행자가
+    # 실제로 질문을 던졌을 때만 pending_question_topic을 채운다(stub은 needs_user_decision
+    # =False를 반환).
+    assert start_resp.json()["pending_question_topic"] is None
 
     reply_resp = client.post(
         f"/ideation-conversation/{session_id}/reply",
@@ -341,7 +457,83 @@ def test_reply_response_includes_merge_context_fields_after_combine(client: Test
     assert body["merge_analysis"]["fit"] == "high"
     assert body["merge_analysis"]["common_problem"] == "반복 업무 부담"
     assert body["selected_idea"]["title"] == "결합 아이디어"
-    assert body["phase"] == "awaiting_planning_answer"
+    # 용준/Claude(2026-07-21, 요청: 전문가 라운드테이블 전환) — 결합 확정 직후 라운드테이블이
+    # 같은 요청 안에서 곧바로 끝까지 실행돼 "awaiting_user_decision"으로 멈춘다.
+    assert body["phase"] == "awaiting_user_decision"
+
+
+# ---------------------------------------------------------------------------
+# 용준/Claude(2026-07-21, 요청: "모르겠다" UX 개선): /reply API 계층에서도 사용자가
+# "잘 모르겠어" 같은 표현으로 답하면 같은 질문을 반복하지 않고, 담당 전문가의 제안
+# 메시지가 생성되며 다음 단계로 진행되는지 확인한다(그래프 레벨 상세 검증은
+# ai/meeting/tests/test_ideation_conv_graph.py가 담당한다).
+# ---------------------------------------------------------------------------
+
+
+def test_reply_with_dont_know_advances_instead_of_repeating_question(client: TestClient):
+    """용준/Claude(2026-07-21, 요청: 전문가 라운드테이블 전환) — expert_delegation 위임
+    흐름은 여전히 phase="awaiting_planning_answer"/"awaiting_developer_answer"(1:1 인터뷰
+    진입점)에서만 동작한다(PHASE_TO_PENDING_PERSONA). 새 세션은 더 이상 그 phase로
+    시작하지 않으므로, 레거시 세션(과거에 그 phase에 멈춰 있던 세션)을 세션 스토어에 직접
+    주입해 /reply API가 그 보존된 경로를 여전히 올바르게 처리하는지 검증한다."""
+    start_resp = client.post(
+        "/ideation-conversation/start",
+        json={
+            "competition_name": "데모 공모전",
+            "user_idea": "소상공인이 손님 문의에 자동으로 답하는 챗봇",
+        },
+    )
+    assert start_resp.status_code == 200
+    session_id = start_resp.json()["session_id"]
+    _force_session_to_awaiting_planning_answer(session_id, _stub_llm_call(session_id, "gpt-test"))
+
+    reply_resp = client.post(f"/ideation-conversation/{session_id}/reply", json={"message": "잘 모르겠어"})
+    assert reply_resp.status_code == 200
+    body = reply_resp.json()
+
+    assert body["phase"] == "awaiting_developer_answer"
+    # 용준/Claude(2026-07-21, 요청: expert_delegation도 위원 간 상호 검토로 확장) — 단일
+    # 위원 제안으로 끝나지 않고 [담당(기획) 제안, 반대(개발) 검토, 진행자 권고안, 다음
+    # 질문(개발)] 순서로 이어진다.
+    proposal_message = next(
+        m for m in body["messages"] if m["speaker_id"] == "planning_expert" and m["message_type"] == "opinion"
+    )
+    assert "[기획 전문가 제안]" in proposal_message["content"]
+    assert "임시 가정" in proposal_message["content"]
+    assert any(m["speaker_id"] == "ideation_facilitator" and m["message_type"] == "summary" for m in body["messages"])
+
+
+def test_session_recovery_preserves_discussion_rounds_and_message_order(client: TestClient):
+    """요청 2026-07-21 후속 5번 — 세션 복구(GET /ideation-conversation/{session_id}) 후에도
+    discussion_rounds와 메시지 순서가 그대로 보존되는지 확인한다. 후보 선택 -> 기획/개발
+    질문에 정상 답변 -> expert_discussion(기획 최초 의견 -> 개발 검토 -> 진행자 정리)까지
+    실제로 진행한 뒤, GET 응답이 마지막 POST /reply 응답과 완전히 동일한지 비교한다."""
+    start_resp = client.post(
+        "/ideation-conversation/start",
+        json={"competition_name": "데모 공모전", "competition_document": "실현가능성을 평가한다."},
+    )
+    assert start_resp.status_code == 200
+    session_id = start_resp.json()["session_id"]
+
+    client.post(f"/ideation-conversation/{session_id}/reply", json={"message": "1번"})
+    client.post(f"/ideation-conversation/{session_id}/reply", json={"message": "타깃은 동네 카페 사장님입니다"})
+    reply_resp = client.post(
+        f"/ideation-conversation/{session_id}/reply", json={"message": "카카오톡 채널 API를 쓰려 합니다"}
+    )
+    assert reply_resp.status_code == 200
+    reply_body = reply_resp.json()
+    assert reply_body["discussion_rounds"], "discussion_rounds가 비어 있으면 안 된다"
+
+    get_resp = client.get(f"/ideation-conversation/{session_id}")
+    assert get_resp.status_code == 200
+    get_body = get_resp.json()
+
+    # 메시지 순서와 speaker_id 시퀀스가 완전히 동일해야 한다(세션 복구 후에도 회의 발언
+    # 순서가 보존된다).
+    assert [m["message_id"] for m in get_body["messages"]] == [m["message_id"] for m in reply_body["messages"]]
+    assert [m["speaker_id"] for m in get_body["messages"]] == [m["speaker_id"] for m in reply_body["messages"]]
+    assert get_body["discussion_rounds"] == reply_body["discussion_rounds"]
+    assert get_body["phase"] == reply_body["phase"]
 
 
 if __name__ == "__main__":

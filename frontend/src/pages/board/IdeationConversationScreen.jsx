@@ -4,6 +4,7 @@ import {
   finalizeIdeationConversation,
   getIdeationConversation,
   replyIdeationConversation,
+  replyIdeationConversationStream,
   startIdeationConversation,
 } from '../../api/ideationConversationApi'
 import { getAnnouncementAnalysis } from '../../api/documentApi'
@@ -20,6 +21,15 @@ import {
   speakerMetaFor,
   statusLabelFor,
 } from './ideationConversationHelpers'
+import {
+  advanceDisplay,
+  applyStreamEvent,
+  charsPerTickFor,
+  createEmptyStreamState,
+  dedupeMessagesById,
+  isFullyDisplayed,
+  pendingCharCount,
+} from './ideationStreamReducer'
 
 // 작성자: 용준/Claude(2026-07-21)
 // 목적: /board "작성 전 → 주제 발굴" 흐름의 실제 대화형 아이디어 회의 화면.
@@ -53,12 +63,33 @@ function ideationSessionStorageKey(projectId) {
   return projectId ? `ideation-conv-session:${projectId}` : null
 }
 
-function MessageBubble({ message }) {
+// 커서 깜빡임 애니메이션 — Shell(ReviewBoardPrototype.jsx)의 전역 <style>을 건드리지 않고
+// 이 컴포넌트 전용으로 한 번만 주입한다(기존 코드베이스가 Shell에서 이미 쓰는 "JSX 안에
+// <style> 태그를 직접 렌더링"하는 패턴 그대로).
+function StreamingCursorStyle() {
+  return (
+    <style>{`
+      @keyframes rb-ideation-cursor-blink { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
+      .rb-ideation-cursor { display: inline-block; width: 2px; margin-left: 1px; background: currentColor; animation: rb-ideation-cursor-blink 1s step-start infinite; }
+    `}</style>
+  )
+}
+
+function MessageBubble({ message, streaming = false }) {
   const meta = speakerMetaFor(message)
   const isRight = meta.align === 'right'
-  const hasContent = !!message.content?.trim()
+  // 스트리밍 중인 말풍선은 displayedContent(타이핑 큐가 드러낸 만큼)만 보여준다 —
+  // content(서버에서 실제로 받은 전체 텍스트)를 그대로 쓰면 델타가 도착하는 순간
+  // 문장이 통째로 튀어나와 타이핑 효과가 사라진다. canonical(완료된) 메시지는
+  // displayedContent 필드가 없으므로 content를 그대로 쓴다.
+  const text = streaming ? message.displayedContent ?? '' : message.content
+  const hasContent = !!text?.trim()
+  // done(message_end 수신)이 와도 displayedContent가 content를 따라잡기 전까지는
+  // 커서를 유지한다 — "message_end가 와도 남은 글자 큐를 끝까지 표시"(요청 사항).
+  const caughtUp = (message.displayedContent?.length ?? 0) >= (message.content?.length ?? 0)
+  const showCursor = streaming && !caughtUp
 
-  if (!hasContent) {
+  if (!hasContent && !streaming) {
     return (
       <div style={{ display: 'flex', justifyContent: isRight ? 'flex-end' : 'flex-start', marginBottom: 10 }}>
         <div style={{ fontSize: 12.5, color: 'var(--coral)' }}>
@@ -88,7 +119,8 @@ function MessageBubble({ message }) {
             whiteSpace: 'pre-wrap',
           }}
         >
-          {message.content}
+          {text}
+          {showCursor && <span className="rb-ideation-cursor">▍</span>}
         </div>
       </div>
     </div>
@@ -241,6 +273,24 @@ function ErrorBanner({ error, onRetry }) {
   )
 }
 
+// 요청: "스트리밍이 비활성화되거나 fallback됐다면 화면 또는 콘솔에 그 이유가 드러나게
+// 해주세요. 조용히 기존 /reply로 fallback해서는 안 됩니다." — /reply/stream이 404(플래그
+// 꺼짐)로 응답해 동기식 /reply로 전환할 때 이 배너를 띄운다(handleSend가 console.warn도
+// 함께 남긴다). ErrorBanner와 달리 재시도 버튼이 없다 — 오류가 아니라 "이번 세션은 계속
+// 이 방식으로 동작한다"는 지속 안내이기 때문이다.
+function StreamFallbackNotice({ message }) {
+  if (!message) return null
+  return (
+    <div
+      className="card glass"
+      style={{ borderColor: 'var(--amber-dim, var(--glass-border))', marginBottom: 14, display: 'flex', alignItems: 'flex-start', gap: 10, padding: 12 }}
+    >
+      <AlertCircle size={14} color="var(--amber, var(--coral))" style={{ marginTop: 1, flexShrink: 0 }} />
+      <div style={{ fontSize: 12.5, color: 'var(--text-1)', lineHeight: 1.6 }}>{message}</div>
+    </div>
+  )
+}
+
 export function IdeationScreen({
   projectId,
   criteriaDocuments,
@@ -256,9 +306,94 @@ export function IdeationScreen({
   const [finalizing, setFinalizing] = useState(false)
   const [error, setError] = useState(null)
   const [draft, setDraft] = useState('')
+  // 용준/Claude(2026-07-21, 요청: 실시간 스트리밍) — 지금 스트리밍 중인(아직 canonical이
+  // 아닌) 메시지만 별도로 들고 있는다. 서버가 최종 state 이벤트를 보내면 이 값은 통째로
+  // createEmptyStreamState()로 비우고 ideationConv(canonical)만 그린다 — 그래서 스트리밍
+  // 미리보기와 canonical 메시지가 동시에 화면에 남아 중복되는 경우가 구조적으로 없다.
+  const [streamState, setStreamState] = useState(() => createEmptyStreamState())
+  // 요청: "스트리밍이 비활성화되거나 fallback됐다면 화면 또는 콘솔에 그 이유가 드러나게
+  // 해주세요" — 동기식 /reply로 전환했을 때 사용자에게 보여줄 지속 안내 문구.
+  const [streamFallbackNotice, setStreamFallbackNotice] = useState(null)
 
   const startedRef = useRef(false)
   const chatEndRef = useRef(null)
+  const streamAbortRef = useRef(null)
+  // 스트리밍 엔드포인트가 비활성화(404)로 확인되면 이 세션 동안은 다시 시도하지 않고
+  // 동기식 API로만 보낸다(요청: "플래그가 꺼져 있으면 기존 비스트리밍 API로 돌아갈 수
+  // 있도록") — 단, 전환 시점에는 console.warn + streamFallbackNotice로 반드시 알린다
+  // (요청: "조용히 기존 /reply로 fallback해서는 안 됩니다").
+  const streamingSupportedRef = useRef(true)
+  // 네트워크로부터 최종 'state'(또는 'error') 이벤트를 이미 받았지만, 아직 화면 타이핑이
+  // 그 텍스트를 다 따라잡지 못해 canonical로 교체를 미루고 있는 상태를 담는다. ref인
+  // 이유: 이 값 자체는 화면에 아무것도 그리지 않으므로 리렌더를 유발할 필요가 없고,
+  // 아래 rAF 루프가 매 프레임 읽기만 하면 된다.
+  const pendingFinalRef = useRef(null)
+  // 방어 코드(요청: "중복 버그" 진단) — 실제 원인은 서버 쪽에서 재현하지 못했다(계획 문서
+  // 1번 참고). 남은 유력 용의점은 이 rAF 루프 effect가 (StrictMode 이중 호출 등으로) 두 번
+  // 동시에 도는 경우다 — 이 ref로 같은 컴포넌트 인스턴스에서 루프가 항상 하나만 돌게 막는다.
+  const rafLoopActiveRef = useRef(false)
+
+  useEffect(() => {
+    return () => {
+      // 요청: "컴포넌트 unmount 시 요청 취소".
+      streamAbortRef.current?.abort()
+      pendingFinalRef.current = null
+    }
+  }, [])
+
+  // 실제 LLM 델타가 도착하는 즉시 content(수신 텍스트)는 이미 갱신돼 있다 — 이 루프는
+  // "화면에 보여주는 속도"만 조절한다(요청: "requestAnimationFrame 또는 짧은 타이머로
+  // 큐에서 1~2글자씩 displayedText에 추가"). sending이 true인 동안 계속 돌며, 네트워크가
+  // 끝나 pendingFinalRef가 채워져도 화면 타이핑이 content를 다 따라잡을 때까지는 계속
+  // 돈다 — 다 따라잡은 순간에만 canonical state로 교체한다(요청: "최종 state가 먼저
+  // 도착해도 임시 스트림 메시지를 즉시 삭제하지 않음").
+  useEffect(() => {
+    if (!sending) return
+    if (rafLoopActiveRef.current) return // 이미 다른 루프가 돌고 있으면 두 번째 루프를 시작하지 않는다.
+    rafLoopActiveRef.current = true
+    let rafId
+    let cancelled = false
+
+    function finalizeStream(finalState, errorEvent) {
+      if (errorEvent) {
+        setError(classifyIdeationConvError(new Error(errorEvent.message)))
+      } else if (finalState) {
+        setIdeationConv(finalState)
+        setDraft('')
+      } else {
+        // state/error 이벤트를 하나도 못 받은 채 스트림이 끝났다(연결이 조기 종료된 경우
+        // 등) — 회의 화면은 유지하되 무엇이 잘못됐는지 알린다.
+        setError(classifyIdeationConvError(new Error('스트리밍 응답이 완료되지 않았습니다.')))
+      }
+      setSending(false)
+    }
+
+    function tick() {
+      if (cancelled) return
+      setStreamState((prev) => {
+        const pending = pendingCharCount(prev)
+        const next = pending > 0 ? advanceDisplay(prev, charsPerTickFor(pending)) : prev
+        if (pendingFinalRef.current && isFullyDisplayed(next)) {
+          const { finalState, errorEvent } = pendingFinalRef.current
+          pendingFinalRef.current = null
+          // setState 업데이터 함수 안에서 다른 컴포넌트 상태를 직접 바꾸면 안 되므로
+          // (React 경고 대상), 렌더 커밋 이후로 미룬다.
+          queueMicrotask(() => finalizeStream(finalState, errorEvent))
+          return createEmptyStreamState()
+        }
+        return next
+      })
+      rafId = requestAnimationFrame(tick)
+    }
+    rafId = requestAnimationFrame(tick)
+
+    return () => {
+      cancelled = true
+      if (rafId) cancelAnimationFrame(rafId)
+      rafLoopActiveRef.current = false
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sending])
 
   async function runStart() {
     setStarting(true)
@@ -312,7 +447,10 @@ export function IdeationScreen({
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
-  }, [ideationConv?.messages?.length])
+    // 화면에 실제로 드러난 글자 수(displayedContent)가 늘어날 때(타이핑 진행)마다도
+    // 스크롤해야 하므로, 배열 참조 자체가 아니라 지금까지 누적된 총 글자 수를 의존값으로
+    // 쓴다(요청: "delta가 들어올 때 자동 스크롤" — content가 아니라 실제 화면 표시 기준).
+  }, [ideationConv?.messages?.length, streamState.messages.reduce((n, m) => n + (m.displayedContent?.length || 0), 0)])
 
   const phase = ideationConv?.phase
   const busy = starting || sending || finalizing || saving
@@ -323,20 +461,90 @@ export function IdeationScreen({
   const hasCandidates = (ideationConv?.idea_candidates?.length || 0) > 0
   const hasSelected = !!ideationConv?.selected_idea
 
-  async function handleSend(overrideText) {
-    const text = (overrideText ?? draft).trim()
-    if (!text || !ideationConv || !canReplyOrContinue) return
-    setSending(true)
-    setError(null)
+  async function sendNonStreaming(text) {
     try {
       const data = await replyIdeationConversation(ideationConv.session_id, text)
       setIdeationConv(data)
       setDraft('')
     } catch (err) {
       setError(classifyIdeationConvError(err))
-    } finally {
-      setSending(false)
     }
+  }
+
+  // 용준/Claude(2026-07-21, 요청: 실시간 스트리밍) — 실제 OpenAI 토큰이 도착하는 즉시
+  // content(streamState)가 갱신된다(완성된 응답을 받은 뒤 재생하는 가짜 타이핑 아님).
+  // 화면에 얼마나 드러낼지(displayedContent)는 위 rAF 루프가 별도로 조절한다. 이 함수는
+  // 네트워크가 끝나도 곧바로 canonical로 교체하지 않는다 — 최종 state/error를
+  // pendingFinalRef에 넘겨두기만 하고, 실제 교체·setSending(false)는 화면 타이핑이 다
+  // 따라잡은 뒤 rAF 루프의 finalizeStream이 수행한다.
+  async function handleSend(overrideText) {
+    const text = (overrideText ?? draft).trim()
+    if (!text || !ideationConv || !canReplyOrContinue) return
+    setSending(true)
+    setError(null)
+    setStreamFallbackNotice(null)
+
+    if (!streamingSupportedRef.current) {
+      await sendNonStreaming(text)
+      setSending(false)
+      return
+    }
+
+    setStreamState(createEmptyStreamState())
+    pendingFinalRef.current = null
+    const controller = new AbortController()
+    streamAbortRef.current = controller
+    let finalState = null
+    let streamErrorEvent = null
+    try {
+      await replyIdeationConversationStream(ideationConv.session_id, text, {
+        signal: controller.signal,
+        onEvent: (event) => {
+          if (event.type === 'state') {
+            finalState = event.state
+          } else if (event.type === 'error') {
+            streamErrorEvent = event
+          } else {
+            setStreamState((prev) => applyStreamEvent(prev, event))
+          }
+        },
+      })
+    } catch (err) {
+      streamAbortRef.current = null
+      setStreamState(createEmptyStreamState())
+      pendingFinalRef.current = null
+      if (err?.name === 'AbortError') {
+        // 사용자가 화면을 벗어나 요청을 취소한 경우 — 오류로 취급하지 않는다.
+        setSending(false)
+        return
+      }
+      const classified = classifyIdeationConvError(err)
+      if (classified.type === 'disabled') {
+        // 스트리밍 자체가 꺼져 있다(/reply/stream 404) — 이번 세션은 이후 계속 동기식
+        // API만 쓴다. 요청: "조용히 기존 /reply로 fallback해서는 안 됩니다" — 콘솔과
+        // 화면 배너 양쪽에 이유를 남긴 뒤에만 전환한다.
+        streamingSupportedRef.current = false
+        console.warn(
+          '[ideation-stream] POST /reply/stream 이 비활성화(404) 응답을 반환해 동기식 /reply로 전환합니다. ' +
+            '백엔드 backend/.env의 ENABLE_IDEATION_STREAMING 값을 확인하세요.',
+          err,
+        )
+        setStreamFallbackNotice(
+          '실시간 스트리밍 응답이 비활성화되어 있어 일반 응답 방식으로 전환했습니다. (백엔드 ENABLE_IDEATION_STREAMING 설정을 확인하세요)',
+        )
+        await sendNonStreaming(text)
+        setSending(false)
+        return
+      }
+      setError(classified)
+      setSending(false)
+      return
+    }
+
+    streamAbortRef.current = null
+    // 요청: "최종 state가 먼저 도착해도 임시 스트림 메시지를 즉시 삭제하지 않음" — 여기서는
+    // canonical로 바꾸지 않고 rAF 루프가 화면 타이핑을 다 끝낸 뒤 처리하도록 넘겨둔다.
+    pendingFinalRef.current = { finalState, errorEvent: streamErrorEvent }
   }
 
   async function handleFinalize() {
@@ -407,13 +615,27 @@ export function IdeationScreen({
         </div>
 
         <ErrorBanner error={error} onRetry={handleRestart} />
+        <StreamFallbackNotice message={streamFallbackNotice} />
+        <StreamingCursorStyle />
 
         <div className="card glass" style={{ minHeight: 360, maxHeight: 520, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 4, padding: 16 }}>
           {starting && !ideationConv && (
             <p style={{ color: 'var(--text-2)', fontSize: 13 }}>공모전 분석을 바탕으로 아이디어 후보를 만들고 있어요...</p>
           )}
-          {ideationConv?.messages?.map((m) => <MessageBubble key={m.message_id} message={m} />)}
-          {(sending || finalizing) && (
+          {dedupeMessagesById(ideationConv?.messages).map((m) => <MessageBubble key={m.message_id} message={m} />)}
+          {/* 스트리밍 임시 메시지 — message_start를 받는 즉시 말풍선이 생기고, 실제 LLM
+              델타가 도착하는 대로 안에서 텍스트가 자란다(완성 후 재생하는 효과 아님).
+              streamState는 최종 state 이벤트가 오면 즉시 비워지므로, 이 목록과 위
+              ideationConv.messages가 같은 내용으로 동시에 남아 중복되는 순간은 없다. */}
+          {streamState.messages.map((m) => (
+            <MessageBubble key={m.message_id} message={m} streaming />
+          ))}
+          {sending && streamState.messages.length === 0 && (
+            <p style={{ fontSize: 12.5, color: 'var(--text-2)' }}>
+              {streamState.phaseLabel || `${statusLabelFor({ phase, starting, sending, finalizing })}...`}
+            </p>
+          )}
+          {finalizing && (
             <p style={{ fontSize: 12.5, color: 'var(--text-2)' }}>
               {statusLabelFor({ phase, starting, sending, finalizing })}...
             </p>
@@ -427,7 +649,13 @@ export function IdeationScreen({
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && canReplyOrContinue && handleSend()}
-              placeholder={canReplyOrContinue ? '답변을 입력하세요' : '전문가 응답을 기다리는 중입니다'}
+              placeholder={
+                !canReplyOrContinue
+                  ? '전문가 응답을 기다리는 중입니다'
+                  : phase === 'awaiting_user_decision'
+                    ? '필요하면 의견을 남겨주세요 (선택 사항)'
+                    : '답변을 입력하세요'
+              }
               disabled={!canReplyOrContinue}
               style={{ flex: 1, background: 'var(--bg-1)', border: '1px solid var(--glass-border)', borderRadius: 10, padding: '10px 14px', color: 'var(--text-0)', fontSize: 13 }}
             />
