@@ -10,6 +10,7 @@ from ai.rag.parsers.base_parser import BaseParser
 from ai.rag.parsers.pdf_parser import PDFParser
 from ai.rag.parsers.docx_parser import DOCXParser
 from ai.rag.parsers.pptx_parser import PPTXParser
+from ai.rag.parsers.hwpx_parser import HWPParser, HWPXParser
 from ai.rag.parsers.schemas import DocumentExtractionResult, FileType
 from ai.rag.parsers.exceptions import UnsupportedFormatError, FileSizeLimitExceededError
 
@@ -22,6 +23,8 @@ PARSER_MAP: dict[str, type[BaseParser]] = {
     "pdf": PDFParser,
     "docx": DOCXParser,
     "pptx": PPTXParser,
+    "hwp": HWPParser,
+    "hwpx": HWPXParser,
 }
 
 
