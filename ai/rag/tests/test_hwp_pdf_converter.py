@@ -259,6 +259,49 @@ class TestConvertSuccess:
         assert "--headless" in captured["command"]
         assert "--outdir" in captured["command"]
 
+    def test_command_uses_default_profile_not_isolated(self, tmp_path):
+        """가은/Claude(2026-07-22, 용준 협의 — 동시 변환 실패 대응, 실측 재설계): HWP/HWPX
+        변환 명령에 -env:UserInstallation 격리 인자가 있으면 안 된다 — HWP 필터(H2Orestart
+        확장)가 사용자 기본 프로필 안에만 설치돼 있어서, 빈 격리 프로필로 변환하면 soffice가
+        0xC0000409로 크래시한다(4조합 매트릭스 실측). 동시 실행 충돌은 격리 대신
+        SOFFICE_DEFAULT_PROFILE_LOCK 직렬화로 막는다."""
+        source = _write_fake_hwp(tmp_path / "a.hwp")
+        converter = HwpPdfConverter(config=_config())
+        captured = {}
+
+        def _capture_and_succeed(command, **kwargs):
+            captured["command"] = command
+            return _success_run_factory()(command, **kwargs)
+
+        with patch("ai.rag.converters.hwp_pdf_converter.subprocess.run", side_effect=_capture_and_succeed):
+            converter.convert(source, output_dir=tmp_path / "work")
+
+        env_args = [part for part in captured["command"] if part.startswith("-env:")]
+        assert env_args == [], f"HWP 변환은 기본 프로필을 써야 하는데 격리 인자가 있습니다: {env_args}"
+
+    def test_conversion_holds_default_profile_lock(self, tmp_path):
+        """변환 subprocess 실행 중에는 SOFFICE_DEFAULT_PROFILE_LOCK이 잡혀 있어야 한다 —
+        기본 프로필을 쓰는 다른 soffice 호출(다른 HWP 색인/미리보기)과의 동시 실행을 막는
+        유일한 장치이기 때문이다."""
+        from ai.rag.converters.hwp_pdf_converter import SOFFICE_DEFAULT_PROFILE_LOCK
+
+        source = _write_fake_hwp(tmp_path / "a.hwp")
+        converter = HwpPdfConverter(config=_config())
+        observed = {}
+
+        def _check_lock_and_succeed(command, **kwargs):
+            # 락이 잡혀 있으면 non-blocking acquire가 실패해야 한다.
+            acquired = SOFFICE_DEFAULT_PROFILE_LOCK.acquire(blocking=False)
+            if acquired:
+                SOFFICE_DEFAULT_PROFILE_LOCK.release()
+            observed["lock_held_during_run"] = not acquired
+            return _success_run_factory()(command, **kwargs)
+
+        with patch("ai.rag.converters.hwp_pdf_converter.subprocess.run", side_effect=_check_lock_and_succeed):
+            converter.convert(source, output_dir=tmp_path / "work")
+
+        assert observed["lock_held_during_run"] is True
+
     def test_timeout_passed_to_subprocess(self, tmp_path):
         source = _write_fake_hwp(tmp_path / "a.hwp")
         converter = HwpPdfConverter(config=_config(timeout_seconds=42))
