@@ -29,6 +29,8 @@ from ai.rag.parsers import (
     PDFParser,
     DOCXParser,
     PPTXParser,
+    HWPParser,
+    HWPXParser,
     FileSizeLimitExceededError,
     UnsupportedFormatError,
     EmptyDocumentError,
@@ -173,6 +175,111 @@ class TestPPTXParser:
         # order 순서대로 정렬되어야 함
         orders = [b.order for b in result.blocks]
         assert orders == sorted(orders), "블록이 순서대로 정렬되어야 합니다"
+
+
+class TestHWPXParser:
+    """HWPX 파서 테스트 (ZIP+XML, 외부 라이브러리/한글 설치 없이 파싱)"""
+
+    def test_parse_hwpx_success(self, sample_hwpx: Path):
+        """HWPX 정상 파싱 (문단 + 표)"""
+        if not sample_hwpx.exists():
+            pytest.skip(f"Test fixture not found: {sample_hwpx}")
+
+        result = extract_document(sample_hwpx)
+
+        assert result.file_name == "sample.hwpx"
+        assert result.file_type == FileType.HWPX
+        assert result.block_count > 0
+        assert result.blocks is not None
+
+        # HWPX는 DOCUMENT 위치 유형(섹션 번호를 location_number로 사용)
+        for block in result.blocks:
+            assert block.location_type == LocationType.DOCUMENT
+            assert block.location_number is not None
+
+        contents = [b.content for b in result.blocks]
+        assert any("프로젝트 제안서" in c for c in contents)
+        # 여러 run으로 쪼개진 문단이 하나로 합쳐져야 함
+        assert any("AI 기반 교육 플랫폼" in c for c in contents)
+
+        # 표는 TABLE 블록으로 탭/개행 구분 텍스트로 변환됨
+        table_blocks = [b for b in result.blocks if b.block_type == BlockType.TABLE]
+        assert len(table_blocks) == 1
+        assert "항목\t내용" in table_blocks[0].content
+
+        # 블록 ID 일관성 확인
+        block_ids = [b.block_id for b in result.blocks]
+        assert len(block_ids) == len(set(block_ids)), "중복된 block_id가 있습니다"
+
+    def test_hwpx_block_order(self, sample_hwpx: Path):
+        """HWPX 블록이 문서 등장 순서대로 정렬됨"""
+        if not sample_hwpx.exists():
+            pytest.skip(f"Test fixture not found: {sample_hwpx}")
+
+        result = extract_document(sample_hwpx)
+        orders = [b.order for b in result.blocks]
+        assert orders == sorted(orders), "블록이 순서대로 정렬되어야 합니다"
+
+    def test_parse_empty_hwpx(self, empty_hwpx: Path):
+        """텍스트 없는 HWPX → EmptyDocumentError"""
+        if not empty_hwpx.exists():
+            pytest.skip(f"Test fixture not found: {empty_hwpx}")
+
+        with pytest.raises(EmptyDocumentError):
+            extract_document(empty_hwpx)
+
+    def test_parse_corrupted_hwpx(self, corrupted_hwpx: Path):
+        """손상된 HWPX(유효하지 않은 ZIP) → CorruptedDocumentError"""
+        if not corrupted_hwpx.exists():
+            pytest.skip(f"Test fixture not found: {corrupted_hwpx}")
+
+        with pytest.raises(CorruptedDocumentError):
+            extract_document(corrupted_hwpx)
+
+
+class TestHWPParser:
+    """HWP(구버전 OLE 바이너리) 파서 테스트
+
+    실제 hwp 5.0 파일은 olefile 쓰기 지원이 없어 픽스처로 생성할 수 없으므로,
+    레코드 파싱 로직은 합성 바이트열로 단위 테스트하고, 컨테이너 검증(OLE 시그니처
+    불일치 → CorruptedDocumentError)은 잘못된 파일로 통합 테스트한다.
+    """
+
+    def test_extract_section_paragraphs(self, tmp_path: Path):
+        """HWPTAG_PARA_TEXT 레코드만 문단으로 추출하고 그 외 레코드는 건너뜀"""
+        import struct
+
+        from ai.rag.parsers.hwpx_parser import _HWPTAG_PARA_TEXT
+
+        def para_record(text: str) -> bytes:
+            payload = text.encode("utf-16le")
+            header = (len(payload) << 20) | _HWPTAG_PARA_TEXT
+            return struct.pack("<I", header) + payload
+
+        def other_record(rec_type: int, payload: bytes) -> bytes:
+            header = (len(payload) << 20) | rec_type
+            return struct.pack("<I", header) + payload
+
+        data = (
+            other_record(0x42, b"\x00\x00\x00\x00")
+            + para_record("사업계획서")
+            + para_record("1. 개요 내용입니다.")
+        )
+
+        dummy_hwp = tmp_path / "dummy.hwp"
+        dummy_hwp.write_bytes(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1")  # 인스턴스만 필요, 내용은 미사용
+        parser = HWPParser(dummy_hwp)
+
+        paragraphs = parser._extract_section_paragraphs(data)
+        assert paragraphs == ["사업계획서", "1. 개요 내용입니다."]
+
+    def test_parse_corrupted_hwp(self, tmp_path: Path):
+        """OLE 시그니처가 아닌 파일 → CorruptedDocumentError"""
+        bad_hwp = tmp_path / "bad.hwp"
+        bad_hwp.write_bytes(b"not an ole compound file")
+
+        with pytest.raises(CorruptedDocumentError):
+            extract_document(bad_hwp)
 
 
 class TestBlockIDDeterminism:

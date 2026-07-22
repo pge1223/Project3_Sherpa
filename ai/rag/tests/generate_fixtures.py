@@ -179,6 +179,62 @@ def create_corrupted_file(output_path: Path) -> None:
     print(f"생성됨: {output_path}")
 
 
+# HWPX 섹션 XML의 실제 태그(hp:p, hp:run, hp:t, hp:tbl/tr/tc)만 사용 — 파서는
+# 네임스페이스 접두사를 무시하고 로컬 태그명만 보므로 다른 접두사여도 무방하다.
+_SAMPLE_HWPX_SECTION0 = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<hs:sec xmlns:hp="http://www.hancom.co.kr/hwpml/2011/paragraph"
+        xmlns:hs="http://www.hancom.co.kr/hwpml/2011/section">
+  <hp:p><hp:run><hp:t>프로젝트 제안서</hp:t></hp:run></hp:p>
+  <hp:p>
+    <hp:run><hp:t>이 제안서는 </hp:t></hp:run>
+    <hp:run><hp:t>AI 기반 교육 플랫폼</hp:t></hp:run>
+    <hp:run><hp:t> 개발에 관한 것입니다.</hp:t></hp:run>
+  </hp:p>
+  <hp:tbl>
+    <hp:tr>
+      <hp:tc><hp:subList><hp:p><hp:run><hp:t>항목</hp:t></hp:run></hp:p></hp:subList></hp:tc>
+      <hp:tc><hp:subList><hp:p><hp:run><hp:t>내용</hp:t></hp:run></hp:p></hp:subList></hp:tc>
+    </hp:tr>
+    <hp:tr>
+      <hp:tc><hp:subList><hp:p><hp:run><hp:t>예산</hp:t></hp:run></hp:p></hp:subList></hp:tc>
+      <hp:tc><hp:subList><hp:p><hp:run><hp:t>1억 원</hp:t></hp:run></hp:p></hp:subList></hp:tc>
+    </hp:tr>
+  </hp:tbl>
+</hs:sec>
+"""
+
+
+def create_sample_hwpx(output_path: Path) -> None:
+    """샘플 HWPX 생성 (ZIP+XML 구조를 직접 구성 — 외부 라이브러리 불필요)"""
+    import zipfile
+
+    with zipfile.ZipFile(output_path, "w") as z:
+        z.writestr("mimetype", "application/hwp+zip")
+        z.writestr("Contents/section0.xml", _SAMPLE_HWPX_SECTION0)
+    print(f"생성됨: {output_path}")
+
+
+def create_empty_hwpx(output_path: Path) -> None:
+    """빈 HWPX 생성 (섹션은 있지만 텍스트 없음)"""
+    import zipfile
+
+    empty_section = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<hs:sec xmlns:hp="http://www.hancom.co.kr/hwpml/2011/paragraph" '
+        'xmlns:hs="http://www.hancom.co.kr/hwpml/2011/section"></hs:sec>'
+    )
+    with zipfile.ZipFile(output_path, "w") as z:
+        z.writestr("Contents/section0.xml", empty_section)
+    print(f"생성됨: {output_path}")
+
+
+def create_corrupted_hwpx(output_path: Path) -> None:
+    """손상된 HWPX 생성 (유효하지 않은 ZIP)"""
+    with open(output_path, "wb") as f:
+        f.write(b"This is not a valid zip/hwpx file")
+    print(f"생성됨: {output_path}")
+
+
 def main():
     """모든 테스트 픽스처 생성"""
     fixtures_dir = Path(__file__).parent / "fixtures"
@@ -191,6 +247,10 @@ def main():
     create_sample_pptx(fixtures_dir / "sample.pptx")
     create_empty_pdf(fixtures_dir / "empty.pdf")
     create_corrupted_file(fixtures_dir / "corrupted.pdf")
+
+    create_sample_hwpx(fixtures_dir / "sample.hwpx")
+    create_empty_hwpx(fixtures_dir / "empty.hwpx")
+    create_corrupted_hwpx(fixtures_dir / "corrupted.hwpx")
 
     # 지원하지 않는 형식 (이미 존재하는 텍스트 파일)
     txt_path = fixtures_dir / "sample.txt"
