@@ -18,6 +18,7 @@ import {
   Lightbulb, Compass, Cpu, FlaskConical,
   AlertTriangle, Zap, ChevronDown,
 } from 'lucide-react'
+import { getMyProfile } from '../api/profileApi'
 import './VersionTrackerTest.css'
 
 const CRITERION_MAX = 25 // 4항목 × 25 = 100점
@@ -85,9 +86,24 @@ const IMPL_GUIDE = {
   },
 }
 
+// 위원 탭 색 톤(경이 요청, 2026-07-22): 기획 위원 = 연보라 그라데이션, 개발 위원 = 연분홍
+// 그라데이션. gradient는 활성 탭 배경/강조에, color/soft는 텍스트·아이콘·테두리 등 단색이
+// 필요한 곳에 쓴다. (구현 난이도 hard/moderate/easy 색(빨강/노랑/초록)은 위원 색과 별개의
+// 의미축이라 그대로 둔다.)
 const COMMITTEES = {
-  planning: { name: '기획 위원', Icon: Compass, color: '#7c5cea', dim: 'rgba(124,92,234,0.12)', desc: '문제 정의 · 사용자 가치 · 차별성' },
-  dev: { name: '개발 위원', Icon: Cpu, color: '#e0603d', dim: 'rgba(224,96,61,0.12)', desc: '기술 구현 · 아키텍처 · 데이터' },
+  planning: {
+    name: '기획 위원', Icon: Compass, desc: '문제 정의 · 사용자 가치 · 차별성',
+    color: '#7c5cea', soft: '#a78bfa', dim: 'rgba(124,92,234,0.12)',
+    gradient: 'linear-gradient(135deg, #b7a3f4 0%, #8b6ff0 100%)',
+    // 항목 막대(이전 vs 현재)·현재 점수 숫자 색 — 위원 톤을 따라간다.
+    bar: { grad: 'linear-gradient(90deg,#9b82f0,#7c5cea)', faint: '#d8cff0', num: '#7c5cea' },
+  },
+  dev: {
+    name: '개발 위원', Icon: Cpu, desc: '기술 구현 · 아키텍처 · 데이터',
+    color: '#d65a9c', soft: '#f0a6c9', dim: 'rgba(214,90,156,0.14)',
+    gradient: 'linear-gradient(135deg, #f7abcc 0%, #e06aa6 100%)',
+    bar: { grad: 'linear-gradient(90deg,#f0a6c9,#d65a9c)', faint: '#f3d5e6', num: '#d65a9c' },
+  },
 }
 
 const JUDGMENT_LABEL = {
@@ -97,10 +113,14 @@ const JUDGMENT_LABEL = {
   critical_risk: { text: '중대 리스크', color: '#e0603d', bg: 'rgba(224,96,61,0.12)' },
 }
 
+// 색 정리(경이 요청, 2026-07-22): 배경마다 색이 달라 지저분해서, 배경은 전부 연한 베이지
+// (#f5f0e3)로 통일하고 선(border)·글씨·아이콘만 의미색으로 남긴다. 신규 지적은 코랄(붉은
+// 기) 대신 부드러운 주황(#e2882e)으로.
+const _BEIGE = '#f5f0e3'
 const STATUS_META = {
-  open: { Icon: AlertCircle, label: '보완 필요', color: '#b8830b', bg: 'rgba(184,131,11,0.09)', border: 'rgba(184,131,11,0.26)' },
-  new: { Icon: Plus, label: '신규 지적', color: '#e0603d', bg: 'rgba(224,96,61,0.08)', border: 'rgba(224,96,61,0.24)' },
-  resolved: { Icon: CheckCircle2, label: '해결됨', color: '#16a37a', bg: 'rgba(22,163,122,0.08)', border: 'rgba(22,163,122,0.24)' },
+  open: { Icon: AlertCircle, label: '보완 필요', color: '#b8830b', bg: _BEIGE, border: 'rgba(184,131,11,0.45)' },
+  new: { Icon: Plus, label: '신규 지적', color: '#e2882e', bg: _BEIGE, border: 'rgba(226,136,46,0.5)' },
+  resolved: { Icon: CheckCircle2, label: '해결됨', color: '#16a37a', bg: _BEIGE, border: 'rgba(22,163,122,0.45)' },
 }
 
 // --- Mock 데이터 (버전 추적 스토리: 50 -> 72 -> 86 -> 95) ------------------
@@ -268,32 +288,37 @@ function DeltaPill({ value, size = 'md' }) {
   )
 }
 
-function JudgmentChange({ before, after }) {
+// accentColor/accentBg: 'acceptable'(적정)은 기본색이 보라라, 개발 위원 섹션에선 위원
+// accent(분홍)로 맞춘다(기획 위원은 accent가 보라라 그대로). 나머지 판정색은 의미축이라 유지.
+function JudgmentChange({ before, after, accentColor, accentBg }) {
   const a = JUDGMENT_LABEL[after]
   const b = JUDGMENT_LABEL[before]
   if (!a) return null
   const changed = before && before !== after
+  const col = (key, base) => (key === 'acceptable' && accentColor ? { color: accentColor, background: accentBg } : { color: base.color, background: base.bg })
   return (
     <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
       {changed && b && (
         <>
-          <span style={{ ...chip, color: b.color, background: b.bg, opacity: 0.5 }}>{b.text}</span>
+          <span style={{ ...chip, ...col(before, b), opacity: 0.5 }}>{b.text}</span>
           <span style={{ color: '#c7c3d0', fontSize: 12 }}>→</span>
         </>
       )}
-      <span style={{ ...chip, color: a.color, background: a.bg }}>{a.text}</span>
+      <span style={{ ...chip, ...col(after, a) }}>{a.text}</span>
     </span>
   )
 }
 const chip = { fontSize: 11.5, fontWeight: 700, padding: '3px 10px', borderRadius: 8 }
 
-// 이전 vs 현재 막대 비교 (핵심 시각화).
-function CompareBars({ before, after, max, animKey }) {
+// 이전 vs 현재 막대 비교 (핵심 시각화). accent={grad,faint,num}로 위원 톤(기획=보라/
+// 개발=분홍)을 따라간다.
+const _PLANNING_BAR = { grad: 'linear-gradient(90deg,#9b82f0,#7c5cea)', faint: '#d8cff0', num: '#7c5cea' }
+function CompareBars({ before, after, max, animKey, accent = _PLANNING_BAR }) {
   const rows = before == null
-    ? [{ label: '출발점', value: after, fill: 'linear-gradient(90deg,#9b82f0,#7c5cea)', strong: true, delay: 0 }]
+    ? [{ label: '출발점', value: after, fill: accent.grad, strong: true, delay: 0 }]
     : [
-        { label: '이전', value: before, fill: '#d8cff0', strong: false, delay: 0 },
-        { label: '현재', value: after, fill: 'linear-gradient(90deg,#9b82f0,#7c5cea)', strong: true, delay: 0.15 },
+        { label: '이전', value: before, fill: accent.faint, strong: false, delay: 0 },
+        { label: '현재', value: after, fill: accent.grad, strong: true, delay: 0.15 },
       ]
   return (
     <div key={animKey} style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -303,10 +328,48 @@ function CompareBars({ before, after, max, animKey }) {
           <div style={{ flex: 1, height: 14, borderRadius: 999, background: 'var(--bg-2)', overflow: 'hidden', minWidth: 120 }}>
             <div className="vt-bar-seg" style={{ height: '100%', width: `${(r.value / max) * 100}%`, background: r.fill, animationDelay: `${r.delay}s` }} />
           </div>
-          <span className="mono" style={{ fontWeight: 800, width: 24, textAlign: 'right', flexShrink: 0, color: r.strong ? '#7c5cea' : '#918d9f', fontSize: r.strong ? 17 : 14 }}>{r.value}</span>
+          <span className="mono" style={{ fontWeight: 800, width: 24, textAlign: 'right', flexShrink: 0, color: r.strong ? accent.num : '#918d9f', fontSize: r.strong ? 17 : 14 }}>{r.value}</span>
           <span className="mono" style={{ fontSize: 11, color: '#b6b1c2', width: 24, flexShrink: 0 }}>/{max}</span>
         </div>
       ))}
+    </div>
+  )
+}
+
+// "자세히 보기" 산문을 ①②③ 마커로 쪼개 [도입문 + 단계 배열]로 만든다 — 한 문단으로
+// 뭉쳐 초보자가 읽기 힘든 걸 번호 단계 카드로 나눠 한눈에 보이게 한다(경이 요청, 2026-07-22).
+// 마커가 없으면(전공자 간결 산문 등) steps=[]로 두고 호출부가 그대로 한 줄로 렌더한다.
+const _STEP_MARKERS = /[①②③④⑤⑥⑦⑧⑨]/
+function parseGuideSteps(prose) {
+  if (!prose) return { intro: '', steps: [] }
+  const parts = prose.split(_STEP_MARKERS)
+  return { intro: (parts[0] || '').trim(), steps: parts.slice(1).map((s) => s.trim()).filter(Boolean) }
+}
+
+// 구현 가이드 단계 뷰: 도입문 + 번호 단계 카드(왼쪽에서 하나씩 슬라이드-인). diff는
+// DIFFICULTY[level]({color,bg,Icon}) — 단계 번호 배지 색을 난이도 색과 맞춘다.
+function GuideSteps({ prose, diff }) {
+  const { intro, steps } = parseGuideSteps(prose)
+  if (steps.length === 0) {
+    return (
+      <div style={{ marginTop: 8, fontSize: 12.5, lineHeight: 1.75, color: '#4a4660', background: diff.bg, border: `1px solid ${diff.color}22`, padding: '11px 13px', borderRadius: 10 }}>
+        {prose}
+      </div>
+    )
+  }
+  return (
+    <div style={{ marginTop: 9 }}>
+      {intro && (
+        <div className="vt-step" style={{ animationDelay: '0ms', fontSize: 12.5, lineHeight: 1.65, color: '#5b5770', marginBottom: 9 }}>{intro}</div>
+      )}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
+        {steps.map((st, i) => (
+          <div key={i} className="vt-step" style={{ animationDelay: `${80 + i * 75}ms`, display: 'flex', gap: 10, alignItems: 'flex-start', background: '#fff', border: '1px solid rgba(28,26,46,0.07)', borderRadius: 11, padding: '9px 12px', boxShadow: '0 1px 4px rgba(28,26,46,0.04)' }}>
+            <span className="mono" style={{ flexShrink: 0, width: 22, height: 22, borderRadius: '50%', background: diff.color, color: '#fff', fontSize: 12, fontWeight: 800, display: 'flex', alignItems: 'center', justifyContent: 'center', marginTop: 1 }}>{i + 1}</span>
+            <span style={{ fontSize: 12.5, lineHeight: 1.6, color: '#3a3750', flex: 1 }}>{st}</span>
+          </div>
+        ))}
+      </div>
     </div>
   )
 }
@@ -345,17 +408,13 @@ function FeedbackItem({ f, guide }) {
               </span>
               {detailed && (
                 <button className="vt-tab" onClick={() => setOpen((v) => !v)}
-                  style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 12, fontWeight: 700, color: '#7c5cea', background: 'transparent', border: 'none', cursor: 'pointer', padding: '2px 4px' }}>
+                  style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 12, fontWeight: 700, color: '#1c1a2e', background: 'transparent', border: 'none', cursor: 'pointer', padding: '2px 4px' }}>
                   자세히 보기 <ChevronDown size={13} style={{ transform: open ? 'rotate(180deg)' : 'none', transition: 'transform 0.18s ease' }} />
                 </button>
               )}
             </div>
             {detailed ? (
-              open && (
-                <div style={{ marginTop: 8, fontSize: 12.5, lineHeight: 1.75, color: '#4a4660', background: 'rgba(224,96,61,0.06)', border: '1px solid rgba(224,96,61,0.16)', padding: '11px 13px', borderRadius: 10 }}>
-                  {guide.prose}
-                </div>
-              )
+              open && <GuideSteps prose={guide.prose} diff={diff} />
             ) : (
               <div style={{ marginTop: 7, fontSize: 12.5, lineHeight: 1.6, color: '#5b5770' }}>{guide.prose}</div>
             )}
@@ -387,7 +446,7 @@ function personalizeGuide(feedback, profile) {
   return { feedback_id: feedback.id, level, verbosity: VERBOSITY_BY_LEVEL[level], label: DIFFICULTY_LABEL[level], prose }
 }
 
-function CriterionCard({ c, before, index, animKey, isDev, profile }) {
+function CriterionCard({ c, before, index, animKey, isDev, profile, accent }) {
   const delta = before == null ? null : c.score - before
   // 개발 위원의 미해결/신규 지적에만 구현 난이도 가이드를 붙인다(프로필 기반).
   const guideFor = (f) => {
@@ -400,11 +459,11 @@ function CriterionCard({ c, before, index, animKey, isDev, profile }) {
         <div style={{ fontSize: 15.5, fontWeight: 700 }}>{c.name}</div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
           {delta != null && <DeltaPill value={delta} />}
-          <JudgmentChange before={null} after={c.judgment} />
+          <JudgmentChange before={null} after={c.judgment} accentColor={accent?.color} accentBg={accent?.dim} />
         </div>
       </div>
 
-      <CompareBars before={before} after={c.score} max={CRITERION_MAX} animKey={animKey} />
+      <CompareBars before={before} after={c.score} max={CRITERION_MAX} animKey={animKey} accent={accent?.bar} />
 
       {c.feedback.length > 0 ? (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 14 }}>
@@ -472,9 +531,29 @@ function ScoreTrendChart({ versions, selectedIndex, onSelect }) {
   )
 }
 
-// TEST 프로필 토글 — "제출 정보 카드"는 MyPage(마이페이지)로 이동함(가은 요청, 2026-07-21).
-// 개발 위원 피드백의 구현 난이도 개인화 데모는 이 토글로 계속 확인 가능.
-function ProfileToggle({ profileKey, onChange }) {
+// 프로필 표시 — "제출 정보 카드"는 MyPage(마이페이지)로 이동함(가은 요청, 2026-07-21).
+// locked=false(단독 /version-test 데모): 비전공자/전공자 토글로 개인화 차이를 직접 확인.
+// locked=true(/board 흐름 임베드): 실제 로그인 사용자는 프로필이 하나로 고정이므로 토글을
+//   숨기고 "내 프로필 · OOO"만 읽기전용으로 보여준다(전공자가 비전공자 선택지를 보는 등의
+//   혼동 방지 — 경이 요청, 2026-07-22). 변경은 마이페이지에서만.
+function ProfileToggle({ profileKey, onChange, locked = false }) {
+  if (locked) {
+    const me = PROFILES[profileKey]
+    return (
+      <div className="card glass" style={{ marginBottom: 18, padding: '14px 20px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <span className="badge purple mono"><FlaskConical size={11} /> 내 프로필</span>
+          <span style={{ fontSize: 12, color: '#918d9f' }}>내 프로필 기준으로 개발 위원 피드백의 구현 난이도 · 상세도가 맞춤 제공됩니다</span>
+        </div>
+        <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ fontSize: 13, fontWeight: 800, color: me.difficulty === 'easy' ? '#16a37a' : '#e0603d' }}>
+            {me.label}
+          </span>
+          <span style={{ fontSize: 11, color: '#918d9f' }}>· 마이페이지에서 변경</span>
+        </div>
+      </div>
+    )
+  }
   return (
     <div className="card glass" style={{ marginBottom: 18, padding: '14px 20px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
@@ -497,13 +576,29 @@ function ProfileToggle({ profileKey, onChange }) {
 }
 
 // --- 페이지 ----------------------------------------------------------------
-export default function VersionTrackerTestPage() {
+// embedded: true면 /board 플로우("완성 리포트" 단계) 안에 끼워 넣는 모드 — 상단 나가기/
+// 실험 배지 바를 숨긴다(사이드바가 이미 단계 이동을 제공하므로). 기본(false)은 /version-test
+// 단독 페이지로 동작.
+export default function VersionTrackerTestPage({ embedded = false }) {
   const navigate = useNavigate()
   const [revealed, setRevealed] = useState(1)
   const [selectedIndex, setSelectedIndex] = useState(0)
   const [committee, setCommittee] = useState('planning')
   const [profileKey, setProfileKey] = useState('nonmajor')
   const profile = PROFILES[profileKey]
+
+  // /board 흐름 임베드 모드: 실제 로그인 사용자의 프로필로 고정한다(토글 대신). 백엔드
+  // classify_impl_difficulty의 핵심 신호인 education.is_technical_major로 2단계(전공/비전공)를
+  // 가른다 — 전공자면 major(쉬움/간결), 아니면 nonmajor(어려움/자세히). 프로필 미제출/조회
+  // 실패면 안전 폴백으로 nonmajor(어려움) 유지(백엔드 폴백과 동일 방향).
+  useEffect(() => {
+    if (!embedded) return
+    let cancelled = false
+    getMyProfile()
+      .then((p) => { if (!cancelled) setProfileKey(p?.education?.is_technical_major ? 'major' : 'nonmajor') })
+      .catch(() => { /* 미제출/비로그인 → nonmajor 폴백 유지 */ })
+    return () => { cancelled = true }
+  }, [embedded])
 
   const versions = ALL_VERSIONS.slice(0, revealed)
   const selected = versions[selectedIndex]
@@ -530,13 +625,15 @@ export default function VersionTrackerTestPage() {
   return (
     <div className="vt-root">
       <div style={{ maxWidth: 920, margin: '0 auto', padding: '28px 24px 64px' }}>
-        {/* 상단 */}
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
-          <button className="btn-ghost" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }} onClick={() => navigate('/board')}>
-            <ArrowLeft size={15} /> 나가기
-          </button>
-          <span className="badge purple mono"><FlaskConical size={12} /> User RAG · 실험 화면</span>
-        </div>
+        {/* 상단 — 단독 페이지일 때만. 플로우 임베드 시엔 사이드바가 이동을 담당. */}
+        {!embedded && (
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
+            <button className="btn-ghost" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }} onClick={() => navigate('/board')}>
+              <ArrowLeft size={15} /> 나가기
+            </button>
+            <span className="badge purple mono"><FlaskConical size={12} /> User RAG · 실험 화면</span>
+          </div>
+        )}
 
         {/* 히어로 */}
         <div className="card glass" style={{ padding: '26px 28px', marginBottom: 18 }}>
@@ -560,7 +657,7 @@ export default function VersionTrackerTestPage() {
         </div>
 
         {/* TEST 프로필 토글 — 제출 정보 카드는 MyPage로 이동함 */}
-        <ProfileToggle profileKey={profileKey} onChange={setProfileKey} />
+        <ProfileToggle profileKey={profileKey} onChange={setProfileKey} locked={embedded} />
 
         {/* 점수 추이 그래프 */}
         <div className="card glass" style={{ padding: '20px 22px 10px', marginBottom: 18 }}>
@@ -586,7 +683,7 @@ export default function VersionTrackerTestPage() {
             const Icon = t.Icon
             return (
               <button key={cid} className="vt-tab" onClick={() => setCommittee(cid)}
-                style={{ flex: 1, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 8, padding: '12px 16px', borderRadius: 12, border: `1.5px solid ${active ? t.color : 'rgba(28,26,46,0.1)'}`, background: active ? t.color : 'rgba(255,255,255,0.72)', color: active ? '#fff' : '#5b5770', fontSize: 14, fontWeight: 700, cursor: 'pointer', boxShadow: active ? `0 8px 18px ${t.dim}` : 'none' }}>
+                style={{ flex: 1, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 8, padding: '12px 16px', borderRadius: 12, border: `1.5px solid ${active ? 'transparent' : 'rgba(28,26,46,0.1)'}`, background: active ? t.gradient : 'rgba(255,255,255,0.72)', color: active ? '#fff' : '#5b5770', fontSize: 14, fontWeight: 700, cursor: 'pointer', boxShadow: active ? `0 10px 22px ${t.dim}` : 'none' }}>
                 <Icon size={16} /> {t.name}
               </button>
             )
@@ -624,7 +721,7 @@ export default function VersionTrackerTestPage() {
         {/* 위원 항목 카드 */}
         <div key={`body-${animKey}`} style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
           {cmItems.map((c, i) => (
-            <CriterionCard key={c.id} c={c} before={criterionBefore(versions, selectedIndex, c.id)} index={i} animKey={animKey} isDev={committee === 'dev'} profile={profile} />
+            <CriterionCard key={c.id} c={c} before={criterionBefore(versions, selectedIndex, c.id)} index={i} animKey={animKey} isDev={committee === 'dev'} profile={profile} accent={cm} />
           ))}
         </div>
 

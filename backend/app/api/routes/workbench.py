@@ -528,7 +528,6 @@ _DENSITY_SPARSE_THRESHOLD = 0.45
 # 근접하게 까다롭게"로 확정. 평범한 문서는 확실히 걸리고 수상작 수준이어야 통과한다.
 _DENSITY_OVERALL_THRESHOLD = 0.63
 
-
 class PageRequirement(BaseModel):
     # 단일 기준이면 min==max, 범위("10~30매")면 min<max. 둘 다 없으면 요구 없음.
     required_min: Optional[int] = None

@@ -19,9 +19,9 @@ logger = logging.getLogger(__name__)
 
 
 def requires_conversion(source_path: Path) -> bool:
-    """이 확장자가 PDF 변환을 거쳐야만 기존 파서로 처리할 수 있는지 여부.
-    현재는 HWP/HWPX만 해당하며, PDF/DOCX/PPTX는 항상 False."""
-    return Path(source_path).suffix.lower() in SUPPORTED_EXTENSIONS
+    """HWP/HWPX는 직접 파서(hwpx_parser.py)로 처리하므로 변환 불필요.
+    PDF/DOCX/PPTX/HWP/HWPX 모두 extract_document()로 바로 전달한다."""
+    return False
 
 
 def get_converter_for(

@@ -65,6 +65,12 @@ class OfficialFacts(BaseModel):
     submission_requirements: list[str] = []
     evaluation_criteria: list[str] = []
     disqualification_rules: list[str] = []
+    # 공고문에는 접수 마감 외에도 평가/발표/시상 일정이 따로 있으며, 제출 서류와
+    # 심사 운영 조건도 성격이 다르다. 기존 필드는 유지하고 상세 사실을 별도 배열로
+    # 내려 이전 클라이언트와의 호환성을 보존한다.
+    application_review_conditions: list[str] = []
+    key_dates: list[str] = []
+    selection_benefits: list[str] = []
 
 
 class StrategicAnalysis(BaseModel):
