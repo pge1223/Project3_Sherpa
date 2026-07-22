@@ -67,12 +67,15 @@ class Settings(BaseSettings):
     ENABLE_IDEATION_PREVIEW: bool = False
 
     # 용준/Claude(2026-07-21, 요청: 실시간 스트리밍): 대화형 아이디어 회의의 NDJSON 스트리밍
-    # 응답(POST /ideation-conversation/{session_id}/reply/stream)을 켤지 여부. 기본값
-    # False — ENABLE_IDEATION_PREVIEW와 별개 플래그로 둔 이유는, 프리뷰 라우터 자체는 켜져
-    # 있어도(기존 동기식 API는 계속 쓰고 싶은 경우) 스트리밍은 아직 검증 전이라 끄고 싶을 수
-    # 있어서다. 이 값이 False이면 /reply/stream 라우트는 (라우터 자체는 등록돼 있어도)
+    # 응답(POST /ideation-conversation/{session_id}/reply/stream)을 켤지 여부.
+    # ENABLE_IDEATION_PREVIEW와 별개 플래그로 둔 이유는, 프리뷰 라우터 자체는 켜져
+    # 있어도(기존 동기식 API는 계속 쓰고 싶은 경우) 스트리밍만 따로 끌 수 있게 하기
+    # 위해서다. 이 값이 False이면 /reply/stream 라우트는 (라우터 자체는 등록돼 있어도)
     # 404를 반환한다 — 기존 동기식 /reply는 이 플래그와 무관하게 항상 동작한다.
-    ENABLE_IDEATION_STREAMING: bool = False
+    # 가은/Claude(2026-07-22, 요청: 타이핑 효과 기본 활성화): 스트리밍이 충분히 검증돼
+    # 기본값을 False -> True로 바꿨다. 끄고 싶으면 backend/.env에
+    # ENABLE_IDEATION_STREAMING=false를 명시하면 된다.
+    ENABLE_IDEATION_STREAMING: bool = True
 
     # 용준/Claude(2026-07-22, 요청: RAG 품질 오프라인 평가 도구): Faithfulness/Persona
     # Evidence Fit LLM-as-judge 전용 모델. 실제 답변을 생성하는 모델(DEV_LLM_REVIEWER_MODEL
