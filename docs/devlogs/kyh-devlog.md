@@ -1,3 +1,19 @@
+### 7/22 — HWP/HWPX 파서 연결 버그 수정 + 공고문 크롤링 103건
+
+- **HWP/HWPX 업로드 버그 수정** — PR 머지 + NCP 배포 완료
+  - `factory.py`: `requires_conversion()` → `return False` (LibreOffice 경로 우회)
+  - `adapters.py`: `_FILE_TYPE_TO_LOCATION_TYPE`에 HWP/HWPX 추가
+  - 원인: 새 파서(hwpx_parser.py) 추가했으나 업로드 경로가 여전히 LibreOffice 변환기를 타고 있었음
+- **소통혁신24 공고문 크롤링 완료** — `scripts/crawl_announcements.py` 신규 작성
+  - `contest_works`의 `bbs_id` 103개로 공고문 페이지 크롤링
+  - 첨부파일(PDF/HWP/HWPX) 있으면 텍스트 추출, 없으면 본문 텍스트 크롤링
+  - `contest_announcements_it` 컬렉션 103건 저장 완료 (저장 103건 | 스킵 0건 | 실패 0건)
+- **oss.kr 수상작 37건 수집** — `oss_winners` 컬렉션 저장 완료
+- **NAVER API HUB Application 등록** — AIReviewBoard + 뉴스 API 연결, 크레딧 발급 대기
+- **트러블슈팅**
+  - NCP 서버 직접 수정 후 git pull 충돌 → `git checkout` 후 재pull로 해결
+  - 로컬 MongoDB 터널 27018 미기동 → 수동 SSH 터널 연결 후 크롤링 실행
+
 ### 7/21 — 스키마 fix + 다수 PR 배포
 
 - **로컬 최신화 + NCP 배포 (오전)** — dev 머지 (민경이 LangGraph + 가은님 프론트 대거 반영)
