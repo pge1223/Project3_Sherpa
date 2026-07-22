@@ -22,6 +22,10 @@ from graph import (  # noqa: E402
     reply_ideation_conversation,
     start_ideation_conversation,
 )
+from graph.ideation_conv_discovery import make_candidate_selection_node  # noqa: E402
+from graph.ideation_conv_nodes import make_conv_question_node  # noqa: E402
+from graph.ideation_conv_run import _new_user_message  # noqa: E402
+from graph.ideation_conv_state import apply_user_answer  # noqa: E402
 
 _REMAINING_TOPICS_RE = re.compile(
     r"\[아직 확인되지 않은 주제\(우선순위 순\) remaining_topics\]\n(.*?)\n\n", re.S
@@ -225,11 +229,27 @@ class DiscoveryScriptedLLM:
                     "judgment": "판단",
                     "reason": "근거",
                     "suggestion": "제안",
+                    "interim_conclusion": "현재 임시 결론입니다",
+                    "responding_to": "기획 전문가의 방금 판단" if is_dev else None,
+                    "agreement": "범위를 좁히는 방향에 동의" if is_dev else "",
+                    "concern": "",
                     "confirmed": [],
                     "unconfirmed": [],
                     "referenced_message_ids": [],
                     "evidence": [],
                     "next_action": next_action,
+                },
+                ensure_ascii=False,
+            )
+
+        if "[진행자 정리 규칙]" in prompt:
+            return json.dumps(
+                {
+                    "agreements": [],
+                    "disagreements": [],
+                    "facilitator_summary": "두 전문가가 이번 라운드 의견을 정리했습니다.",
+                    "needs_user_decision": False,
+                    "user_question": None,
                 },
                 ensure_ascii=False,
             )
@@ -246,12 +266,37 @@ def _start_discovery(llm, user_idea=""):
     )
 
 
+def _legacy_resolve_selection_then_ask_planning_question(llm, state, user_message):
+    """용준/Claude(2026-07-21, 요청: 전문가 라운드테이블 전환) 보존 검증용 헬퍼 — 예전에는
+    candidate_selection 노드가 선택/결합을 확정한 직후 그대로 1:1 인터뷰 질문 노드
+    (planning_question)로 이어져, require_combine_structure(결합 직후 첫 메시지에
+    선택 컨텍스트를 구조화해서 넣는 규칙)가 그 질문 프롬프트에 적용됐다. 지금은 확정 직후
+    라운드테이블(planning_expert_discussion)로 곧바로 이어지고, 그 discussion 프롬프트는
+    require_combine_structure/selection_context를 전혀 참조하지 않는다 — 즉 이 기능은 새
+    기본 흐름에서는 더 이상 실행되지 않는 레거시 코드 경로다(코드 자체는 삭제되지 않았다).
+    이 헬퍼는 candidate_selection 노드와 planning_question 노드를 손으로 이어 붙여, 그
+    보존된 경로가 여전히 올바르게 동작하는지 검증한다."""
+    answer_message = _new_user_message(user_message, state["round"])
+    state = apply_user_answer(state, answer_message)  # phase -> "candidate_selection"
+    selection_update = make_candidate_selection_node(llm)(state)
+    state = {**state, **selection_update, "messages": state["messages"] + selection_update.get("messages", [])}
+    if state["phase"] != "planning_question":
+        return state  # low fit 등 — 질문 노드까지 가지 않는다.
+    state = dict(state)
+    state["phase"] = "planning_question"
+    question_update = make_conv_question_node("planning_expert", "awaiting_planning_answer", llm)(state)
+    return {**state, **question_update, "messages": state["messages"] + question_update.get("messages", [])}
+
+
 # ---------------------------------------------------------------------------
 # 1~3. 모드 자동 결정 — 초기 아이디어 유무/공백에 따라 refinement/discovery로 시작
 # ---------------------------------------------------------------------------
 
 
 def test_initial_idea_present_starts_refinement_mode():
+    """용준/Claude(2026-07-21, 요청: 전문가 라운드테이블 전환) 이후 refinement 세션은
+    1:1 인터뷰 질문 하나에서 멈추지 않고, 진행자 안건 제시 -> 라운드테이블 한 라운드가
+    같은 호출 안에서 곧바로 끝까지 실행된다."""
     llm = DiscoveryScriptedLLM()
     state = start_ideation_conversation(
         session_id="MODE-TEST-1",
@@ -260,8 +305,9 @@ def test_initial_idea_present_starts_refinement_mode():
         llm_call=llm,
     )
     assert state["ideation_mode"] == "refinement"
-    assert state["phase"] == "awaiting_planning_answer"
+    assert state["phase"] == "awaiting_user_decision"
     assert state["initial_idea"] == "동네 가게 챗봇"
+    assert not any(m["message_type"] == "question" for m in state["messages"])
     # discovery 노드는 전혀 호출되지 않는다.
     assert llm.call_counts["candidate_planning"] == 0
 
@@ -325,19 +371,27 @@ def test_no_refinement_question_runs_before_candidate_selection():
 
 
 def test_numeric_candidate_selection_switches_to_refinement_without_llm_interpretation():
+    """용준/Claude(2026-07-21, 요청: 전문가 라운드테이블 전환) 이후 후보 확정 직후에는
+    1:1 인터뷰 질문이 아니라 라운드테이블 한 라운드가 같은 요청 안에서 곧바로 끝까지
+    실행된다."""
     llm = DiscoveryScriptedLLM()
     state = _start_discovery(llm)
     state = reply_ideation_conversation(previous_state=state, user_message="1번", llm_call=llm)
 
-    assert state["phase"] == "awaiting_planning_answer"
+    assert state["phase"] == "awaiting_user_decision"
     assert state["ideation_mode"] == "discovery"  # 모드 자체는 바뀌지 않는다.
     assert state["selected_idea"]["candidate_id"] == "candidate_1"
     assert state["selected_idea"]["source"] == "select"
     assert state["user_idea"]["candidate_id"] == "candidate_1"
     assert llm.call_counts["candidate_selection"] == 0  # 단순 번호 선택은 LLM을 호출하지 않는다.
-    # 선택 직후 같은 요청 안에서 refinement 첫 질문(기획 전문가)까지 만들어졌다.
-    assert state["messages"][-1]["speaker_id"] == "planning_expert"
-    assert state["messages"][-1]["message_type"] == "question"
+    # 선택 직후 같은 요청 안에서 라운드테이블(기획 위원 최초 의견 -> 개발 위원 검토 -> 진행자
+    # 정리)까지 만들어졌다 — 1:1 인터뷰 질문(message_type="question")은 없다.
+    assert state["messages"][-1]["speaker_id"] == "ideation_facilitator"
+    assert state["messages"][-1]["message_type"] == "summary"
+    # 후보 선택 질문(discovery 단계의 정상적인 message_type="question")을 제외한, 선택
+    # 확정 이후에 생성된 메시지 중에는 1:1 인터뷰 질문이 없어야 한다.
+    after_selection = state["messages"][2:]  # [0]=선택 질문, [1]=사용자의 "1번" 답변
+    assert not any(m["message_type"] == "question" for m in after_selection)
 
 
 # ---------------------------------------------------------------------------
@@ -419,14 +473,23 @@ def test_combine_request_uses_llm_interpretation_and_produces_combined_idea():
         ]
     )
     state = _start_discovery(llm)
-    state = reply_ideation_conversation(previous_state=state, user_message="1번과 2번 결합해줘", llm_call=llm)
+    # 용준/Claude(2026-07-21, 요청: 전문가 라운드테이블 전환) — 결합 확정 직후 곧바로
+    # 라운드테이블이 이어지고, 그 라운드의 dev 의견이 unconfirmed=[]를 반환하면
+    # unresolved_issues가 그 값으로 덮어써진다(DiscoveryScriptedLLM의 "[의견 규칙]" stub이
+    # 항상 unconfirmed=[]를 반환하기 때문). candidate_selection 노드 자체가 unverified_
+    # assumptions를 unresolved_issues에 정확히 반영하는지는(요청 사항 자체) 노드를 직접
+    # 호출해 그 시점의 값으로 검증한다 — 이후 라운드가 그 값을 다시 덮어쓰는지는 이 테스트의
+    # 관심사가 아니다.
+    answer_message = _new_user_message("1번과 2번 결합해줘", state["round"])
+    selection_state = apply_user_answer(state, answer_message)
+    update = make_candidate_selection_node(llm)(selection_state)
 
     assert llm.call_counts["candidate_selection"] == 1
-    assert state["selected_idea"]["title"] == "결합 아이디어"
-    assert state["selected_idea"]["source"] == "combine"
-    assert state["selected_idea"]["source_candidate_ids"] == ["candidate_1", "candidate_2"]
-    assert "결합 가정1" in state["unresolved_issues"]
-    assert state["phase"] == "awaiting_planning_answer"
+    assert update["selected_idea"]["title"] == "결합 아이디어"
+    assert update["selected_idea"]["source"] == "combine"
+    assert update["selected_idea"]["source_candidate_ids"] == ["candidate_1", "candidate_2"]
+    assert "결합 가정1" in update["unresolved_issues"]
+    assert update["phase"] == "planning_question"
 
 
 # ---------------------------------------------------------------------------
@@ -456,6 +519,34 @@ def test_regenerate_request_produces_new_candidates_without_llm_interpretation()
     # 최초 생성 후보 이력은 재추천과 무관하게 보존된다.
     assert {c["title"] for c in state["original_idea_candidates"]} == first_titles
     assert llm.call_counts["candidate_selection"] == 0
+
+
+def test_regenerate_request_after_selection_returns_to_new_candidate_list():
+    """후보를 선택해 기획 위원 질문에 진입한 뒤에도 "아이디어 다시 짜줘"는
+    불충분한 답변이 아니라 후보 재생성 의도로 처리되어야 한다."""
+    second_batch = [
+        _candidate("candidate_1", "새 후보1", "새 문제1", "새 사용자1"),
+        _candidate("candidate_2", "새 후보2", "새 문제2", "새 사용자2"),
+    ]
+    llm = DiscoveryScriptedLLM(candidates_queue=[_default_candidates(), second_batch])
+    state = _start_discovery(llm)
+    state = reply_ideation_conversation(previous_state=state, user_message="1번", llm_call=llm)
+    # 용준/Claude(2026-07-21, 요청: 전문가 라운드테이블 전환) — 선택 직후 라운드테이블이
+    # 같은 요청 안에서 끝까지 실행돼 "awaiting_user_decision"으로 멈춘다.
+    assert state["phase"] == "awaiting_user_decision"
+    assert state["selected_idea"] is not None
+
+    sufficiency_calls_before = sum("[판정 규칙]" in prompt for prompt in llm.captured_prompts)
+    state = reply_ideation_conversation(previous_state=state, user_message="아이디어 다시 짜줘", llm_call=llm)
+
+    assert state["phase"] == "awaiting_candidate_selection"
+    assert state["candidate_regeneration_count"] == 1
+    assert {c["title"] for c in state["idea_candidates"]} == {"새 후보1", "새 후보2"}
+    assert state["selected_idea"] is None
+    assert state["selection_reason"] is None
+    assert state["resolved_topics"] == []
+    assert any(m["speaker_id"] == "user" and m["content"] == "아이디어 다시 짜줘" for m in state["messages"])
+    assert sum("[판정 규칙]" in prompt for prompt in llm.captured_prompts) == sufficiency_calls_before
 
 
 def test_regeneration_capped_and_stops_calling_llm_after_limit():
@@ -494,12 +585,17 @@ def test_expert_recommend_request_produces_reasoned_recommendation():
         ]
     )
     state = _start_discovery(llm)
-    state = reply_ideation_conversation(previous_state=state, user_message="전문가 추천해 주세요", llm_call=llm)
+    # test_combine_request_uses_llm_interpretation_and_produces_combined_idea와 같은 이유로
+    # (라운드테이블의 후속 라운드가 unresolved_issues를 덮어쓸 수 있다) candidate_selection
+    # 노드를 직접 호출해 그 시점의 값을 검증한다.
+    answer_message = _new_user_message("전문가 추천해 주세요", state["round"])
+    selection_state = apply_user_answer(state, answer_message)
+    update = make_candidate_selection_node(llm)(selection_state)
 
-    assert state["selected_idea"]["source"] == "recommend"
-    assert "데이터 확보가 더 쉽고" in state["selection_reason"]
-    assert any("예약 데이터 형식" in issue for issue in state["unresolved_issues"])
-    assert state["phase"] == "awaiting_planning_answer"
+    assert update["selected_idea"]["source"] == "recommend"
+    assert "데이터 확보가 더 쉽고" in update["selection_reason"]
+    assert any("예약 데이터 형식" in issue for issue in update["unresolved_issues"])
+    assert update["phase"] == "planning_question"
 
 
 # ---------------------------------------------------------------------------
@@ -537,11 +633,12 @@ def test_candidate_selection_llm_failure_falls_back_to_failed_phase():
 
 
 def test_discovery_final_result_includes_13_fields_and_discovery_history():
+    """용준/Claude(2026-07-21, 요청: 전문가 라운드테이블 전환) — 후보 선택 직후 라운드테이블이
+    같은 요청 안에서 끝까지 실행되므로 "1번" 선택 한 번의 reply로 awaiting_user_decision에
+    도달한다(과거처럼 두 번의 추가 질문 답변이 필요하지 않다)."""
     llm = DiscoveryScriptedLLM(dev_next_action="await_user_decision")
     state = _start_discovery(llm)
     state = reply_ideation_conversation(previous_state=state, user_message="1번", llm_call=llm)
-    state = reply_ideation_conversation(previous_state=state, user_message="답변1", llm_call=llm)
-    state = reply_ideation_conversation(previous_state=state, user_message="답변2", llm_call=llm)
     assert state["phase"] == "awaiting_user_decision"
 
     state = finalize_ideation_conversation(previous_state=state, llm_call=llm)
@@ -671,13 +768,20 @@ def test_combine_preserves_both_source_candidates_in_state():
 
 def test_combine_first_question_prompt_includes_both_candidate_titles_and_content():
     """요청 2·9번 — 결합 직후 첫 전문가 질문 프롬프트에 selection_context를 통해 두 후보의
-    제목과 핵심 내용(문제)이 구조화된 형태로 실제로 주입되는지."""
+    제목과 핵심 내용(문제)이 구조화된 형태로 실제로 주입되는지.
+
+    용준/Claude(2026-07-21, 요청: 전문가 라운드테이블 전환): require_combine_structure는
+    레거시 1:1 인터뷰 질문 노드(planning_question)의 검증 규칙이다 — 새 기본 흐름은 후보
+    확정 직후 곧바로 라운드테이블(discussion 노드)로 넘어가고, 그 discussion 프롬프트는
+    selection_context를 전혀 참조하지 않는다(이 코드베이스의 실제 동작이다, 소스는 이번
+    작업 범위 밖). 아래는 그 레거시 코드 경로(candidate_selection -> planning_question)가
+    여전히 올바르게 동작하는지 손으로 이어 붙여 검증한다."""
     llm = _CombineAwareScriptedLLM(selection_responses=[_combine_selection_response("high")])
     state = _start_discovery(llm)
     titles = [c["title"] for c in state["idea_candidates"]]
     problems = [c["problem"] for c in state["idea_candidates"]]
 
-    reply_ideation_conversation(previous_state=state, user_message="1번과 2번 결합", llm_call=llm)
+    _legacy_resolve_selection_then_ask_planning_question(llm, state, "1번과 2번 결합")
 
     combine_question_prompts = [
         p for p in llm.captured_prompts if "[결합 직후 첫 메시지 여부 require_combine_structure]\ntrue" in p
@@ -692,12 +796,15 @@ def test_combine_first_question_prompt_includes_both_candidate_titles_and_conten
 
 def test_combine_first_expert_message_mentions_both_candidates_concretely():
     """요청 3·7번 — "1번과 2번을 결합하고 싶은 것으로 이해했습니다"처럼 번호만 언급하지
-    않고, 결합 직후 첫 전문가 메시지가 두 후보의 실제 제목을 구체적으로 언급하는지."""
+    않고, 결합 직후 첫 전문가 메시지가 두 후보의 실제 제목을 구체적으로 언급하는지.
+
+    레거시 1:1 인터뷰 질문 노드(planning_question) 경로 보존 검증 — 위 테스트와 같은 이유로
+    레거시 헬퍼를 사용한다."""
     llm = _CombineAwareScriptedLLM(selection_responses=[_combine_selection_response("high")])
     state = _start_discovery(llm)
     titles = [c["title"] for c in state["idea_candidates"]]
 
-    state = reply_ideation_conversation(previous_state=state, user_message="1번과 2번 결합", llm_call=llm)
+    state = _legacy_resolve_selection_then_ask_planning_question(llm, state, "1번과 2번 결합")
 
     last_message = state["messages"][-1]
     assert last_message["speaker_id"] == "planning_expert"
@@ -708,13 +815,14 @@ def test_combine_first_expert_message_mentions_both_candidates_concretely():
 
 
 def test_combine_high_fit_finalizes_selection_normally():
-    """요청 4번 — 결합 적합도가 high이면 selected_idea가 즉시 확정되고 refinement 첫 질문
-    까지 정상적으로 이어지는지."""
+    """요청 4번 — 결합 적합도가 high이면 selected_idea가 즉시 확정되고, 용준/Claude
+    (2026-07-21, 요청: 전문가 라운드테이블 전환) 이후에는 refinement 첫 질문 대신
+    라운드테이블 한 라운드까지 같은 요청 안에서 정상적으로 이어지는지."""
     llm = _CombineAwareScriptedLLM(selection_responses=[_combine_selection_response("high")])
     state = _start_discovery(llm)
     state = reply_ideation_conversation(previous_state=state, user_message="1번과 2번 결합", llm_call=llm)
 
-    assert state["phase"] == "awaiting_planning_answer"
+    assert state["phase"] == "awaiting_user_decision"
     assert state["selected_idea"] is not None
     assert state["merge_analysis"]["fit"] == "high"
 
@@ -722,19 +830,19 @@ def test_combine_high_fit_finalizes_selection_normally():
 def test_combine_medium_fit_finalizes_and_preserves_primary_secondary_features():
     """요청 5번 — 결합 적합도가 medium이면 결합을 확정하되(주 기능/보조 기능을 구분해
     사용자에게 우선순위를 묻는 것은 프롬프트가 실제 LLM에게 지시하는 부분이므로, 여기서는
-    "주 기능/보조 기능 구분이 state와 메시지에 실제로 남아있는지"를 배선 수준에서 검증한다."""
+    "주 기능/보조 기능 구분이 state에 실제로 남아있는지"를 배선 수준에서 검증한다."""
     llm = _CombineAwareScriptedLLM(selection_responses=[_combine_selection_response("medium")])
     state = _start_discovery(llm)
     state = reply_ideation_conversation(previous_state=state, user_message="1번과 2번 결합", llm_call=llm)
 
-    assert state["phase"] == "awaiting_planning_answer"
+    # 용준/Claude(2026-07-21, 요청: 전문가 라운드테이블 전환) — 결합 확정 직후 라운드테이블
+    # 이 곧바로 실행돼 "awaiting_user_decision"으로 멈춘다("[핵심 질문]" 형식의 1:1 인터뷰
+    # 질문은 더 이상 생성되지 않는다).
+    assert state["phase"] == "awaiting_user_decision"
     assert state["selected_idea"] is not None
     assert state["merge_analysis"]["fit"] == "medium"
     assert state["merge_analysis"]["primary_features"] == ["문의 자동응답"]
     assert state["merge_analysis"]["secondary_features"] == ["예약 관리"]
-    # 질문은 한 번에 하나의 쟁점만 다룬다(요청: 핵심 질문 섹션이 정확히 하나).
-    last_message = state["messages"][-1]
-    assert last_message["content"].count("[핵심 질문]") == 1
 
 
 def test_combine_low_fit_does_not_finalize_and_asks_for_primary_direction():
@@ -773,10 +881,13 @@ def test_combine_does_not_reask_already_selected_candidates():
     """요청 8번 — 사용자가 이미 후보를 선택/결합했으면, 다음 질문에서 "어떤 후보를
     선택하셨나요?" 같은 재확인 질문 프롬프트를 만들지 않는다(코드가 selection_context를
     항상 채워 넘기므로, 프롬프트에는 이미 selected_idea/source_candidates가 채워진
-    상태로 들어간다는 배선을 확인)."""
+    상태로 들어간다는 배선을 확인).
+
+    레거시 1:1 인터뷰 질문 노드(planning_question) 경로 보존 검증 — 위 두 combine 프롬프트
+    테스트와 같은 이유로 레거시 헬퍼를 사용한다."""
     llm = _CombineAwareScriptedLLM(selection_responses=[_combine_selection_response("high")])
     state = _start_discovery(llm)
-    state = reply_ideation_conversation(previous_state=state, user_message="1번과 2번 결합", llm_call=llm)
+    state = _legacy_resolve_selection_then_ask_planning_question(llm, state, "1번과 2번 결합")
 
     combine_question_prompts = [
         p for p in llm.captured_prompts if "[결합 직후 첫 메시지 여부 require_combine_structure]\ntrue" in p
