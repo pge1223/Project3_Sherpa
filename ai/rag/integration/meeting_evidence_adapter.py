@@ -97,6 +97,9 @@ def to_retrieved_evidence(
                 role_score=result.role_score,
                 final_score=result.final_score,
                 score=score,
+                document_role=metadata.get("document_role"),
+                ideation_source_type=metadata.get("ideation_source_type"),
+                session_id=metadata.get("session_id"),
             )
         )
 

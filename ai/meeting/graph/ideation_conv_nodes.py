@@ -40,11 +40,70 @@ from .ideation_conv_state import (
     IdeationConvState,
     remaining_topics_for,
 )
-from .ideation_nodes import EvidenceLookup, _safe_call_json
+from .ideation_nodes import EvidenceLookup, _safe_call_json, call_evidence_lookup
 from .ideation_trace import sanitize_preview, trace_event
 from .llm import LLMCall, parse_json_response
 
 logger = logging.getLogger(__name__)
+
+# 용준/Claude(2026-07-22, 요청: RAG 근거 실제 활용 강화) — EvidenceLookup(ai/meeting/graph/
+# ideation_nodes.py)과 같은 이유로, claim-evidence 연결 검증도 ai/meeting이 ai.rag를 직접
+# import하지 않는다(ai/rag/tests/test_meeting_evidence_service.py::TestScopeBoundary가 이
+# 경계를 강제한다 — ai/meeting/graph는 ai.rag를 몰라야 하고, 실제 검색/근거 판정 구현은
+# 항상 호출부(backend)가 주입한다). ClaimGroundingFn은 claims(LLM이 반환한 리스트)와
+# retrieved_evidence(이번 턴 검색 결과)를 받아 ai.rag.evidence_linking.claim_grounding.
+# ground_claims()와 같은 모양의 dict(claims/linked_evidence_refs/unsupported_claims/
+# supported_claim_count/unsupported_claim_count/missing_information/evidence_status/
+# prompt_guard/allow_definitive_judgment)를 반환해야 한다 — 이 파일은 그 결과의 "모양"만
+# 알고 실제 관련성 판정 로직은 모른다. persona_id를 함께 넘겨 역할별 관련성 키워드(기획/개발)
+# 적용은 주입된 함수(호출부)가 알아서 하게 한다.
+ClaimGroundingFn = Callable[[str, Any, list[dict]], dict]
+
+# 용준/Claude(2026-07-23, Phase 1 "Shadow Deterministic Evidence Planner") — evidence_lookup/
+# ground_claims와 같은 경계 원칙: 실제 규칙 기반 evidence 선택 구현(ai/rag/orchestration/
+# ideation_evidence_planner.py::build_evidence_plan)은 backend가 주입하고, 이 파일은 그
+# 결과가 plain dict(EvidencePlan 모양)라는 것만 안다. persona_id/effective_issue(issue_id/
+# title/query)/retrieved_evidence(이번 턴 검색 결과)/runtime_scope(session_id/
+# selected_candidate_document_id)/shadow_history(같은 speaker/issue의 이전 shadow 선택
+# 이력)를 keyword-only로 받는다 — 키워드 전용으로 둔 이유는 이 콜러블이 신규 도입이라
+# 위치 인자 순서에 의존할 legacy 호출자가 없기 때문이다. Phase 1에서는 이 결과가 prompt/
+# claims/grounding/routing 어디에도 쓰이지 않고 trace 로그로만 기록된다.
+EvidencePlanningFn = Callable[..., dict]
+
+# 같은 speaker/issue 조합("persona_id:issue_id")별로 보관하는 shadow 선택 이력 최대 개수 —
+# 무제한 누적을 막는다(요청: 최소 정보만 유지).
+_SHADOW_HISTORY_KEEP = 20
+
+_EMPTY_GROUNDING: dict = {
+    "claims": [],
+    "linked_evidence_refs": [],
+    # 용준/Claude(2026-07-23, 요청: IDEATION_EVIDENCE_LINKED 로그 매핑 수정) — ai.rag.
+    # evidence_linking.claim_grounding.ClaimGroundingResult와 모양을 맞춘다.
+    "claim_evidence_links": [],
+    "unsupported_claims": [],
+    "supported_claim_count": 0,
+    "unsupported_claim_count": 0,
+    "accepted_claim_count": 0,
+    "grounded_claim_count": 0,
+    "expert_judgment_count": 0,
+    "linked_evidence_count": 0,
+    "missing_information": [],
+    "evidence_status": "no_evidence_available",
+    "prompt_guard": "",
+    "allow_definitive_judgment": False,
+}
+
+
+def _has_hard_grounding_failure(grounding: dict) -> bool:
+    """document_fact 주장이 있는데 전부 unsupported면 재생성 대상이다 — ai.rag.
+    evidence_linking.claim_grounding.has_hard_grounding_failure와 동일한 판정을 dict
+    형태(주입된 함수의 반환값)에 대해 그대로 수행한다(로직 자체는 ai.rag 쪽에 있고, 여기서는
+    그 결과 dict의 구조만 본다)."""
+    document_fact_claims = [c for c in grounding["claims"] if c.get("claim_type") == "document_fact"]
+    if not document_fact_claims:
+        return False
+    unsupported_ids = {c["claim_id"] for c in grounding["unsupported_claims"]}
+    return all(c.get("claim_id") in unsupported_ids for c in document_fact_claims)
 
 _CANVAS_TEXT_FIELDS = ("problem", "target_user", "core_value", "solution", "differentiation", "contest_fit")
 _VALID_CANVAS_FEASIBILITY = {"high", "medium", "low", ""}
@@ -210,6 +269,124 @@ def _safe_call_structured_json(
         last_reason = problem
     logger.warning("[%s] 구조화 응답 검증 실패 reason=%s", node_name, last_reason)
     return None, False, 2
+
+
+def _safe_fallback_spoken_text(grounding: dict) -> str:
+    """검증에 최종 실패했을 때 화면에 노출할 안전한 발언(요청 7번). 근거 없는 사실을 확정
+    표현으로 내보내는 대신, 확인이 필요한 항목을 있는 그대로 말한다."""
+    missing = [m for m in grounding["missing_information"] if m][:2]
+    if missing:
+        detail = " · ".join(missing)
+        text = f"현재 제공된 자료에서는 {detail} 부분을 문서로 확인하기 어렵습니다. 추가 확인이 필요합니다."
+    else:
+        text = "현재 제공된 자료에서는 이 주장을 문서 근거로 확인하기 어렵습니다. 추가 확인이 필요합니다."
+    return text[:_MAX_SPOKEN_TEXT_CHARS]
+
+
+def _ground_and_finalize_claims(
+    *,
+    persona_id: str,
+    raw: dict,
+    retrieved: list[dict],
+    prompt: str,
+    llm_call: LLMCall,
+    validate: Callable[[dict], str | None],
+    used: int,
+    ground_claims_fn: ClaimGroundingFn | None,
+) -> tuple[dict, dict, int]:
+    """구조화 검증(_safe_call_structured_json)을 통과한 raw 응답의 claims를 실제 검색 근거와
+    대조 검증한다(요청: 최종 발언의 주장과 실제 청크가 연결되고 관련성 검증을 통과해야만
+    RAG 활용 성공으로 판단). document_fact 주장이 전부 근거 연결에 실패하면 실패 사유를
+    프롬프트에 덧붙여 딱 한 번만 재생성한다 — 무한 재시도는 하지 않는다(기존
+    _safe_call_structured_json의 재시도 1회 정책과는 별개 축이다: 그쪽은 "필수 필드
+    누락"을, 이쪽은 "구조는 유효했지만 근거 연결에 실패"를 다룬다). 재시도 후에도 실패하면
+    spoken_text를 안전한 표현으로 교체한 뒤 그대로 진행한다(발언 자체를 폐기하지 않는다 —
+    요청: 회의가 중단되지 않아야 한다).
+
+    ground_claims_fn이 없으면(use_rag 미사용 세션 등) 검증을 건너뛰고 빈 grounding 결과를
+    돌려준다 — retrieved가 없을 때 evidence_lookup을 건너뛰는 것과 같은 원칙이다."""
+    if ground_claims_fn is None:
+        return raw, dict(_EMPTY_GROUNDING), used
+
+    started = time.perf_counter()
+    trace_event(
+        "IDEATION_CLAIM_GROUNDING_START",
+        speaker=persona_id,
+        claim_count=len(raw.get("claims") or []),
+        retrieved_evidence_count=len(retrieved),
+        injected_evidence_count=len(retrieved),
+    )
+    grounding = ground_claims_fn(persona_id, raw.get("claims"), retrieved)
+
+    if _has_hard_grounding_failure(grounding):
+        reasons = sorted({c["reason"] for c in grounding["unsupported_claims"]})
+        trace_event("IDEATION_GROUNDING_RETRY", speaker=persona_id, retry_count=1, reasons=reasons)
+        # 용준/Claude(2026-07-23, 요청: grounding 재시도 프롬프트의 ref 계약 오류 수정) —
+        # 이 안내문은 예전에 evidence_refs가 chunk_id(해시)를 직접 담던 시절 문구가 그대로
+        # 남아 있었다. call_evidence_lookup이 각 근거에 짧은 순번 참조("ref": "E1")를 부여한
+        # 뒤부터는 evidence_refs에 chunk_id를 쓰라고 재시도 안내가 말하면 프롬프트 본문의
+        # [근거 인용 규칙](ref만 사용)과 재시도 안내가 서로 다른 지시를 하게 된다 — 재시도
+        # 안내도 반드시 ref 계약으로 통일한다. ref -> 실제 chunk_id 변환은 항상 서버의
+        # ground_claims가 담당하고 LLM은 절대 chunk_id를 직접 다루지 않는다.
+        retry_note = (
+            "\n\n[근거 연결 재시도 안내] 방금 응답의 claims 중 document_fact로 표시한 주장이 "
+            "retrieved_evidence의 실제 ref와 연결되지 않았습니다(사유: "
+            + ", ".join(reasons)
+            + "). 존재하지 않는 ref를 인용했거나, 인용한 근거가 그 주장과 무관하거나, "
+            "evidence_refs가 비어 있었습니다. evidence_refs에는 retrieved_evidence 각 항목의 "
+            "\"ref\" 필드 값(예: \"E1\", \"E2\")만 그대로 쓰고, chunk_id(긴 해시 문자열)는 "
+            "직접 쓰지 마세요 — ref와 실제 chunk_id 사이의 변환은 서버가 처리합니다. "
+            "retrieved_evidence에 실제로 있는 ref만 evidence_refs에 넣고, 문서에서 확인할 수 "
+            "없는 내용은 claim_type을 expert_judgment로 바꾸거나 claims에서 제외하세요."
+        )
+        try:
+            retry_raw = parse_json_response(llm_call(prompt + retry_note))
+        except (ValueError, KeyError, TypeError):
+            retry_raw = None
+        if retry_raw is not None and validate(retry_raw) is None:
+            used += 1
+            raw = retry_raw
+            grounding = ground_claims_fn(persona_id, raw.get("claims"), retrieved)
+
+    if _has_hard_grounding_failure(grounding):
+        raw = dict(raw)
+        raw["spoken_text"] = _safe_fallback_spoken_text(grounding)
+
+    trace_event(
+        "IDEATION_CLAIM_GROUNDING_RESULT",
+        speaker=persona_id,
+        claim_count=len(grounding["claims"]),
+        supported_claim_count=grounding["supported_claim_count"],
+        unsupported_claim_count=grounding["unsupported_claim_count"],
+        # 용준/Claude(2026-07-22, 요청: claim 통계 의미 분리) — supported_claim_count(기존
+        # 필드, 호환 유지)와 별도로 "실제 문서 근거로 검증됨(grounded)"과 "근거 없이 허용된
+        # 전문가 판단(expert_judgment)"을 분리해서 남긴다. linked_evidence_count=0인데
+        # supported/accepted_claim_count>0인 것만 보고 "근거를 썼다"고 오인하지 않도록 한다.
+        accepted_claim_count=grounding["accepted_claim_count"],
+        grounded_claim_count=grounding["grounded_claim_count"],
+        expert_judgment_count=grounding["expert_judgment_count"],
+        linked_evidence_count=grounding["linked_evidence_count"],
+        evidence_status=grounding["evidence_status"],
+        missing_information=grounding["missing_information"],
+        unsupported_reasons=[c["reason"] for c in grounding["unsupported_claims"]],
+        elapsed_ms=round((time.perf_counter() - started) * 1000, 1),
+    )
+    # 용준/Claude(2026-07-23, 요청: IDEATION_EVIDENCE_LINKED 로그 매핑 수정) — claim이
+    # evidence_refs에 담는 값은 LLM이 인용한 ref("E1")이고, grounding["linked_evidence_refs"]는
+    # 항상 실제 chunk_id다. 두 값 공간이 다르므로 "ref in linked_evidence_refs" 직접 비교는
+    # (ref와 chunk_id가 우연히 같은 레거시 fixture를 빼면) 사실상 항상 실패했다 — 이제
+    # ground_claims가 claim 단위로 짝지어 반환하는 claim_evidence_links(ref, chunk_id 쌍)를
+    # 그대로 로그에 옮긴다. 구버전 ground_claims_fn(이 필드가 없는 테스트 더블 등)이 주입된
+    # 경우를 위해 없으면 빈 리스트로 안전하게 처리한다.
+    for link in grounding.get("claim_evidence_links") or []:
+        trace_event(
+            "IDEATION_EVIDENCE_LINKED",
+            speaker=persona_id,
+            claim_id=link["claim_id"],
+            evidence_refs=link["evidence_refs"],
+            chunk_ids=link["chunk_ids"],
+        )
+    return raw, grounding, used
 
 
 def _make_validate_question_response(
@@ -426,11 +603,17 @@ def _build_message(
     evidence: Any,
     structured: dict | None = None,
     message_id: str | None = None,
+    grounding: dict | None = None,
 ) -> ConvMessage:
     """structured는 선택 필드다(요청 9번 — 프런트 "상세 보기" 토글용, 기존 content 문자열은
     그대로 유지한 채 순수 추가). opinion/agreement/disagreement 메시지만 값을 채우고
     (make_conv_discussion_node 참고), 질문/답변/설명/요약 메시지는 None으로 둔다 — 기존
-    content 렌더링만으로도 완전한 정보이기 때문이다."""
+    content 렌더링만으로도 완전한 정보이기 때문이다.
+
+    grounding은 ground_claims()의 결과다(요청: RAG 근거 실제 활용 강화) — evidence(위)는
+    "이번 턴에 주입된 검색 결과 전체"라는 기존 의미를 그대로 유지하고, grounding이 주어지면
+    그중 실제로 주장과 연결·검증된 부분만 별도 필드로 추가한다. grounding이 없는 메시지
+    타입(진행자 정리 등 claims 개념이 없는 메시지)은 빈 값으로 채운다."""
     speaker_name, role = _speaker_fields(persona_id)
     return ConvMessage(
         message_id=message_id or _new_message_id(),
@@ -444,6 +627,26 @@ def _build_message(
         evidence=evidence or [],
         created_at=_now_iso(),
         structured=structured,
+        claims=list(grounding["claims"]) if grounding else [],
+        linked_evidence_refs=list(grounding["linked_evidence_refs"]) if grounding else [],
+        supported_claim_count=grounding["supported_claim_count"] if grounding else 0,
+        unsupported_claim_count=grounding["unsupported_claim_count"] if grounding else 0,
+        # 용준/Claude(2026-07-22, 요청: claim 통계 의미 분리) — 순수 추가 필드. 구버전
+        # 클라이언트는 무시하면 그대로 동작한다.
+        accepted_claim_count=grounding["accepted_claim_count"] if grounding else 0,
+        grounded_claim_count=grounding["grounded_claim_count"] if grounding else 0,
+        expert_judgment_count=grounding["expert_judgment_count"] if grounding else 0,
+        missing_information=list(grounding["missing_information"]) if grounding else [],
+        evidence_status=grounding["evidence_status"] if grounding else None,
+        sufficiency=(
+            "sufficient"
+            if grounding and grounding["evidence_status"] == "grounded"
+            else "partial"
+            if grounding and grounding["evidence_status"] in ("partially_grounded", "expert_judgment_only")
+            else "insufficient"
+            if grounding
+            else None
+        ),
     )
 
 
@@ -543,13 +746,212 @@ DELEGATION_REVIEW_STREAM_FIELDS: tuple[tuple[str, str | None], ...] = (("spoken_
 DELEGATION_FACILITATOR_STREAM_FIELDS: tuple[tuple[str, str | None], ...] = (("spoken_text", None),)
 
 
-def _topic_query(state: IdeationConvState) -> str:
-    if state["round"] > 1 and state.get("unresolved_issues"):
-        return " ".join(state["unresolved_issues"])
-    idea = state["user_idea"]
+# 용준/Claude(2026-07-23, 요청: RAG 근거 실제 활용 강화 — query 품질 개선) — 이전에는
+# user_idea dict의 모든 값(제목/문제/대상 사용자/해결 방식/주요 기능/기술 접근/MVP 등)을
+# 그대로 이어붙여 검색어로 썼다. 후보 필드가 많을수록 검색어가 길고 광범위해져, 지금 실제로
+# 논의 중인 쟁점(active_issue, 예: "차별성")과 무관한 청크까지 상위권에 섞여 들어왔다 —
+# 그 결과 검색 자체(raw/scoped/final target_count>0, criteria 검색됨)는 "성공"으로 보여도,
+# 검색된 근거가 이번 쟁점과 실제로 관련이 없어 claim_grounding의 관련성 검사(ai.rag.
+# evidence_linking.relevance.is_relevant_candidate)를 통과하지 못하거나, LLM 스스로
+# "이번 쟁점과 무관하면 document_fact claim을 만들지 않는다"는 프롬프트 규칙(ideation_conv_
+# discussion.txt [근거 인용 규칙])을 지켜 아예 인용을 시도하지 않는 결과로 이어졌다
+# (linked_evidence_count=0, evidence_status="expert_judgment_only"). 이제 검색어를 (1) 아이디어
+# 핵심 요약(제목/문제/해결 방식만, 필드 전부가 아니라), (2) 지금 실제로 다루는 쟁점,
+# (3) 역할별 검토 관점, 세 부분으로 명시적으로 구분해 조합한다 — 이는 이번 발언의 실제
+# 관심사에 검색을 집중시키기 위함이지, 단순히 키워드를 더 많이 넣는 것이 아니다.
+_ROLE_QUERY_FOCUS: dict[str, str] = {
+    "planning_expert": "사용자 가치와 문제 적합성, 공모전 심사 기준(혁신성·확장성 등), 기존 서비스 대비 차별성, 사업성·운영 구조",
+    "dev_expert": "기술 구조와 구현 가능성, 데이터 수집·품질, 외부 시스템/API/센서 연동, 보안·성능·운영 위험, MVP 기술 범위",
+}
+
+# 용준/Claude(2026-07-23, 요청: 역할별 target query 필드 개선) — planning은 사용자 가치/차별화
+# 관점의 필드가, dev는 기술 구현 관점의 필드가 검색에 더 적합하다. 이전에는 두 역할이 항상
+# 같은 3개 필드(title/problem/solution)만 봤다 — planning에는 충분했지만 dev 검색에는 기술
+# 정보(요구 데이터·기술 접근·MVP 범위·리스크)가 빠져 있었다. idea dict에 없는 필드는 그냥
+# 건너뛴다(모든 후보가 이 필드를 다 채우지는 않는다).
+_PLANNING_SUMMARY_FIELDS = ("title", "problem", "target_user", "solution", "differentiation", "core_value")
+_DEV_SUMMARY_FIELDS = ("title", "solution", "main_features", "required_data", "technical_approach", "mvp_scope", "risks")
+_IDEA_SUMMARY_FIELDS_BY_ROLE: dict[str, tuple[str, ...]] = {
+    "planning_expert": _PLANNING_SUMMARY_FIELDS,
+    "dev_expert": _DEV_SUMMARY_FIELDS,
+}
+_DEFAULT_IDEA_SUMMARY_FIELDS = ("title", "problem", "solution")
+# 리스트 필드(main_features, risks 등)는 핵심 항목만 반영한다 — 후보에 기능이 10개 있어도
+# 전부 이어붙이면 검색어가 다시 광범위해진다.
+_MAX_SUMMARY_LIST_ITEMS = 3
+# 검색어 전체(아이디어 요약 부분)가 지나치게 길어지지 않도록 문자 수 상한을 둔다.
+_MAX_IDEA_SUMMARY_CHARS = 300
+
+_ROLE_DEFAULT_RETRIEVAL_TOPIC: dict[str, str] = {
+    "planning_expert": "차별성과 고객 가치",
+    "dev_expert": "기술 구현 가능성",
+}
+# TOPIC_PRIORITY(질문 주제 slug) -> 검색어에 쓸 사람이 읽는 제목. 질문 턴(make_conv_question_
+# node)의 question_topic과 같은 값 집합을 그대로 재사용한다 — 새 분류 체계를 만들지 않는다.
+_TOPIC_ID_TITLES: dict[str, str] = {
+    "problem": "문제 정의",
+    "target_user": "목표 사용자",
+    "core_value": "핵심 가치",
+    "contest_fit": "공모전 적합성",
+    "differentiation": "차별성과 고객 가치",
+    "mvp": "MVP 범위",
+    "data": "데이터 확보 방안",
+    "ai_role": "AI 활용 방식",
+    "roadmap": "확장 로드맵",
+}
+
+
+def _stringify_idea_field(value: object) -> str:
+    """idea dict 값 하나를 검색어에 쓸 짧은 문자열로 정규화한다. 리스트는 앞의 핵심 항목
+    몇 개만(_MAX_SUMMARY_LIST_ITEMS), 그 외 타입은 str()로 변환한다."""
+    if isinstance(value, list):
+        items = [str(v).strip() for v in value if str(v).strip()]
+        return ", ".join(items[:_MAX_SUMMARY_LIST_ITEMS])
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _idea_core_summary(idea: object, persona_id: str | None = None) -> str:
+    """user_idea/selected_idea dict에서 역할별 핵심 필드만 뽑아 짧게 요약한다(요청: 역할별
+    target query 필드 개선 — planning/dev가 서로 다른 필드 집합을 본다). persona_id가
+    없거나 매핑에 없으면 title/problem/solution만 쓰는 기존 기본값을 그대로 따른다. 값이
+    빈 필드는 건너뛰고, 같은 문자열이 이미 포함돼 있으면 중복으로 넣지 않는다. 이 필드들이
+    하나도 없는 구버전 idea(예: {"description": ...}만 있는 refinement 세션)는 있는 값
+    전체를 이어붙인다. 결과가 너무 길면(_MAX_IDEA_SUMMARY_CHARS) 잘라낸다 — 의미 손실보다
+    검색어 희석을 막는 것이 우선이다."""
     if isinstance(idea, dict):
-        return " ".join(str(v) for v in idea.values() if v)
-    return str(idea)
+        fields = _IDEA_SUMMARY_FIELDS_BY_ROLE.get(persona_id or "", _DEFAULT_IDEA_SUMMARY_FIELDS)
+        seen: set[str] = set()
+        core: list[str] = []
+        for field in fields:
+            text = _stringify_idea_field(idea.get(field))
+            if text and text not in seen:
+                seen.add(text)
+                core.append(text)
+        if core:
+            summary = " / ".join(core)
+        else:
+            fallback: list[str] = []
+            fallback_seen: set[str] = set()
+            for value in idea.values():
+                text = _stringify_idea_field(value)
+                if text and text not in fallback_seen:
+                    fallback_seen.add(text)
+                    fallback.append(text)
+            summary = " ".join(fallback)
+    else:
+        summary = str(idea or "")
+    if len(summary) > _MAX_IDEA_SUMMARY_CHARS:
+        summary = summary[:_MAX_IDEA_SUMMARY_CHARS].rstrip()
+    return summary
+
+
+def _active_issue_title(state: IdeationConvState) -> str | None:
+    """지금 활성 쟁점(active_issue_id)의 사람이 읽는 제목을 open_issues/resolved_issues에서
+    찾는다. 아직 쟁점 레코드가 만들어지지 않은 순간(예: 이번 발언에서 새로 여는 중)에는
+    active_issue_id 자체(slug)를 대신 쓴다 — 검색어가 비게 두지 않기 위함이다."""
+    issue_id = state.get("active_issue_id")
+    if not issue_id:
+        return None
+    for issue in list(state.get("open_issues") or []) + list(state.get("resolved_issues") or []):
+        if issue.get("issue_id") == issue_id:
+            return issue.get("title") or issue_id
+    return issue_id
+
+
+def _slugify_issue_title(title: str) -> str:
+    """issue title을 결정적 slug로 정규화한다(요청: Phase 1 shadow planner의 issue_id는
+    불안정한 Python hash()를 쓰지 않는다) — 텍스트 자체가 같으면 항상 같은 slug가 나온다."""
+    normalized = re.sub(r"[^0-9A-Za-z가-힣]+", "_", (title or "").strip()).strip("_")
+    return normalized.lower() or "unknown_issue"
+
+
+def resolve_effective_issue(state: IdeationConvState, persona_id: str | None = None) -> dict[str, str]:
+    """용준/Claude(2026-07-23, Phase 1 "Shadow Deterministic Evidence Planner"): 이번 턴
+    retrieval이 실제로 초점을 맞추는 쟁점을 issue_id/title 구조로 반환한다.
+    resolve_retrieval_issue()와 정확히 같은 우선순위를 따르며(아래에서 그 함수가 이 함수의
+    title만 재사용하도록 리팩터링했다 — 요청: "_topic_query()가 사용한 issue title/query와
+    Planner의 issue가 반드시 동일") 반환하는 title 문자열은 항상 같다."""
+    issue_id = state.get("active_issue_id")
+    if issue_id:
+        title = _active_issue_title(state) or issue_id
+        return {"issue_id": issue_id, "title": title, "source": "active_issue_id"}
+
+    if state.get("unresolved_issues"):
+        title = " ".join(state["unresolved_issues"])
+        return {"issue_id": _slugify_issue_title(title), "title": title, "source": "unresolved_issues"}
+
+    resolved_topic_ids = list(state.get("resolved_topics") or [])
+    resolved_issue_titles = {
+        issue.get("title") for issue in (state.get("resolved_issues") or []) if issue.get("title")
+    }
+    for topic_id in remaining_topics_for(resolved_topic_ids):
+        title = _TOPIC_ID_TITLES.get(topic_id, topic_id)
+        if title not in resolved_issue_titles:
+            return {"issue_id": topic_id, "title": title, "source": "topic_priority"}
+
+    title = _ROLE_DEFAULT_RETRIEVAL_TOPIC.get(persona_id or "", "핵심 검토 사항")
+    return {"issue_id": _slugify_issue_title(title), "title": title, "source": "role_default"}
+
+
+def resolve_retrieval_issue(state: IdeationConvState, persona_id: str | None = None) -> str:
+    """이번 턴 검색이 초점을 맞출 "지금 검토 중인 쟁점"의 제목을 다음 우선순위로 정한다(요청:
+    첫 전문가 턴에도 실제 검토 쟁점 반영 — active_issue_id는 discussion 노드가 첫 발언을 마친
+    "뒤"에야 열리므로, planning의 첫 발언 시점에는 항상 None이다. 이전에는 그 경우 idea 요약과
+    role focus만 남아 검색어가 여전히 광범위했다):
+    1) active_issue_id가 있으면 그 제목(_active_issue_title).
+    2) 없으면 진행자가 이미 남긴 미해결 쟁점(unresolved_issues, discussion_facilitator가
+       "unconfirmed"에서 채운다 — 있으면 TOPIC_PRIORITY보다 더 구체적인 최신 신호다), 그것도
+       없으면 아직 해결되지 않은 TOPIC_PRIORITY 주제 중 우선순위가 가장 높은 것(question_topic
+       체계를 그대로 재사용 — 이미 resolved_topics/resolved_issues에 있는 주제·제목은
+       건너뛴다).
+    3) 그것도 없으면(모든 주제가 이미 해결됐거나 두 목록이 모두 비어 있으면) 역할별 기본
+       검토 주제로 폴백한다 — 검색어가 아이디어 요약뿐인 채로 비어 있는 상태를 만들지
+       않는다.
+
+    실제 title 계산은 resolve_effective_issue()에 위임한다(요청: retrieval과 Phase 1 shadow
+    planner가 반드시 같은 title/query를 봐야 한다)."""
+    return resolve_effective_issue(state, persona_id)["title"]
+
+
+def _topic_query(state: IdeationConvState, persona_id: str | None = None) -> str:
+    """이번 턴의 근거 검색어를 조립한다. persona_id를 넘기면 역할별 아이디어 요약 필드와
+    검토 관점이 함께 반영돼 planning_expert/dev_expert가 서로 다른 검색어를 받는다(요청:
+    역할별 검색 결과 차별화) — persona_id가 없으면(진행자 등 role_id가 없는 호출자) 이전과
+    동일하게 기본 필드 요약 + 이슈만 반환한다."""
+    parts: list[str] = []
+    idea_summary = _idea_core_summary(state["user_idea"], persona_id)
+    if idea_summary:
+        parts.append(idea_summary)
+
+    issue_title = resolve_retrieval_issue(state, persona_id)
+    if issue_title:
+        parts.append(f"현재 쟁점: {issue_title}")
+
+    role_focus = _ROLE_QUERY_FOCUS.get(persona_id or "")
+    if role_focus:
+        parts.append(f"검토 관점: {role_focus}")
+
+    if not parts:
+        return idea_summary
+    return " | ".join(parts)
+
+
+def _runtime_scope_for(state: IdeationConvState) -> dict[str, Any]:
+    """용준/Claude(2026-07-23, 요청: stale closure 수정) — evidence_lookup을 실제로 호출하는
+    이 순간의 최신 state에서 session_id/selected_idea_document_id를 다시 읽는다. backend가
+    만드는 evidence_lookup closure(ideation_conversation_preview.py::_evidence_lookup_for)는
+    /reply 요청이 시작될 때(previous_state, candidate_selection 실행 전)의 값을 캡처하므로,
+    같은 요청 안에서 후보가 방금 선택/변경돼도 그 closure 값은 갱신되지 않는다 — 실측
+    확인된 버그(target upsert는 성공하지만 같은 요청의 다음 검색이 여전히
+    selected_candidate_document_id=None으로 진행됨)의 원인이다. 노드가 검색을 호출하는
+    이 지점에서는 candidate_selection 노드가 이미 state["selected_idea_document_id"]를
+    갱신한 뒤이므로(그래프는 노드를 순차 실행한다), 여기서 다시 읽으면 항상 최신 값이다."""
+    return {
+        "session_id": state.get("session_id"),
+        "selected_candidate_document_id": state.get("selected_idea_document_id"),
+    }
 
 
 def _last_user_answer(messages: list[ConvMessage]) -> dict | None:
@@ -570,6 +972,44 @@ def conversation_context_for(state: IdeationConvState) -> dict[str, Any]:
         "consensus_so_far": state["consensus"],
         "unresolved_issues": state["unresolved_issues"],
     }
+
+
+_DISCUSSION_CONTEXT_MESSAGE_KEYS = (
+    "message_id",
+    "speaker_id",
+    "speaker_name",
+    "role",
+    "message_type",
+    "content",
+    "responding_to",
+    "referenced_message_ids",
+    "created_at",
+)
+
+
+def _isolate_discussion_evidence_context(context: dict[str, Any]) -> dict[str, Any]:
+    """Active evidence 턴의 현재 ref와 과거 메시지의 ref/chunk namespace를 격리한다.
+
+    ConvMessage 전체에는 UI/세션 복원을 위한 evidence, claims, linked_evidence_refs와
+    structured grounding 필드가 들어 있다. 이를 다음 discussion prompt에 그대로 직렬화하면
+    LLM이 현재 턴 근거 대신 과거 턴의 E번호를 재사용할 수 있다. 대화 의미를 유지하는 필드만
+    allow-list로 복사하며 원본 state/message는 수정하지 않는다.
+    """
+
+    def public_message(message: Any) -> Any:
+        if not isinstance(message, dict):
+            return message
+        return {
+            key: message[key]
+            for key in _DISCUSSION_CONTEXT_MESSAGE_KEYS
+            if key in message and message[key] is not None
+        }
+
+    isolated = dict(context)
+    isolated["recent_messages"] = [public_message(item) for item in context.get("recent_messages") or []]
+    last_user_answer = context.get("last_user_answer")
+    isolated["last_user_answer"] = public_message(last_user_answer) if last_user_answer is not None else None
+    return isolated
 
 
 def _selection_context_for(state: IdeationConvState) -> dict[str, Any]:
@@ -964,14 +1404,23 @@ def make_conv_question_node(
     awaiting_phase: str,
     llm_call: LLMCall,
     evidence_lookup: EvidenceLookup | None = None,
+    ground_claims: ClaimGroundingFn | None = None,
 ) -> Callable[[IdeationConvState], dict]:
     """기획 전문가(planning_expert)/개발 전문가(dev_expert)의 "질문 턴" 노드를 만든다.
     질문 하나를 만들고 나면 반드시 awaiting_phase로 멈춘다 — 이 노드 자신은 절대
     다음 전문가로 이어가지 않는다(요청 4번: 기획 질문 직후, 개발 질문 직후 각각 정지)."""
 
     def node(state: IdeationConvState) -> dict:
-        query = _topic_query(state)
-        retrieved = evidence_lookup(persona_id, query) if evidence_lookup is not None else []
+        query = _topic_query(state, persona_id)
+        runtime_scope = _runtime_scope_for(state)
+        trace_event(
+            "IDEATION_EVIDENCE_LOOKUP_SCOPE",
+            session_id=runtime_scope["session_id"],
+            speaker=persona_id,
+            selected_candidate_document_id=runtime_scope["selected_candidate_document_id"],
+            selected_candidate_document_id_source="runtime_graph_state",
+        )
+        retrieved = call_evidence_lookup(evidence_lookup, persona_id, query, runtime_scope=runtime_scope)
         context = conversation_context_for(state)
         # 용준/Claude(2026-07-21, 질문 주제 구조화): resolved_topics는 state["resolved_topics"]
         # 그대로 읽는다(요청: 답변이 "answer"로 판정되어 다음 단계로 넘어갈 때만 추가되므로,
@@ -1002,6 +1451,17 @@ def make_conv_question_node(
         if not ok:
             return {"phase": "failed", "failed_node": f"question__{persona_id}", "llm_calls_used": used}
 
+        raw, grounding, used = _ground_and_finalize_claims(
+            persona_id=persona_id,
+            raw=raw,
+            retrieved=retrieved,
+            prompt=prompt,
+            llm_call=llm_call,
+            validate=validate,
+            used=used,
+            ground_claims_fn=ground_claims,
+        )
+
         judgment = raw.get("judgment", "")
         question = raw.get("question", "")
         question_topic = raw.get("question_topic")  # validate()가 이미 TOPIC_PRIORITY 소속을 보장한다.
@@ -1019,6 +1479,7 @@ def make_conv_question_node(
             # evidence_count)에는 항상 0으로 남았다. 프롬프트에 실제로 삽입한 근거(retrieved)를
             # 그대로 메시지 evidence로 저장해야 "삽입된 근거 수"가 사실과 일치한다.
             evidence=retrieved,
+            grounding=grounding,
             # 용준/Claude(2026-07-22, 요청: 보고서형 메시지 → 자연스러운 회의 발화 전환) —
             # judgment/question/user_selection_summary/proposal은 더 이상 content에 헤더로
             # 노출되지 않으므로, 내부 상태·다음 턴 프롬프트 컨텍스트로 계속 쓸 수 있도록
@@ -1282,10 +1743,336 @@ def _route_next_expert_turn(state: IdeationConvState) -> str:
     return routed(recommended, "validated_recommendation", recommended)
 
 
+def _trace_shadow_plan_created(
+    *,
+    session_id: str | None,
+    persona_id: str,
+    plan: dict,
+    retrieved_evidence_count: int,
+    query: str,
+    elapsed_ms: float,
+) -> None:
+    """용준/Claude(2026-07-23, Phase 1 "Shadow Deterministic Evidence Planner"): planner가
+    만든 plan을 trace 로그 하나로 남긴다(요청: CREATED/EMPTY/INVALID 이벤트 구분). plan
+    내용은 prompt/claims/grounding/routing에 전혀 영향을 주지 않는다 — 여기서 로그로만
+    소비된다."""
+    validation = plan.get("validation") or {"valid": True, "errors": []}
+    issue = plan.get("issue") or {}
+    fields = dict(
+        session_id=session_id,
+        speaker=persona_id,
+        plan_id=plan.get("plan_id"),
+        policy_version=plan.get("policy_version"),
+        effective_issue_id=issue.get("issue_id"),
+        effective_issue_title=issue.get("title"),
+        retrieval_query_preview=sanitize_preview(query, limit=160),
+        retrieved_evidence_count=retrieved_evidence_count,
+        eligible_evidence_count=plan.get("eligible_evidence_count"),
+        selected_evidence_count=len(plan.get("selected_evidence") or []),
+        empty_plan_reason=plan.get("empty_plan_reason"),
+        validation_valid=validation.get("valid"),
+        validation_errors=validation.get("errors"),
+        elapsed_ms=elapsed_ms,
+        selected_evidence=[
+            {
+                "ref": item.get("ref"),
+                "chunk_id": item.get("chunk_id"),
+                "document_id": item.get("document_id"),
+                "document_role": item.get("document_role"),
+                "claim_type": item.get("claim_type"),
+                "quote_preview": sanitize_preview(item.get("quote", ""), limit=160),
+                "quote_start": item.get("quote_start"),
+                "quote_end": item.get("quote_end"),
+                "retrieval_score": item.get("retrieval_score"),
+                "issue_relevance_score": item.get("issue_relevance_score"),
+                "selection_reason_code": item.get("selection_reason_code"),
+                "reused_in_same_issue": item.get("reused_in_same_issue"),
+            }
+            for item in plan.get("selected_evidence") or []
+        ],
+    )
+    if not validation.get("valid", True):
+        trace_event("IDEATION_EVIDENCE_PLAN_SHADOW_INVALID", **fields)
+    elif plan.get("empty_plan_reason"):
+        trace_event("IDEATION_EVIDENCE_PLAN_SHADOW_EMPTY", **fields)
+    else:
+        trace_event("IDEATION_EVIDENCE_PLAN_SHADOW_CREATED", **fields)
+
+
+def _run_shadow_evidence_planner(
+    *,
+    evidence_planner: "EvidencePlanningFn | None",
+    persona_id: str,
+    session_id: str | None,
+    effective_issue: dict[str, str],
+    query: str,
+    retrieved: list[dict],
+    runtime_scope: dict[str, Any],
+    shadow_history_map: dict[str, list[dict]],
+) -> tuple[dict | None, dict[str, list[dict]], float | None]:
+    """shadow planner를 호출하고(있으면), plan/갱신된 shadow_history_map/실행 소요시간(ms)을
+    반환한다. 예외가 나도 회의 발언 생성 자체는 절대 막지 않는다(요청: "planner 예외: 기존
+    발언 생성을 실패시키지 않고 shadow failure 로그 후 기존 흐름 진행") — 실패하면
+    (None, 기존 맵, None)을 그대로 돌려준다.
+
+    용준/Claude(2026-07-23, Phase 2 "Active Evidence Injection"): 이 함수는 shadow 로그
+    전용이 아니라 planner의 유일한 호출 지점이다 — active 모드(evidence_planner.active=True)가
+    함께 켜져 있어도 여기서 만든 plan을 그대로 재사용한다(요청: "active와 shadow가 동시에
+    켜져도 Planner를 중복 실행하지 말 것", "한 번 생성한 plan을 shadow 기록과 active
+    injection에 함께 사용할 것"). 반환된 elapsed_ms는 shadow 로그와 active/fallback 로그가
+    함께 쓴다."""
+    if evidence_planner is None:
+        return None, shadow_history_map, None
+
+    shadow_key = f"{persona_id}:{effective_issue['issue_id']}"
+    shadow_history_items = shadow_history_map.get(shadow_key, [])
+    plan_started = time.perf_counter()
+    try:
+        plan = evidence_planner(
+            persona_id=persona_id,
+            effective_issue={**effective_issue, "query": query},
+            retrieved_evidence=retrieved,
+            runtime_scope=runtime_scope,
+            shadow_history=shadow_history_items,
+        )
+    except Exception:
+        logger.exception(
+            "[IDEATION_EVIDENCE_PLAN_SHADOW_FAILED] session_id=%s speaker=%s", session_id, persona_id
+        )
+        trace_event(
+            "IDEATION_EVIDENCE_PLAN_SHADOW_FAILED",
+            level=logging.WARNING,
+            session_id=session_id,
+            speaker=persona_id,
+            effective_issue_id=effective_issue["issue_id"],
+            effective_issue_title=effective_issue["title"],
+        )
+        return None, shadow_history_map, None
+
+    elapsed_ms = round((time.perf_counter() - plan_started) * 1000, 1)
+    _trace_shadow_plan_created(
+        session_id=session_id,
+        persona_id=persona_id,
+        plan=plan,
+        retrieved_evidence_count=len(retrieved),
+        query=query,
+        elapsed_ms=elapsed_ms,
+    )
+
+    selected_chunk_ids = [item["chunk_id"] for item in plan.get("selected_evidence") or [] if item.get("chunk_id")]
+    if not selected_chunk_ids:
+        return plan, shadow_history_map, elapsed_ms
+
+    updated_items = shadow_history_items + [
+        {"speaker": persona_id, "effective_issue_id": effective_issue["issue_id"], "chunk_id": chunk_id}
+        for chunk_id in selected_chunk_ids
+    ]
+    new_shadow_history_map = dict(shadow_history_map)
+    new_shadow_history_map[shadow_key] = updated_items[-_SHADOW_HISTORY_KEEP:]
+    return plan, new_shadow_history_map, elapsed_ms
+
+
+def _build_active_planned_evidence(plan: dict, retrieved: list[dict]) -> list[dict]:
+    """용준/Claude(2026-07-23, Phase 2 "Active Evidence Injection") — plan["selected_evidence"]를
+    prompt/grounding에 그대로 주입할 근거 항목으로 변환한다. 원본 청크 전체 text가 아니라
+    planner가 원문 substring 검증까지 마친 quote만 담는다(요청: "Planner가 추출한 검증된
+    quote를 사용"). ref/chunk_id/document_id/document_role/claim_type/quote/source(=문서명)/
+    page/effective_issue_id/effective_issue_title을 함께 전달한다(요청 필드 그대로) —
+    document_name/section은 claim_grounding.is_relevant_candidate의 관련성 판정 품질을
+    legacy(retrieved 전체 주입) 경로와 최대한 동등하게 유지하기 위한 내부 보조 필드다(LLM
+    프롬프트 지시문이 요구하는 필드 목록에는 없지만, 그 값 자체가 이번 턴에 선택된 근거의
+    사실 정보라 노출해도 "선택되지 않은 evidence 노출 금지" 요구와 충돌하지 않는다)."""
+    issue = plan.get("issue") or {}
+    by_ref = {item.get("ref"): item for item in retrieved if isinstance(item, dict) and item.get("ref")}
+    items: list[dict] = []
+    for selected in plan.get("selected_evidence") or []:
+        source = by_ref.get(selected.get("ref")) or {}
+        items.append(
+            {
+                "ref": selected.get("ref"),
+                "chunk_id": selected.get("chunk_id"),
+                "document_id": selected.get("document_id"),
+                "document_role": selected.get("document_role"),
+                "claim_type": selected.get("claim_type"),
+                "quote": selected.get("quote"),
+                "source": source.get("document_name"),
+                "page": source.get("page"),
+                "effective_issue_id": issue.get("issue_id"),
+                "effective_issue_title": issue.get("title"),
+                "document_name": source.get("document_name"),
+                "section": source.get("section"),
+            }
+        )
+    return items
+
+
+def _resolve_discussion_evidence(
+    *,
+    evidence_planner: "EvidencePlanningFn | None",
+    shadow_plan: dict | None,
+    retrieved: list[dict],
+) -> tuple[list[dict], str, str | None]:
+    """용준/Claude(2026-07-23, Phase 2 "Active Evidence Injection") — evidence_planner의
+    active 속성(백엔드가 ENABLE_IDEATION_EVIDENCE_PLANNER_DISCUSSION일 때만 세팅,
+    _evidence_planner_for 참고)이 꺼져 있으면 무조건 기존 legacy 경로(retrieved 전체)를
+    그대로 돌려준다 — Phase 1 shadow 전용일 때와 완전히 동일하게 동작한다.
+
+    active가 켜져 있으면 이번 턴 prompt/grounding에 실제로 쓸 evidence와 모드를 결정한다:
+      - "fallback": planner가 기술적으로 실패했다(예외로 shadow_plan이 None이거나, plan이
+        validation을 통과하지 못했다) — retrieved 전체로 되돌아간다(요청 A. "Planner 기술
+        실패" 정책). 부적합한 plan을 그대로 못 믿는 것이지, "근거가 없다"는 판단 자체가
+        틀렸다는 뜻이 아니므로 기존 경로가 안전하다.
+      - "valid_empty": plan validation은 통과했지만 이번 쟁점에 맞는 근거가 하나도 없다고
+        planner가 정상적으로 판단했다(selected_evidence=[]) — retrieved 전체로 fallback하지
+        않는다(요청 B. "부적합한 근거를 다시 주입하면 Planner eligibility 정책이
+        무효화되기 때문"). 빈 리스트 그대로 써서 전문가가 근거 없이(expert_judgment만)
+        판단하게 한다.
+      - "active": plan이 유효하고 selected_evidence가 있다 — 그 근거만 prompt/grounding에
+        노출한다(선택되지 않은 evidence는 노출하지 않는다).
+    """
+    if evidence_planner is None or not getattr(evidence_planner, "active", False):
+        return retrieved, "inactive", None
+    if shadow_plan is None:
+        return retrieved, "fallback", "planner_exception"
+    validation = shadow_plan.get("validation") or {"valid": True, "errors": []}
+    if not validation.get("valid", True):
+        return retrieved, "fallback", "plan_validation_failed"
+    selected = shadow_plan.get("selected_evidence") or []
+    if not selected:
+        return [], "valid_empty", None
+    return _build_active_planned_evidence(shadow_plan, retrieved), "active", None
+
+
+def _build_evidence_plan_notice(mode: str, plan: dict | None) -> str:
+    """용준/Claude(2026-07-23, Phase 2 "Active Evidence Injection") — active/valid_empty
+    모드일 때만 prompt에 붙일 안내문을 만든다(요청: "이번 발언이 다룰 effective_issue_id/
+    title", "해당 쟁점 범위 안에서 판단할 것", "다른 쟁점으로 임의 전환하지 말 것"을 명확히
+    전달). routing이나 state의 active_issue_id를 강제로 바꾸지 않는다 — prompt 지시문으로만
+    범위를 좁힌다."""
+    if mode not in ("active", "valid_empty") or not plan:
+        return ""
+    issue = plan.get("issue") or {}
+    issue_id = issue.get("issue_id") or ""
+    issue_title = issue.get("title") or issue_id
+    if mode == "active":
+        allowed_refs = [
+            item.get("ref")
+            for item in plan.get("selected_evidence") or []
+            if isinstance(item, dict) and isinstance(item.get("ref"), str) and item.get("ref")
+        ]
+        allowed_refs_text = ", ".join(allowed_refs) if allowed_refs else "없음"
+        return (
+            f'이번 발언은 아래 [검색 근거]에 나열된 항목만 문서 근거로 인용할 수 있습니다 — '
+            f"이 목록에 없는 근거를 지어내거나 가정하지 마세요. 이번 발언이 다뤄야 할 쟁점은 "
+            f'effective_issue_id="{issue_id}"(제목: "{issue_title}")입니다. 이 쟁점 범위 안에서만 '
+            f"판단하고, 특별한 이유 없이 다른 쟁점으로 임의 전환하지 마세요. "
+            f"현재 턴에서 허용된 evidence_refs는 [{allowed_refs_text}]뿐입니다. "
+            f"evidence_refs에는 이번 [검색 근거] 목록에 실제로 표시된 ref만 사용할 수 있습니다. "
+            f"대화 맥락의 과거 발언에서 보았던 E번호나 chunk_id는 현재 턴의 근거가 아니므로 "
+            f"절대 재사용하지 마세요."
+        )
+    return (
+        f'이번 쟁점(effective_issue_id="{issue_id}", 제목: "{issue_title}")에는 인용할 문서 근거가 '
+        f"없습니다. 문서 사실(document_fact)을 새로 만들지 말고 전문가 판단(expert_judgment)으로만 "
+        f"판단하세요. 이 쟁점 범위 안에서만 판단하고 다른 쟁점으로 임의 전환하지 마세요."
+    )
+
+
+def _trace_active_evidence_plan(
+    *,
+    session_id: str | None,
+    persona_id: str,
+    mode: str,
+    fallback_reason: str | None,
+    plan: dict | None,
+    retrieved_evidence_count: int,
+    injected_evidence_count: int,
+    elapsed_ms: float | None,
+) -> None:
+    """용준/Claude(2026-07-23, Phase 2 "Active Evidence Injection") — prompt 조립 직전(아직
+    LLM 응답/grounding 이전)에 이번 턴의 evidence 결정을 한 이벤트로 남긴다. claim/grounding
+    관련 필드는 이 시점에 존재하지 않으므로 _trace_evidence_plan_compliance(응답 이후)가
+    별도로 남긴다."""
+    validation = (plan or {}).get("validation") or {"valid": True, "errors": []}
+    issue = (plan or {}).get("issue") or {}
+    fields = dict(
+        session_id=session_id,
+        speaker=persona_id,
+        plan_id=(plan or {}).get("plan_id"),
+        effective_issue_id=issue.get("issue_id"),
+        effective_issue_title=issue.get("title"),
+        retrieved_evidence_count=retrieved_evidence_count,
+        eligible_evidence_count=(plan or {}).get("eligible_evidence_count"),
+        selected_evidence_count=len((plan or {}).get("selected_evidence") or []),
+        injected_planned_evidence_count=injected_evidence_count,
+        selected_refs=[item.get("ref") for item in (plan or {}).get("selected_evidence") or []],
+        fallback_reason=fallback_reason,
+        validation_valid=validation.get("valid"),
+        validation_errors=validation.get("errors"),
+        elapsed_ms=elapsed_ms,
+    )
+    if mode == "active":
+        trace_event("IDEATION_EVIDENCE_PLAN_ACTIVE", **fields)
+    elif mode == "valid_empty":
+        trace_event("IDEATION_EVIDENCE_PLAN_VALID_EMPTY", **fields)
+    elif mode == "fallback":
+        trace_event("IDEATION_EVIDENCE_PLAN_FALLBACK", level=logging.WARNING, **fields)
+
+
+def _trace_evidence_plan_compliance(
+    *,
+    session_id: str | None,
+    persona_id: str,
+    mode: str,
+    plan: dict,
+    raw: dict,
+    grounding: dict,
+    generated_issue_id: str | None,
+    generated_issue_title: str | None,
+) -> None:
+    """용준/Claude(2026-07-23, Phase 2 "Active Evidence Injection", 요청: "쟁점 정합성" —
+    Phase 1에서 issue mismatch 10% 관측) — 발언 생성·grounding이 끝난 뒤 계획된 쟁점과 실제
+    생성된 쟁점을 비교하고, 선택된 근거가 실제로 claims/grounding에 쓰였는지 로그로 남긴다.
+    이 로그는 기록용이다 — mismatch만으로 재생성하거나 라우팅을 바꾸지 않는다(기존
+    _safe_call_structured_json/_ground_and_finalize_claims의 재시도 정책과 별개 축)."""
+    issue = plan.get("issue") or {}
+    selected_refs = [item.get("ref") for item in plan.get("selected_evidence") or [] if item.get("ref")]
+    claim_evidence_refs = sorted(
+        {
+            ref
+            for claim in (raw.get("claims") or [])
+            if isinstance(claim, dict)
+            for ref in (claim.get("evidence_refs") or [])
+            if isinstance(ref, str)
+        }
+    )
+    trace_event(
+        "IDEATION_EVIDENCE_PLAN_COMPLIANCE",
+        session_id=session_id,
+        speaker=persona_id,
+        plan_id=plan.get("plan_id"),
+        mode=mode,
+        effective_issue_id=issue.get("issue_id"),
+        effective_issue_title=issue.get("title"),
+        generated_issue_id=generated_issue_id,
+        generated_issue_title=generated_issue_title,
+        issue_match=(generated_issue_id is None or generated_issue_id == issue.get("issue_id")),
+        selected_refs=selected_refs,
+        claim_evidence_refs=claim_evidence_refs,
+        used_selected_evidence=bool(set(selected_refs) & set(claim_evidence_refs)),
+        claim_count=len(grounding["claims"]),
+        grounded_claim_count=grounding["grounded_claim_count"],
+        linked_evidence_count=grounding["linked_evidence_count"],
+        linked_chunk_ids=list(grounding["linked_evidence_refs"]),
+    )
+
+
 def make_conv_discussion_node(
     persona_id: str,
     llm_call: LLMCall,
     evidence_lookup: EvidenceLookup | None = None,
+    ground_claims: ClaimGroundingFn | None = None,
+    evidence_planner: "EvidencePlanningFn | None" = None,
 ) -> Callable[[IdeationConvState], dict]:
     """용준/Claude(2026-07-22, 요청: 동적 전문가 회의로 개편): 기획/개발 전문가의 "발언 턴"
     노드. 예전에는 speaks_second/discussion_stage를 빌드 시점에 고정해 "기획 1회 → 개발
@@ -1327,9 +2114,17 @@ def make_conv_discussion_node(
                 reason="self_responding_target",
             )
             return {"phase": "failed", "failed_node": f"discussion__{persona_id}__self_target"}
-        query = _topic_query(state)
+        query = _topic_query(state, persona_id)
         evidence_started = time.perf_counter()
-        retrieved = evidence_lookup(persona_id, query) if evidence_lookup is not None else []
+        runtime_scope = _runtime_scope_for(state)
+        trace_event(
+            "IDEATION_EVIDENCE_LOOKUP_SCOPE",
+            session_id=runtime_scope["session_id"],
+            speaker=persona_id,
+            selected_candidate_document_id=runtime_scope["selected_candidate_document_id"],
+            selected_candidate_document_id_source="runtime_graph_state",
+        )
+        retrieved = call_evidence_lookup(evidence_lookup, persona_id, query, runtime_scope=runtime_scope)
         # 용준/Claude(2026-07-22, RAG 근거 유실 수정): evidence_lookup 자체가 None이면(use_rag
         # 미사용 세션) "검색을 아예 안 했다"는 뜻이고, evidence_lookup은 있지만 결과가 빈
         # 배열이면 "검색은 했지만 0건"이다 — 둘 다 result_count=0으로 보이지만 원인이 다르므로
@@ -1353,7 +2148,47 @@ def make_conv_discussion_node(
             chunk_ids=[item.get("chunk_id") for item in retrieved if isinstance(item, dict) and item.get("chunk_id")],
             elapsed_ms=round((time.perf_counter() - evidence_started) * 1000, 1),
         )
+        # 용준/Claude(2026-07-23, Phase 1 "Shadow Deterministic Evidence Planner") — 기존
+        # retrieval 직후, prompt 조립 전에 shadow planner를 실행한다(요청 순서 그대로). plan
+        # 결과는 아래 prompt 조립/LLM 호출/grounding 어디에도 전달하지 않고, trace 로그
+        # (_trace_shadow_plan_created)와 shadow_history_map 갱신에만 쓰인다. evidence_planner가
+        # None이면(플래그 꺼짐 등) 기존과 완전히 동일하게 동작한다.
+        effective_issue = resolve_effective_issue(state, persona_id)
+        shadow_plan, shadow_history_map, plan_elapsed_ms = _run_shadow_evidence_planner(
+            evidence_planner=evidence_planner,
+            persona_id=persona_id,
+            session_id=state.get("session_id"),
+            effective_issue=effective_issue,
+            query=query,
+            retrieved=retrieved,
+            runtime_scope=runtime_scope,
+            shadow_history_map=state.get("evidence_plan_shadow_history") or {},
+        )
+        # 용준/Claude(2026-07-23, Phase 2 "Active Evidence Injection") — 위에서 만든 plan을
+        # 다시 실행하지 않고 그대로 재사용해 이번 턴 prompt/grounding에 쓸 evidence를
+        # 결정한다. evidence_planner.active가 꺼져 있으면(기본값, 또는 shadow 전용) 항상
+        # evidence_mode="inactive"이고 turn_evidence는 retrieved 그대로다 — 기존 동작과 100%
+        # 동일하다.
+        turn_evidence, evidence_mode, evidence_fallback_reason = _resolve_discussion_evidence(
+            evidence_planner=evidence_planner,
+            shadow_plan=shadow_plan,
+            retrieved=retrieved,
+        )
+        if evidence_mode != "inactive":
+            _trace_active_evidence_plan(
+                session_id=state.get("session_id"),
+                persona_id=persona_id,
+                mode=evidence_mode,
+                fallback_reason=evidence_fallback_reason,
+                plan=shadow_plan,
+                retrieved_evidence_count=len(retrieved),
+                injected_evidence_count=len(turn_evidence),
+                elapsed_ms=plan_elapsed_ms,
+            )
+        evidence_plan_notice = _build_evidence_plan_notice(evidence_mode, shadow_plan)
         context = conversation_context_for(state)
+        if evidence_mode in ("active", "valid_empty"):
+            context = _isolate_discussion_evidence_context(context)
         speaker_name, _ = _speaker_fields(persona_id)
         responding_name = _EXPERT_ROLE_LABELS.get(responding_to_speaker_id or "", responding_to_speaker_id)
         message_id = _new_message_id()
@@ -1381,7 +2216,7 @@ def make_conv_discussion_node(
             persona_id,
             state["notice_and_criteria"],
             state["user_idea"],
-            retrieved,
+            turn_evidence,
             context,
             speaks_second=(discussion_stage == "response"),
             discussion_stage=discussion_stage,
@@ -1399,6 +2234,7 @@ def make_conv_discussion_node(
                 if responding_to_target
                 else {}
             ),
+            evidence_plan_notice=evidence_plan_notice,
         )
         validate = lambda raw, _stage=discussion_stage: _validate_discussion_response(  # noqa: E731
             raw,
@@ -1411,6 +2247,17 @@ def make_conv_discussion_node(
         used = state.get("llm_calls_used", 0) + attempts
         if not ok:
             return {"phase": "failed", "failed_node": f"discussion__{persona_id}", "llm_calls_used": used}
+
+        raw, grounding, used = _ground_and_finalize_claims(
+            persona_id=persona_id,
+            raw=raw,
+            retrieved=turn_evidence,
+            prompt=prompt,
+            llm_call=llm_call,
+            validate=validate,
+            used=used,
+            ground_claims_fn=ground_claims,
+        )
 
         stance = raw.get("stance")
         if stance not in _VALID_DISCUSSION_STANCES:
@@ -1437,8 +2284,42 @@ def make_conv_discussion_node(
         # 용준/Claude(2026-07-22, 요청: 동적 전문가 회의로 개편) — 다음 발언자/쟁점 판단
         # 필드. recommended_next_speaker는 여기서 정규화만 하고, 실제 라우팅 검증은
         # _route_next_expert_turn(그래프 라우터)이 한다(LLM 추천을 그대로 신뢰하지 않는다).
-        active_issue_id = (raw.get("active_issue_id") or "").strip() or _fallback_issue_id(state)
-        active_issue_title = (raw.get("active_issue_title") or "").strip() or active_issue_id
+        generated_issue_id_raw = (raw.get("active_issue_id") or "").strip() or None
+        generated_issue_title_raw = (raw.get("active_issue_title") or "").strip() or None
+        if shadow_plan is not None and generated_issue_id_raw is not None:
+            # 용준/Claude(2026-07-23, Phase 1 "Shadow Deterministic Evidence Planner", 요청:
+            # 첫 턴 issue mismatch rate 측정) — retrieval이 실제로 겨냥한 쟁점(effective_issue)과
+            # LLM이 자체적으로 반환한 쟁점(generated_issue_id_raw)이 다르면 로그만 남긴다.
+            # mismatch가 발생해도 발언을 재생성하거나 라우팅을 바꾸지 않는다(Phase 1 범위 밖).
+            if generated_issue_id_raw != shadow_plan["issue"]["issue_id"]:
+                trace_event(
+                    "IDEATION_EVIDENCE_PLAN_SHADOW_ISSUE_MISMATCH",
+                    session_id=state.get("session_id"),
+                    speaker=persona_id,
+                    plan_id=shadow_plan.get("plan_id"),
+                    effective_issue_id=shadow_plan["issue"]["issue_id"],
+                    effective_issue_title=shadow_plan["issue"]["title"],
+                    generated_issue_id=generated_issue_id_raw,
+                    generated_issue_title=generated_issue_title_raw,
+                    issue_match=False,
+                )
+        # 용준/Claude(2026-07-23, Phase 2 "Active Evidence Injection", 요청: "쟁점 정합성"
+        # compliance 로그) — evidence_mode가 "inactive"가 아닐 때만(discussion 플래그가 켜져
+        # planner를 실제로 참고한 턴에만) 남긴다. mismatch/미사용이 확인돼도 여기서 발언을
+        # 재생성하거나 라우팅을 바꾸지 않는다 — 순수 기록이다.
+        if evidence_mode != "inactive" and shadow_plan is not None:
+            _trace_evidence_plan_compliance(
+                session_id=state.get("session_id"),
+                persona_id=persona_id,
+                mode=evidence_mode,
+                plan=shadow_plan,
+                raw=raw,
+                grounding=grounding,
+                generated_issue_id=generated_issue_id_raw,
+                generated_issue_title=generated_issue_title_raw,
+            )
+        active_issue_id = generated_issue_id_raw or _fallback_issue_id(state)
+        active_issue_title = generated_issue_title_raw or active_issue_id
         new_information = _as_string_list(raw.get("new_information"))
         proposal = raw.get("proposal") or None
         changed_position = bool(raw.get("changed_position"))
@@ -1460,6 +2341,94 @@ def make_conv_discussion_node(
             issue_resolved = False
         needs_user_input = bool(raw.get("needs_user_input"))
         user_question = (raw.get("user_question") or None) if needs_user_input else None
+        # 용준/Claude(2026-07-22, 요청 9번: 반복 회의 방지) — 이번 발언의 핵심 문서 주장이
+        # 재생성 후에도 근거 연결에 실패했는데(evidence_status="ungrounded") LLM 스스로
+        # 사용자 질문으로 전환하지 않았다면, 전문가끼리 같은 내용을 계속 반복하지 않도록
+        # 코드가 강제로 사용자에게 되묻는 흐름으로 전환한다.
+        if grounding["evidence_status"] == "ungrounded" and not needs_user_input:
+            needs_user_input = True
+            if grounding["missing_information"]:
+                user_question = (
+                    "현재 자료에서는 "
+                    + " · ".join(grounding["missing_information"][:2])
+                    + " 부분을 확인할 수 없습니다. 관련 정보를 알고 계신가요?"
+                )
+            else:
+                user_question = "이 부분을 판단할 근거 자료가 부족합니다. 관련 정보를 제공해 주실 수 있나요?"
+            recommended_next_speaker = "user"
+
+        # 용준/Claude(2026-07-22, 요청: 반복되는 근거 없는 의견을 사용자 질문으로 전환) —
+        # evidence_status="ungrounded"(document_fact 인용 실패, 위에서 즉시 처리됨) 외에도
+        # linked_evidence_count=0인 턴이나 expert_judgment_only 상태, 같은 missing_information이
+        # 별다른 진전 없이 "쟁점이 바뀌지 않은 채" 반복되면(2회 연속) 전문가 둘이서 끝없이 같은
+        # 판단을 되풀이하는 대신 사용자에게 구체적으로 되묻는다(요청 4번).
+        #
+        # ground_claims_fn이 없으면(use_rag=False 등 RAG 자체를 쓰지 않는 세션) grounding은
+        # 항상 _EMPTY_GROUNDING(linked_evidence_count=0)이다 — 이건 "근거 연결이 반복 실패"가
+        # 아니라 "애초에 RAG를 검증하지 않기로 한 세션"이므로, 이 반복 감지 자체를 건너뛴다
+        # (그렇지 않으면 RAG 미사용 세션마다 두 번째 발언에서 곧바로 사용자에게 되묻게 된다).
+        #
+        # new_information(발언 스키마 필수 필드)의 어휘 반복 여부는 로그로만 남기고(같은
+        # 화자가 라운드마다 정형화된 문구를 쓰는 정상적인 경우까지 오탐하기 쉬워 라우팅
+        # 트리거로 쓰지 않는다) 사용자 전환 조건에서는 제외한다.
+        ground_claims_configured = ground_claims is not None
+        issue_changed = active_issue_id != state.get("active_issue_id")
+        missing_info_normalized = sorted({m.strip() for m in grounding["missing_information"] if m and m.strip()})
+        new_information_text = " ".join(new_information)
+
+        if not ground_claims_configured:
+            consecutive_zero_linked_turns = 0
+            consecutive_expert_judgment_only_turns = 0
+            consecutive_repeated_missing_information_turns = 0
+            consecutive_no_new_information_turns = 0
+        elif issue_changed:
+            zero_linked_turn = grounding["linked_evidence_count"] == 0
+            consecutive_zero_linked_turns = 1 if zero_linked_turn else 0
+            expert_judgment_only_turn = grounding["evidence_status"] == "expert_judgment_only"
+            consecutive_expert_judgment_only_turns = 1 if expert_judgment_only_turn else 0
+            consecutive_repeated_missing_information_turns = 0
+            consecutive_no_new_information_turns = 0
+        else:
+            prev_zero_linked = state.get("consecutive_zero_linked_turns", 0)
+            prev_expert_judgment_only = state.get("consecutive_expert_judgment_only_turns", 0)
+            prev_missing_streak = state.get("consecutive_repeated_missing_information_turns", 0)
+            prev_no_new_info_streak = state.get("consecutive_no_new_information_turns", 0)
+            prev_missing_information = state.get("last_missing_information", [])
+            prev_new_information_text = state.get("last_new_information_text", "")
+
+            zero_linked_turn = grounding["linked_evidence_count"] == 0
+            consecutive_zero_linked_turns = prev_zero_linked + 1 if zero_linked_turn else 0
+            expert_judgment_only_turn = grounding["evidence_status"] == "expert_judgment_only"
+            consecutive_expert_judgment_only_turns = prev_expert_judgment_only + 1 if expert_judgment_only_turn else 0
+            missing_information_repeated = (
+                bool(missing_info_normalized) and missing_info_normalized == prev_missing_information
+            )
+            consecutive_repeated_missing_information_turns = prev_missing_streak + 1 if missing_information_repeated else 0
+            no_new_information_turn = bool(prev_new_information_text) and _looks_like_restatement(
+                new_information_text, prev_new_information_text
+            )
+            consecutive_no_new_information_turns = prev_no_new_info_streak + 1 if no_new_information_turn else 0
+
+        _REPETITION_TURN_THRESHOLD = 2
+        repetition_triggered = ground_claims_configured and (
+            consecutive_zero_linked_turns >= _REPETITION_TURN_THRESHOLD
+            or consecutive_expert_judgment_only_turns >= _REPETITION_TURN_THRESHOLD
+            or consecutive_repeated_missing_information_turns >= _REPETITION_TURN_THRESHOLD
+        )
+        if repetition_triggered and not needs_user_input:
+            needs_user_input = True
+            if missing_info_normalized:
+                user_question = (
+                    "현재 자료에서는 " + " · ".join(missing_info_normalized[:2])
+                    + " 부분을 확인할 수 없습니다. 관련 정보를 알고 계신가요?"
+                )
+            else:
+                user_question = (
+                    "같은 전문가 판단이 반복되고 있어 더 진전이 없습니다. "
+                    "판단에 필요한 구체적인 정보를 제공해 주실 수 있나요?"
+                )
+            recommended_next_speaker = "user"
+        next_action = "await_user_input" if needs_user_input else "continue_discussion"
 
         content = _compose_discussion_content(raw.get("spoken_text", ""))
         message = _build_message(
@@ -1472,6 +2441,7 @@ def make_conv_discussion_node(
             # 이유로 raw.get("evidence") 대신 retrieved(이번 턴 RAG 검색 결과, 프롬프트에
             # 이미 주입됨)를 그대로 저장한다.
             evidence=retrieved,
+            grounding=grounding,
             # 용준/Claude(2026-07-21, 프런트 상세보기): content(위)는 하위 호환을 위해 그대로
             # 유지하고, 필드별 구조를 선택 정보로 추가한다 — 프런트가 판단/제안만 기본 노출하고
             # 근거/확정/미확정을 "상세 보기"로 접을 수 있게 한다(요청 9번). content를 대체하는
@@ -1502,6 +2472,21 @@ def make_conv_discussion_node(
                 "issue_resolved": issue_resolved,
                 "needs_user_input": needs_user_input,
                 "user_question": user_question,
+                # 용준/Claude(2026-07-22, 요청: 반복 방지 결과를 로그·다음 라우팅이 참조할 수
+                # 있게 명시적으로 남긴다) — needs_user_input과 항상 일치하는 파생값이지만,
+                # "왜 지금 사용자에게 넘기는지"를 별도 필드로 노출해 로그에서 바로 읽을 수 있다.
+                "next_action": next_action,
+                # 용준/Claude(2026-07-22, 요청: 진행자가 검증된 주장만 사실로 요약하도록
+                # 제한) — discussion_facilitator 프롬프트는 planning_position/
+                # development_review를 이 dict 그대로 JSON 직렬화해 받는다(prompt_loader.py
+                # build_ideation_conv_discussion_facilitator_prompt). evidence_status/
+                # unsupported_claims를 함께 넘겨 진행자가 "문서로 확인된 내용"과 "근거가
+                # 부족한 내용"을 구분해서 정리하도록 한다 — 검증 안 된 주장을 새 사실처럼
+                # 정리하지 못하게 막는 1차 방어선(2차는 아래 프롬프트 지시문).
+                "evidence_status": grounding["evidence_status"],
+                "linked_evidence_refs": grounding["linked_evidence_refs"],
+                "unsupported_claims": [c["text"] for c in grounding["unsupported_claims"]],
+                "missing_information": grounding["missing_information"],
             },
             message_id=message_id,
         )
@@ -1519,10 +2504,29 @@ def make_conv_discussion_node(
             new_information_count=len(new_information),
             text_length=len(content),
             text=sanitize_preview(content),
-            # injected_evidence_count: 실제로 메시지·프롬프트에 담겨 나간 근거 수(위
-            # IDEATION_TURN_START의 retrieved_evidence_count와 항상 같아야 한다 — evidence
-            # 필드가 이제 LLM이 자체 보고한 값이 아니라 retrieved를 그대로 저장하기 때문).
-            injected_evidence_count=len(message["evidence"]),
+            # injected_evidence_count: 실제로 이번 prompt에 담겨 나간 근거 수. evidence_mode가
+            # "inactive"(기존 legacy 경로)면 위 IDEATION_TURN_START의 retrieved_evidence_count와
+            # 항상 같다 — turn_evidence가 retrieved 그대로이기 때문이다. Phase 2 active 모드
+            # (evidence_mode="active"/"valid_empty")에서는 이보다 작을 수 있다(요청: 선택되지
+            # 않은 evidence는 prompt에 넣지 않는다) — message["evidence"]는 검색·감사 기록
+            # 용도로 항상 retrieved 전체를 유지하므로(기존 계약 그대로) 여기서는 그 값 대신
+            # turn_evidence 길이를 쓴다.
+            injected_evidence_count=len(turn_evidence),
+            # 용준/Claude(2026-07-22, 요청: RAG 근거 실제 활용 강화) — 성공 판단 기준은
+            # injected_evidence_count가 아니라 linked_evidence_count다(요청 18번).
+            linked_evidence_count=grounding["linked_evidence_count"],
+            supported_claim_count=grounding["supported_claim_count"],
+            unsupported_claim_count=grounding["unsupported_claim_count"],
+            accepted_claim_count=grounding["accepted_claim_count"],
+            grounded_claim_count=grounding["grounded_claim_count"],
+            expert_judgment_count=grounding["expert_judgment_count"],
+            evidence_status=grounding["evidence_status"],
+            missing_information=grounding["missing_information"],
+            consecutive_zero_linked_turns=consecutive_zero_linked_turns,
+            consecutive_expert_judgment_only_turns=consecutive_expert_judgment_only_turns,
+            consecutive_repeated_missing_information_turns=consecutive_repeated_missing_information_turns,
+            consecutive_no_new_information_turns=consecutive_no_new_information_turns,
+            next_action=next_action,
             elapsed_ms=round((time.perf_counter() - turn_started) * 1000, 1),
         )
 
@@ -1600,6 +2604,19 @@ def make_conv_discussion_node(
             # "to_refinement")는 이 노드(그 라우팅의 목적지)가 실행되는 순간 소비 완료다 —
             # forced_next_speaker와 같은 이유로 다음 라운드/다음 요청에 잔류하지 않게 리셋한다.
             "next_route": None,
+            # 용준/Claude(2026-07-22, 요청: 반복되는 근거 없는 의견을 사용자 질문으로 전환) —
+            # 다음 턴이 이어서 참조할 반복 감지 카운터. apply_user_answer가 사용자 답변 시점에
+            # 0/빈 값으로 리셋한다(ideation_conv_state.py 참고).
+            "consecutive_zero_linked_turns": consecutive_zero_linked_turns,
+            "consecutive_expert_judgment_only_turns": consecutive_expert_judgment_only_turns,
+            "last_missing_information": missing_info_normalized,
+            "consecutive_repeated_missing_information_turns": consecutive_repeated_missing_information_turns,
+            "last_new_information_text": new_information_text,
+            "consecutive_no_new_information_turns": consecutive_no_new_information_turns,
+            # 용준/Claude(2026-07-23, Phase 1 "Shadow Deterministic Evidence Planner") — 다음
+            # 턴이 이어서 참조할 shadow 선택 이력(세션 범위 state, API 응답에는 노출하지 않는다).
+            # evidence_planner가 주입되지 않았으면(기본값) 이 필드는 항상 기존 값 그대로다.
+            "evidence_plan_shadow_history": shadow_history_map,
         }
         if is_interjection_first_response:
             # 용준/Claude(2026-07-22, 요청: 지정 위원 질문 후 상대 검토 코드 강제) — "검토
