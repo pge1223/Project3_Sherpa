@@ -103,6 +103,12 @@ def _comprehensive_responder(*, dev_review_stance: str, discussion_review_stance
     수정까지 이어지고, 곧바로 회의 discussion도 반박+continue_round로 이어지는 경우)를 정확히
     재현하기 위해 stance/next_action을 파라미터로 받는다."""
 
+    # 용준/Claude(2026-07-22, 요청: 동적 전문가 회의로 개편) — "이번 기획 발언이 dev의 수정
+    # 요구에 응답하는 것인가"는 더 이상 고정된 라운드 순번이 아니라 "직전 dev 발언이 수정을
+    # 요구했는가" 상태로 판단해야 한다(_DebateScriptedLLM과 같은 패턴). 클로저 밖에서
+    # nonlocal로 갱신할 수 있게 리스트에 담는다.
+    _awaiting_revision = [False]
+
     def llm_call(prompt: str) -> str:
         is_planning = "당신은 AI Review Board의 기획 전문가입니다" in prompt
         is_dev = "당신은 AI Review Board의 개발 전문가입니다" in prompt
@@ -116,6 +122,7 @@ def _comprehensive_responder(*, dev_review_stance: str, discussion_review_stance
         if "[질문 규칙]" in prompt:
             return json.dumps(
                 {
+                    "spoken_text": f"[{speaker}] 발화 질문",
                     "judgment": f"[{speaker}] 판단",
                     "question": f"[{speaker}] 질문",
                     "question_topic": _topic_from_prompt(prompt),
@@ -128,6 +135,7 @@ def _comprehensive_responder(*, dev_review_stance: str, discussion_review_stance
             is_revision_stage = "[stage]\nrevision" in prompt
             return json.dumps(
                 {
+                    "spoken_text": f"[{speaker}] 발화 제안",
                     "proposal": f"[{speaker}] 제안",
                     "reason": f"[{speaker}] 이유",
                     "assumption": f"[{speaker}] 가정",
@@ -142,6 +150,7 @@ def _comprehensive_responder(*, dev_review_stance: str, discussion_review_stance
             return json.dumps(
                 {
                     "stance": dev_review_stance,
+                    "spoken_text": f"[{speaker}] 발화 검토",
                     "judgment": f"[{speaker}] 검토 판단",
                     "reason": f"[{speaker}] 검토 근거",
                     "responding_to": "상대 제안",
@@ -155,29 +164,57 @@ def _comprehensive_responder(*, dev_review_stance: str, discussion_review_stance
             )
         if "[위임 정리 규칙]" in prompt:
             return json.dumps(
-                {"agreements": [], "considerations": [], "final_recommendation": "위임 최종 권고안"},
+                {
+                    "agreements": [],
+                    "considerations": [],
+                    "final_recommendation": "위임 최종 권고안",
+                    "spoken_text": "위임 최종 권고안",
+                },
                 ensure_ascii=False,
             )
         if "[의견 규칙]" in prompt:
-            is_review_stage = "[discussion_stage]\nreview" in prompt
-            is_revision_stage = "[discussion_stage]\nrevision" in prompt
-            stance = discussion_review_stance if is_review_stage else "보완"
+            needs_revision = discussion_review_stance in {"반박", "조건부_동의", "대안_제시"}
+            if is_dev:
+                stance = discussion_review_stance
+                is_response_stage = True  # dev는 항상 방금 나온 planning 발언에 반응한다.
+                dev_resolves_issue = not needs_revision and discussion_next_action != "continue_round"
+                _awaiting_revision[0] = needs_revision
+                recommended_next_speaker = "planning_expert" if needs_revision else "ideation_facilitator"
+                issue_resolved = dev_resolves_issue
+            else:
+                stance = "보완"
+                is_response_stage = _awaiting_revision[0]
+                if is_response_stage:
+                    _awaiting_revision[0] = False
+                recommended_next_speaker = "dev_expert" if not is_response_stage else "ideation_facilitator"
+                issue_resolved = is_response_stage  # 수정 응답이면 이번 쟁점은 여기서 끝난다.
             return json.dumps(
                 {
                     "stance": stance,
+                    "spoken_text": f"[{speaker}] 발화 판단",
                     "judgment": f"[{speaker}] 판단",
                     "reason": f"[{speaker}] 근거",
                     "suggestion": f"[{speaker}] 제안",
                     "interim_conclusion": f"[{speaker}] 현재 임시 결론",
-                    "responding_to": "상대 발언" if (is_review_stage or is_revision_stage) else None,
+                    "responding_to": "상대 발언" if is_response_stage else None,
                     "agreement": "",
-                    "concern": "우려" if (is_review_stage or is_revision_stage) else "",
-                    "revision": "수정 내용" if is_revision_stage else None,
+                    "concern": "우려" if is_response_stage else "",
+                    "revision": "수정 내용" if (not is_dev and is_response_stage) else None,
                     "confirmed": [],
                     "unconfirmed": [],
                     "referenced_message_ids": [],
                     "evidence": [],
-                    "next_action": discussion_next_action if is_review_stage else None,
+                    "next_action": None,
+                    "active_issue_id": "mvp_scope",
+                    "active_issue_title": "MVP 범위",
+                    "new_information": [f"[{speaker}] 새로 확인된 내용"],
+                    "proposal": f"[{speaker}] 제안",
+                    "changed_position": False,
+                    "needs_counterpart_response": needs_revision if is_dev else False,
+                    "recommended_next_speaker": recommended_next_speaker,
+                    "issue_resolved": issue_resolved,
+                    "needs_user_input": False,
+                    "user_question": None,
                 },
                 ensure_ascii=False,
             )
@@ -187,24 +224,23 @@ def _comprehensive_responder(*, dev_review_stance: str, discussion_review_stance
                     "agreements": [],
                     "disagreements": [],
                     "facilitator_summary": "라운드 정리",
+                    "spoken_text": "라운드 정리",
                     "needs_user_decision": False,
                     "user_question": None,
                 },
                 ensure_ascii=False,
             )
-        # 가은/Claude(2026-07-22, 캔버스 자동 갱신) — 매 라운드 끝의 canvas_update 노드.
-        # 라운드당 LLM 호출이 1회 늘어난 것이므로 아래 테스트의 호출 수 기대값에 반영돼 있다.
         if "[캔버스 갱신 규칙]" in prompt:
             return json.dumps(
                 {
-                    "problem": "[canvas] 문제 상황",
-                    "target_user": "[canvas] 타깃 사용자",
-                    "core_value": "[canvas] 핵심 가치",
-                    "solution": "[canvas] 해결 방식",
-                    "differentiation": "[canvas] 차별점",
+                    "problem": "문의 응대 부담",
+                    "target_user": "소상공인",
+                    "core_value": "응대 시간 절감",
+                    "solution": "FAQ 자동 응답",
+                    "differentiation": "저비용 구축",
                     "feasibility": "medium",
-                    "risks": ["[canvas] 리스크"],
-                    "contest_fit": "[canvas] 심사기준 대응",
+                    "risks": ["오답 위험"],
+                    "contest_fit": "실현가능성 기준 대응",
                 },
                 ensure_ascii=False,
             )
@@ -269,10 +305,9 @@ def test_realistic_max_cascade_stays_comfortably_under_the_cap(client: TestClien
     (_force_session_to_awaiting_developer_answer로 재현). 경로: "잘 모르겠어"(결정적 규칙,
     sufficiency 생략) -> expert_delegation(제안 1 + 반대 위원 검토 1 + [반박이므로] 수정
     1 + 진행자 권고안 1 = 4) -> 같은 요청 안에서 곧바로 expert_discussion 라운드까지
-    이어짐(기획 최초 1 + 개발 검토 1 + [반박이므로] 기획 수정 1 + 진행자 정리 1 +
-    캔버스 갱신 1(가은/Claude 2026-07-22, 캔버스 자동 갱신) = 5,
-    next_action="await_user_decision"이라 다음 라운드로는 이어지지 않는다) = 이번 reply
-    요청에서만 9회.
+    이어짐(기획 최초 1 + 개발 검토 1 + [반박이므로] 기획 수정 1 + 진행자 정리 1 = 4,
+    next_action="await_user_decision"이라 다음 라운드로는 이어지지 않는다) + 아이디어 캔버스
+    갱신 1회 = 이번 reply 요청에서만 9회.
 
     이 값이 실제 호출 수와 정확히 일치하고, 상한(_MAX_LLM_CALLS_PER_REQUEST)보다 여유 있게
     낮은지 확인한다 — 요청 사항 그대로, 현실적인(재시도 없는) 최대 경로에서 상한이 조기에
@@ -304,7 +339,7 @@ def test_realistic_max_cascade_stays_comfortably_under_the_cap(client: TestClien
     body = reply_resp.json()
 
     assert call_counter[0] == 9, (
-        f"위임 4회 + 회의 라운드 5회(캔버스 갱신 포함) = 9회가 아니라 {call_counter[0]}회가 호출됐습니다"
+        f"위임 4회 + 회의 라운드 4회 + 캔버스 갱신 1회 = 9회가 아니라 {call_counter[0]}회가 호출됐습니다"
     )
     assert call_counter[0] < conv_route._MAX_LLM_CALLS_PER_REQUEST, "현실적인 최대 경로가 상한을 초과하면 안 된다"
 
@@ -346,8 +381,8 @@ def test_cap_trips_gracefully_instead_of_looping_forever(client: TestClient, mon
     assert start_resp.json()["phase"] == "awaiting_user_decision"
 
     # 이제부터 LLM이 항상 continue_round를 반환하는 폭주 시나리오로 바꾸고, 상한을 낮춘다
-    # (라운드 하나당 planning+dev+facilitator+canvas=4회 — 상한 5로는 두 번째 라운드의
-    # 개발 위원 호출에서 확실히 넘긴다).
+    # (라운드 하나당 planning+dev+facilitator=3회 — 상한 5로는 두 번째 라운드의 진행자
+    # 호출에서 확실히 넘긴다).
     runaway_responder = _comprehensive_responder(
         dev_review_stance="동의", discussion_review_stance="동의", discussion_next_action="continue_round"
     )

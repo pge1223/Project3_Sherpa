@@ -62,8 +62,12 @@
 
 .vt-dotg { cursor: pointer; }
 
+/* "자세히 보기" 단계 카드 — 펼칠 때 왼쪽에서 하나씩 슬라이드-인(animationDelay로 스태거). */
+.vt-step { opacity: 0; animation: vtStepIn 0.42s cubic-bezier(0.22, 0.8, 0.28, 1) forwards; }
+@keyframes vtStepIn { from { opacity: 0; transform: translateX(-12px); } to { opacity: 1; transform: none; } }
+
 @media (prefers-reduced-motion: reduce) {
-  .vt-fade, .vt-bar-seg, .vt-line, .vt-area, .vt-dot, .vt-dot-label {
+  .vt-fade, .vt-bar-seg, .vt-line, .vt-area, .vt-dot, .vt-dot-label, .vt-step {
     animation: none !important; opacity: 1 !important; transform: none !important; stroke-dashoffset: 0 !important;
   }
 }

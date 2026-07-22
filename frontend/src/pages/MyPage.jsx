@@ -189,8 +189,13 @@ export default function MyPage() {
 
   const experienceSummary =
     `인턴 ${profile.experience.internship_months}개월 · 공모전 참여 ${profile.experience.competition_count}회 · 수상 ${profile.experience.award_count}회`
+  // 경이/Claude(2026-07-22, 가은님 위임): degree/graduation_status가 null로 올 때
+  // DEGREE_LABEL[null]=undefined라 "undefined undefined"가 뜨던 표시 버그 방어.
+  // (근본 원인인 백엔드 degree 저장 누락은 윤한님이 별도 수정 예정 — 여기선 표시만 방어)
+  const degreeLabel = DEGREE_LABEL[profile.education.degree] ?? '학위 미입력'
+  const gradLabel = GRADUATION_LABEL[profile.education.graduation_status] ?? ''
   const educationSummary =
-    `${DEGREE_LABEL[profile.education.degree]} ${GRADUATION_LABEL[profile.education.graduation_status]} · ${profile.education.is_technical_major ? '전공' : '비전공'}`
+    `${degreeLabel}${gradLabel ? ' ' + gradLabel : ''} · ${profile.education.is_technical_major ? '전공' : '비전공'}`
 
   return (
     <div style={styles.page}>
