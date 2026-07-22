@@ -273,6 +273,31 @@ class TestHWPParser:
         paragraphs = parser._extract_section_paragraphs(data)
         assert paragraphs == ["사업계획서", "1. 개요 내용입니다."]
 
+    def test_extract_section_paragraphs_filters_inline_control_bytes(self, tmp_path: Path):
+        """표/그림 등 인라인 컨트롤 ID 바이트가 텍스트에 섞여도(깨진 한자처럼 보이는
+        문자로 잘못 디코딩됨) 정상 한글/영문만 남고 걸러져야 한다."""
+        import struct
+
+        from ai.rag.parsers.hwpx_parser import _HWPTAG_PARA_TEXT
+
+        def para_record(text: str) -> bytes:
+            payload = text.encode("utf-16le")
+            header = (len(payload) << 20) | _HWPTAG_PARA_TEXT
+            return struct.pack("<I", header) + payload
+
+        # 실제 버그 리포트에서 관측된 깨진 문자(표 컨트롤 ID 등 인라인 바이너리가
+        # UTF-16LE 한자 코드 영역으로 잘못 디코딩된 것)가 정상 텍스트 사이에 섞인 상황 재현
+        garbled = "捤獥汤捯氠瑢"
+        text_with_garbage = "이 사업은" + garbled + " AI 플랫폼"
+        data = para_record(text_with_garbage)
+
+        dummy_hwp = tmp_path / "dummy.hwp"
+        dummy_hwp.write_bytes(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1")
+        parser = HWPParser(dummy_hwp)
+
+        paragraphs = parser._extract_section_paragraphs(data)
+        assert paragraphs == ["이 사업은 AI 플랫폼"]
+
     def test_parse_corrupted_hwp(self, tmp_path: Path):
         """OLE 시그니처가 아닌 파일 → CorruptedDocumentError"""
         bad_hwp = tmp_path / "bad.hwp"

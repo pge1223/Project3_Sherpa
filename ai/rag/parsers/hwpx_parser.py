@@ -173,9 +173,33 @@ class HWPXParser(BaseParser):
         )
 
 
+# HWP5 PARA_TEXT 레코드는 표/그림/필드 등 "확장 컨트롤 문자"를 인라인으로 표현할 때
+# 컨트롤 ID(예: 표는 "tbl ", 그리기 개체는 "gso " 같은 4바이트 ASCII 태그)와 부가
+# 파라미터 바이트를 같은 UTF-16 스트림 안에 함께 싣는다. 이 바이트들은 텍스트가
+# 아닌데도 UTF-16LE로 그대로 디코딩되면 우연히 한자(CJK 통합 한자) 코드 영역에
+# 값이 떨어져 "捤獥汤捯氠瑢" 같은 깨진 문자로 보인다. 컨트롤 구조 전체를 정식으로
+# 파싱하는 대신, 실제 문서에 나올 법한 문자 종류(한글/영문/숫자/기본 특수문자)만
+# 허용하는 화이트리스트로 걸러낸다.
+_ALLOWED_EXTRA_CHARS = set("·※~—–…‘’“”「」『』【】（）")
+
+
+def _is_allowed_hwp_char(ch: str) -> bool:
+    if ch in ("\t", "\n"):
+        return True
+    code = ord(ch)
+    if 0x20 <= code <= 0x7E:  # ASCII 출력 가능 문자(영문/숫자/기본 특수문자)
+        return True
+    if 0xAC00 <= code <= 0xD7A3:  # 한글 완성형(가-힣)
+        return True
+    if 0x1100 <= code <= 0x11FF or 0x3130 <= code <= 0x318F:  # 한글 자모
+        return True
+    return ch in _ALLOWED_EXTRA_CHARS
+
+
 def _clean_hwp_text(text: str) -> str:
-    """HWP 레코드에서 나온 텍스트의 제어 문자(단락 내 특수문자 마커 등)를 제거"""
-    return "".join(ch for ch in text if ch in ("\t", "\n") or ord(ch) >= 0x20)
+    """HWP 레코드 텍스트에서 제어 문자·인라인 컨트롤 바이트가 잘못 디코딩된 깨진
+    문자를 제거하고, 정상 한글/영문/숫자/기본 특수문자만 남긴다."""
+    return "".join(ch for ch in text if _is_allowed_hwp_char(ch))
 
 
 class HWPParser(BaseParser):
