@@ -346,8 +346,16 @@ def build_ideation_conv_discussion_prompt(
     resolved_issues: Any = None,
     current_speaker: Any = None,
     responding_to_message: Any = None,
+    evidence_plan_notice: str = "",
 ) -> str:
     """기획/개발 전문가의 "보완 의견 턴" 실행 프롬프트를 조립한다.
+
+    evidence_plan_notice(용준/Claude(2026-07-23, Phase 2 "Active Evidence Injection"), 기본값
+    빈 문자열): 비어 있으면 <<RETRIEVED_EVIDENCE_JSON>>은 기존과 완전히 동일한 문자열이다
+    (템플릿 자체는 수정하지 않는다 — 플래그가 꺼져 있을 때 프롬프트가 한 글자도 달라지지
+    않아야 한다는 요구사항 때문). 값이 있으면(discussion evidence planner가 active 모드로
+    선정한 근거를 쓸 때만) retrieved_evidence JSON 앞에 안내문으로 붙인다 — 이번 발언이 다룰
+    쟁점과, 선택되지 않은 근거는 이 목록에 없다는 사실을 명시한다.
 
     용준/Claude(2026-07-22, 요청: 동적 전문가 회의로 개편): discussion_stage는 이제
     "initial_position"(이번 쟁점에서 처음 말함, responding_to 없어도 됨) / "response"(상대
@@ -363,11 +371,14 @@ def build_ideation_conv_discussion_prompt(
     알려준다 — 전문가는 이 값을 보고 새 쟁점을 열지, 기존 쟁점을 이어갈지 판단한다."""
     card = get_persona_card(persona_id)
     template = _read_text(IDEATION_CONV_DISCUSSION_TEMPLATE)
+    evidence_text = _as_text(retrieved_evidence)
+    if evidence_plan_notice:
+        evidence_text = f"{evidence_plan_notice}\n\n{evidence_text}"
     replacements = {
         "<<PERSONA_BLOCK>>": render_persona_block(card),
         "<<NOTICE_AND_CRITERIA_JSON>>": _as_text(notice_and_criteria),
         "<<USER_IDEA_JSON>>": _as_text(user_idea),
-        "<<RETRIEVED_EVIDENCE_JSON>>": _as_text(retrieved_evidence),
+        "<<RETRIEVED_EVIDENCE_JSON>>": evidence_text,
         "<<CONVERSATION_CONTEXT_JSON>>": _as_text(conversation_context),
         "<<SPEAKS_SECOND>>": "true" if speaks_second else "false",
         "<<DISCUSSION_STAGE>>": discussion_stage,

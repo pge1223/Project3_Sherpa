@@ -209,4 +209,13 @@ def _build_raw_metadata(
         "indexable": chunk.indexable,
         "document_title": context.document_title,
         "document_role": context.document_role,
+        # 용준/Claude(2026-07-22, 요청: 선택된 아이디어/사용자 답변을 target evidence로 색인)
+        # — IndexingContext.extra_metadata를 그대로 펼쳐 넣는다. 일반 파일/URL 업로드는 이
+        # 필드를 쓰지 않으므로(항상 None) 기존 색인 경로는 전혀 영향받지 않는다. 여기서
+        # 개별 ideation 전용 필드(ideation_source_type/session_id/candidate_id 등)를 하나씩
+        # IndexingContext에 추가하지 않고 범용 통로 하나로 열어두는 이유: 이 값들은 오직
+        # 아이디어 회의 target evidence 색인 호출자(ai/rag/orchestration/
+        # ideation_target_indexing_service.py)만 채우고, 다른 모든 호출자(문서 업로드 등)는
+        # 그대로 두어도 되는 부가 정보이기 때문이다.
+        **(context.extra_metadata or {}),
     }

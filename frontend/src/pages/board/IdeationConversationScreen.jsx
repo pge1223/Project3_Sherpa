@@ -93,13 +93,22 @@ function RespondingToCaption({ message, allMessages = [] }) {
   )
 }
 
-// 근거(evidence) 접기/펼치기 — RAG가 실제로 검색한 조각만 표시한다(evidence가 비어 있으면
-// "근거 보기" 자체가 나타나지 않으므로, 근거 없이 지어낸 판단과 실제 문서 근거가 있는
-// 판단이 화면에서 자연히 구분된다).
-function EvidenceToggle({ evidence }) {
+// 근거(evidence) 접기/펼치기 — 용준/Claude(2026-07-22, 요청: RAG 근거 실제 활용 강화)로
+// message.evidence(검색·프롬프트 주입 전체) 대신 message.linked_evidence_refs(주장-근거
+// 연결·관련성 검증을 통과한 chunk_id만)를 기준으로 필터링한다. injected_evidence_count가
+// 아니라 linked_evidence_count가 성공 기준이라는 요청 취지를 화면에도 그대로 반영한다 —
+// 검증을 통과하지 못한 근거는 여기서 아예 보이지 않는다.
+function EvidenceToggle({ evidence, linkedEvidenceRefs, claims }) {
   const [open, setOpen] = useState(false)
-  const items = (evidence || []).filter((e) => e && (e.quote || e.document_name))
-  if (items.length === 0) return null
+  const linkedSet = new Set(linkedEvidenceRefs || [])
+  const items = (evidence || []).filter((e) => e && e.chunk_id && linkedSet.has(e.chunk_id))
+  // document_fact인데 근거 연결에 실패했거나(unsupported), expert_judgment로 남은 주장은
+  // 문서 출처가 있는 것처럼 꾸미지 않고 "전문가 판단" 배지로만 구분해 보여준다.
+  const unlinkedClaims = (claims || []).filter(
+    (c) => c && (c.claim_type === 'expert_judgment' || !linkedSet.size)
+  )
+  if (items.length === 0 && unlinkedClaims.length === 0) return null
+  const count = items.length
   return (
     <div style={{ marginTop: 4 }}>
       <button
@@ -110,25 +119,45 @@ function EvidenceToggle({ evidence }) {
         }}
       >
         {open ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
-        근거 {items.length}개 {open ? '접기' : '보기'}
+        근거 {count}건 {open ? '접기' : '보기'}
       </button>
       {open && (
         <div style={{ marginTop: 4, display: 'flex', flexDirection: 'column', gap: 6 }}>
           {items.map((e, i) => (
             <div
-              key={i}
+              key={e.chunk_id || i}
               style={{
                 fontSize: 11.5, color: 'var(--text-1)', lineHeight: 1.5,
                 background: 'var(--bg-0)', border: '1px solid var(--glass-border)', borderRadius: 8, padding: '6px 8px',
               }}
             >
-              {e.document_name && <div style={{ fontWeight: 600, color: 'var(--text-2)', marginBottom: 2 }}>{e.document_name}</div>}
-              {e.quote && <div style={{ marginBottom: 2 }}>"{e.quote}"</div>}
-              <div style={{ fontSize: 10.5, color: 'var(--text-2)', fontFamily: 'var(--mono)' }}>
-                {[e.document_id, e.relevance].filter(Boolean).join(' · ')}
-              </div>
+              {e.document_name && (
+                <div style={{ fontWeight: 600, color: 'var(--text-2)', marginBottom: 2 }}>
+                  {e.document_name}
+                  {e.page != null && ` / ${e.page}페이지`}
+                </div>
+              )}
+              {e.section && (
+                <div style={{ fontSize: 10.5, color: 'var(--text-2)', marginBottom: 2 }}>평가항목: {e.section}</div>
+              )}
+              {(e.text || e.quote) && <div style={{ marginBottom: 2 }}>"{e.text || e.quote}"</div>}
+              {e.source_url && (
+                <a href={e.source_url} target="_blank" rel="noreferrer" style={{ fontSize: 10.5, color: 'var(--purple-dim)' }}>
+                  원문 보기
+                </a>
+              )}
             </div>
           ))}
+          {items.length === 0 && (
+            <div
+              style={{
+                fontSize: 11.5, color: 'var(--text-2)', fontStyle: 'italic',
+                background: 'var(--bg-0)', border: '1px solid var(--glass-border)', borderRadius: 8, padding: '6px 8px',
+              }}
+            >
+              현재 문서에서 직접 확인되지 않은 전문가 판단입니다.
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -229,7 +258,13 @@ function MessageBubble({ message, streaming = false, interrupted = false, allMes
             [사용자에 의해 발언이 중단됐습니다]
           </div>
         )}
-        {!streaming && <EvidenceToggle evidence={message.evidence} />}
+        {!streaming && (
+          <EvidenceToggle
+            evidence={message.evidence}
+            linkedEvidenceRefs={message.linked_evidence_refs}
+            claims={message.claims}
+          />
+        )}
         {isFacilitatorSummary && <FacilitatorSummaryCard structured={message.structured} />}
       </div>
     </div>

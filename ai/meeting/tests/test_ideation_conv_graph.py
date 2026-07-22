@@ -1864,6 +1864,17 @@ def test_facilitator_and_discussion_prompts_instruct_against_fabricating_evidenc
     assert "근거 없는 사실" in discussion_prompt_path.read_text(encoding="utf-8")
 
 
+def test_facilitator_prompt_instructs_not_to_summarize_expert_judgment_only_as_agreement():
+    """용준/Claude(2026-07-22, 요청: linked_evidence_count=0인 의견을 문서로 확인된 합의처럼
+    요약하지 않도록 수정) — evidence_status="expert_judgment_only"인 발언을 진행자가
+    "합의했습니다"로만 요약하지 않고, 문서 근거가 없다는 사실을 함께 밝히도록 지시하는지
+    구조적으로 확인한다."""
+    facilitator_prompt_path = MEETING_DIR / "prompts" / "ideation_conv_discussion_facilitator.txt"
+    text = facilitator_prompt_path.read_text(encoding="utf-8")
+    assert "expert_judgment_only" in text
+    assert "합의했습니다" in text and "반복하지 않습니다" in text
+
+
 def test_no_evidence_available_produces_empty_evidence_section_without_crashing():
     """evidence_lookup이 없을 때(RAG 미사용) retrieved_evidence 섹션이 빈 배열로 표시되고,
     질문/의견 생성 자체는 정상적으로 완료되는지 확인한다(요청: "RAG가 없을 때 일반적인

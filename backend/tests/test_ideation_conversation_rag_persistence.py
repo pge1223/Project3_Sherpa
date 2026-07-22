@@ -92,7 +92,7 @@ class _RecordingEvidenceLookupFactory:
         self.factory_calls: list[tuple[bool, str | None]] = []
         self.lookup_calls: list[tuple[str, str]] = []
 
-    def __call__(self, use_rag: bool, project_id):
+    def __call__(self, use_rag: bool, project_id, *, session_id=None, selected_candidate_document_id=None):
         self.factory_calls.append((use_rag, project_id))
         if not use_rag:
             return None

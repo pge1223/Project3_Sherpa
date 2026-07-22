@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import queue
@@ -364,14 +365,30 @@ _RAG_SPEAKER_META = {
 }
 
 
+def _lookup_accepts_runtime_scope(fn) -> bool:
+    """lookup 콜러블이 runtime_scope 키워드 인자를 받는지 검사한다(ai/meeting/graph/
+    ideation_nodes.py::_lookup_accepts_runtime_scope와 동일한 목적 — 여기서는 테스트가 흔히
+    주입하는 (persona_id, query) 2-인자 lambda까지 그대로 감싸야 하는 _trace_evidence_lookup에
+    적용한다). ai.rag가 실제로 만드는 lookup은 runtime_scope를 받지만, 테스트용 fake는 받지
+    않을 수 있으므로 지원 여부를 먼저 확인해 하위 호환을 유지한다."""
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return False
+    if "runtime_scope" in sig.parameters:
+        return True
+    return any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+
+
 def _trace_evidence_lookup(lookup, *, project_id: str, top_k: int):
     """모든 아이디어 회의 RAG 호출을 발언 생성 직전/직후 로그로 감싼다.
 
     검색 구현이나 반환값은 바꾸지 않는다. 프롬프트와 청크 원문 전체는 기록하지 않고,
     호출 여부를 확인하는 데 필요한 검색어 미리보기·문서명·chunk_id·점수만 남긴다.
     """
+    lookup_accepts_runtime_scope = _lookup_accepts_runtime_scope(lookup)
 
-    def traced_lookup(persona_id: str, query: str):
+    def traced_lookup(persona_id: str, query: str, *, runtime_scope: Optional[dict] = None):
         speaker_name, role_id = _RAG_SPEAKER_META.get(persona_id, (persona_id, None))
         started = time.perf_counter()
         trace_event(
@@ -385,7 +402,15 @@ def _trace_evidence_lookup(lookup, *, project_id: str, top_k: int):
             timing="전문가 발언 생성 전",
         )
         try:
-            evidence = lookup(persona_id, query)
+            # 용준/Claude(2026-07-23, 요청: stale closure 수정) — runtime_scope는
+            # ai/meeting/graph 노드가 evidence_lookup을 호출하는 바로 그 순간의 최신 graph
+            # state에서 읽은 session_id/selected_candidate_document_id다. lookup(아래
+            # _evidence_lookup_for가 만든 실제 ai.rag 콜러블)이 이 값을 받으면 lookup을
+            # 만들 때 캡처해둔 closure 스냅샷(요청 시작 시점 값)보다 우선한다.
+            if lookup_accepts_runtime_scope:
+                evidence = lookup(persona_id, query, runtime_scope=runtime_scope)
+            else:
+                evidence = lookup(persona_id, query)
         except Exception:
             trace_event(
                 "IDEATION_RAG_SEARCH_FAILED",
@@ -417,6 +442,31 @@ def _trace_evidence_lookup(lookup, *, project_id: str, top_k: int):
                 if isinstance(item, dict)
             ],
         )
+        # 용준/Claude(2026-07-22, 요청: 로그 — IDEATION_TARGET_EVIDENCE_SEARCHED) — criteria/
+        # target(그중 선택된 후보 target/사용자 답변 target)이 실제로 몇 건씩 검색됐는지 남긴다.
+        # ai.rag의 반환 dict가 이미 document_role/ideation_source_type을 담고 있으므로(요청:
+        # 역할별 검색 데이터 구성 + 세션 범위 검색) 여기서는 그 값을 세는 것만 한다 — 판정
+        # 로직 자체는 ai.rag에 있다.
+        criteria_count = sum(1 for item in evidence if isinstance(item, dict) and item.get("document_role") == "criteria")
+        target_items = [item for item in evidence if isinstance(item, dict) and item.get("document_role") == "target"]
+        candidate_target_count = sum(
+            1 for item in target_items if item.get("ideation_source_type") == "ideation_candidate"
+        )
+        user_answer_target_count = sum(
+            1 for item in target_items if item.get("ideation_source_type") == "user_session_answer"
+        )
+        expected_roles = {"criteria", "target"}
+        found_roles = {item.get("document_role") for item in evidence if isinstance(item, dict)}
+        missing_document_roles = sorted(expected_roles - found_roles)
+        trace_event(
+            "IDEATION_TARGET_EVIDENCE_SEARCHED",
+            speaker=persona_id,
+            criteria_count=criteria_count,
+            target_count=len(target_items),
+            candidate_target_count=candidate_target_count,
+            user_answer_target_count=user_answer_target_count,
+            missing_document_roles=missing_document_roles,
+        )
         return evidence
 
     setattr(traced_lookup, "trace_project_id", project_id)
@@ -424,7 +474,13 @@ def _trace_evidence_lookup(lookup, *, project_id: str, top_k: int):
     return traced_lookup
 
 
-def _evidence_lookup_for(use_rag: bool, project_id: Optional[str]):
+def _evidence_lookup_for(
+    use_rag: bool,
+    project_id: Optional[str],
+    *,
+    session_id: Optional[str] = None,
+    selected_candidate_document_id: Optional[str] = None,
+):
     if not use_rag:
         trace_event(
             "IDEATION_RAG_CONFIGURATION",
@@ -436,7 +492,11 @@ def _evidence_lookup_for(use_rag: bool, project_id: Optional[str]):
     from ai.rag.orchestration.ideation_evidence_service import make_ideation_evidence_lookup
 
     lookup = make_ideation_evidence_lookup(
-        project_id=project_id, role_retrieval_service=_role_retrieval_service, top_k=5
+        project_id=project_id,
+        role_retrieval_service=_role_retrieval_service,
+        top_k=5,
+        session_id=session_id,
+        selected_candidate_document_id=selected_candidate_document_id,
     )
     lookup = _trace_evidence_lookup(lookup, project_id=project_id, top_k=5)
     trace_event(
@@ -445,8 +505,146 @@ def _evidence_lookup_for(use_rag: bool, project_id: Optional[str]):
         project_id=project_id,
         top_k=5,
         roles={"planning_expert": "planning", "dev_expert": "technology"},
+        session_id=session_id,
+        selected_candidate_document_id=selected_candidate_document_id,
     )
     return lookup
+
+
+def _index_target_evidence_for(use_rag: bool, project_id: Optional[str]):
+    """용준/Claude(2026-07-22, 요청: 선택된 아이디어/사용자 답변을 target evidence로 색인) —
+    evidence_lookup/ground_claims와 동일한 정책: use_rag=False거나 project_id가 없으면(요청
+    17-3번 "project_id 없는 세션에서 전역 target 문서를 만들면 안 됨") 색인 콜러블 자체를
+    주입하지 않는다 — ai/meeting/graph 쪽은 index_target_evidence=None이면 색인을 건너뛰고
+    안전하게 진행한다(evidence_lookup=None과 같은 패턴)."""
+    if not use_rag or not project_id:
+        return None
+    from ai.rag.orchestration.ideation_target_indexing_service import (
+        IdeationTargetIndexingError,
+        index_selected_candidate_as_target,
+        index_user_answer_as_target,
+    )
+    from app.api.routes.documents import _get_indexing_service
+
+    def index_target_evidence(kind: str, payload: dict) -> dict:
+        indexing_service = _get_indexing_service()
+        started = time.perf_counter()
+        session_id = payload.get("session_id")
+        if kind == "candidate":
+            candidate_id = payload.get("candidate_id")
+            trace_fields = {"session_id": session_id, "candidate_id": candidate_id, "source_type": "ideation_candidate"}
+            try:
+                result = index_selected_candidate_as_target(
+                    indexing_service=indexing_service,
+                    project_id=project_id,
+                    session_id=session_id,
+                    candidate_id=candidate_id,
+                    candidate=payload.get("candidate") or {},
+                )
+            except IdeationTargetIndexingError as exc:
+                trace_event(
+                    "IDEATION_TARGET_EVIDENCE_UPSERT",
+                    level=logging.WARNING,
+                    created_or_updated="failed",
+                    error=sanitize_preview(str(exc), limit=100),
+                    **trace_fields,
+                )
+                raise
+        elif kind == "user_answer":
+            user_message_id = payload.get("user_message_id")
+            trace_fields = {
+                "session_id": session_id,
+                "user_message_id": user_message_id,
+                "source_type": "user_session_answer",
+            }
+            try:
+                result = index_user_answer_as_target(
+                    indexing_service=indexing_service,
+                    project_id=project_id,
+                    session_id=session_id,
+                    user_message_id=user_message_id,
+                    answer_text=payload.get("answer_text") or "",
+                    pending_question=payload.get("pending_question"),
+                    pending_question_topic=payload.get("pending_question_topic"),
+                )
+            except IdeationTargetIndexingError as exc:
+                trace_event(
+                    "IDEATION_TARGET_EVIDENCE_UPSERT",
+                    level=logging.WARNING,
+                    created_or_updated="failed",
+                    error=sanitize_preview(str(exc), limit=100),
+                    **trace_fields,
+                )
+                raise
+        else:
+            raise ValueError(f"알 수 없는 target evidence 종류입니다: {kind!r}")
+
+        trace_event(
+            "IDEATION_TARGET_EVIDENCE_UPSERT",
+            project_id=project_id,
+            document_id=result.document_id,
+            chunk_count=result.chunk_count,
+            content_hash=result.content_hash,
+            created_or_updated="upserted",
+            elapsed_ms=round((time.perf_counter() - started) * 1000, 1),
+            **trace_fields,
+        )
+        return {"document_id": result.document_id, "chunk_count": result.chunk_count, "status": "ok"}
+
+    return index_target_evidence
+
+
+# 용준/Claude(2026-07-22, 요청: RAG 근거 실제 활용 강화) — ai/meeting/graph는 ai.rag를 직접
+# import하지 않는다(ai/rag/tests/test_meeting_evidence_service.py::TestScopeBoundary가
+# 강제하는 경계). evidence_lookup과 같은 이유로, claim-evidence 연결 검증(RAG-004 관련성
+# 판정 재사용)도 이 API 레이어가 실제 구현을 주입한다.
+_ROLE_RELEVANCE_KEYWORDS = {
+    "planning_expert": ["실현 가능성", "경제성", "평가기준", "심사", "차별성", "사업성", "공모전"],
+    "dev_expert": ["데이터", "API", "구현", "보안", "성능", "아키텍처", "연동", "기술"],
+}
+
+
+def _ground_claims_for(use_rag: bool):
+    if not use_rag:
+        return None
+    from ai.rag.evidence_linking.claim_grounding import ground_claims as _ground_claims_impl
+
+    def grounder(persona_id: str, claims, retrieved_evidence: list[dict]) -> dict:
+        return _ground_claims_impl(
+            claims, retrieved_evidence, role_keywords=_ROLE_RELEVANCE_KEYWORDS.get(persona_id)
+        )
+
+    return grounder
+
+
+def _evidence_planner_for(use_rag: bool):
+    """용준/Claude(2026-07-23, Phase 1 "Shadow Deterministic Evidence Planner", Phase 2 "Active
+    Evidence Injection") — evidence_lookup/ground_claims와 같은 lazy-import 정책(ai/meeting은
+    ai.rag를 모른다). SHADOW/DISCUSSION 둘 다 꺼져 있으면(기본값) planner 콜러블 자체를
+    주입하지 않는다 — make_conv_discussion_node가 evidence_planner=None으로 실행되어 기존
+    동작과 완전히 동일하다.
+
+    두 플래그가 동시에 켜져도 planner는 턴당 한 번만 실행된다(ideation_conv_nodes.py::
+    _run_shadow_evidence_planner가 유일한 호출 지점) — 여기서는 그 결과를 "실제 발언에 쓸지"
+    여부만 반환된 콜러블의 active 속성(evidence_lookup.trace_project_id와 같은 패턴, 시그니처
+    변경 없이 그래프 조립 함수들을 그대로 통과시킨다)으로 표시한다."""
+    if not use_rag or not (
+        settings.ENABLE_IDEATION_EVIDENCE_PLANNER_SHADOW or settings.ENABLE_IDEATION_EVIDENCE_PLANNER_DISCUSSION
+    ):
+        return None
+    from ai.rag.orchestration.ideation_evidence_planner import build_evidence_plan
+
+    def planner(*, persona_id, effective_issue, retrieved_evidence, runtime_scope, shadow_history):
+        return build_evidence_plan(
+            persona_id=persona_id,
+            effective_issue=effective_issue,
+            retrieved_evidence=retrieved_evidence,
+            runtime_scope=runtime_scope,
+            shadow_history=shadow_history,
+        )
+
+    planner.active = bool(settings.ENABLE_IDEATION_EVIDENCE_PLANNER_DISCUSSION)
+    return planner
 
 
 def _serialize_state(state: IdeationConvState) -> dict:
@@ -495,6 +693,9 @@ def _serialize_state(state: IdeationConvState) -> dict:
         "idea_candidates": state.get("idea_candidates", []),
         "original_idea_candidates": state.get("original_idea_candidates", []),
         "selected_idea": state.get("selected_idea"),
+        # 용준/Claude(2026-07-22, 요청: 선택된 아이디어를 target 문서로 생성) — 순수 추가
+        # 필드. 색인이 주입되지 않았거나(use_rag=False) 실패했으면 None이다.
+        "selected_idea_document_id": state.get("selected_idea_document_id"),
         "selection_reason": state.get("selection_reason"),
         "resolved_topics": state.get("resolved_topics", []),
         "pending_question_topic": state.get("pending_question_topic"),
@@ -572,7 +773,12 @@ async def start_conversation(request: StartRequest):
     user_idea = {"description": user_idea_text}
 
     llm_call = _build_llm_call(session_id, _effective_model(request.model))
-    evidence_lookup = _evidence_lookup_for(request.use_rag, request.project_id)
+    # 용준/Claude(2026-07-22, 요청: 세션 범위 검색) — /start 시점에는 아직 후보를 선택하지
+    # 않았으므로(discovery 모드 시작) selected_candidate_document_id는 항상 None이다.
+    evidence_lookup = _evidence_lookup_for(request.use_rag, request.project_id, session_id=session_id)
+    ground_claims = _ground_claims_for(request.use_rag)
+    index_target_evidence = _index_target_evidence_for(request.use_rag, request.project_id)
+    evidence_planner = _evidence_planner_for(request.use_rag)
 
     logger.info("[ideation-conversation] 시작 session_id=%s max_rounds=%d", session_id, effective_max_rounds)
     try:
@@ -584,6 +790,9 @@ async def start_conversation(request: StartRequest):
             llm_call=llm_call,
             max_rounds=effective_max_rounds,
             evidence_lookup=evidence_lookup,
+            ground_claims=ground_claims,
+            index_target_evidence=index_target_evidence,
+            evidence_planner=evidence_planner,
         )
     except Exception:
         logger.exception("[ideation-conversation] 시작 실패 session_id=%s", session_id)
@@ -619,7 +828,24 @@ async def reply_conversation(session_id: str, request: ReplyRequest):
         # 용준/Claude(2026-07-22, RAG 근거 유실 수정 2탄): /start에서 저장해둔 use_rag/project_id로
         # evidence_lookup을 다시 만든다 — 예전에는 여기서 evidence_lookup을 아예 넘기지 않아
         # (기본값 None) 첫 턴 이후 모든 턴이 RAG 검색 없이 진행됐다.
-        evidence_lookup = _evidence_lookup_for(record.use_rag, record.project_id)
+        # 용준/Claude(2026-07-22, 요청: 세션 범위 검색 + 후보 변경 시 이전 candidate target
+        # 제외; 2026-07-23 정정) — 아래 selected_candidate_document_id는 이 요청이 "시작될
+        # 때"(candidate_selection 노드 실행 전)의 값일 뿐이다 — 후보 선택과 첫 전문가 검색이
+        # 같은 /reply 안에서 이어지면(candidate_selection이 to_refinement로 곧장
+        # planning_expert_discussion까지 진행) 이 값은 여전히 이전 상태(대부분 None)다.
+        # 실제 "지금 선택된 후보" 값은 그래프 노드가 evidence_lookup을 호출하는 순간의
+        # runtime_scope(ai/meeting/graph/ideation_conv_nodes.py::_runtime_scope_for)가
+        # 매번 다시 계산해 우선 적용한다 — 아래 인자는 그 runtime_scope가 없는 호출(예:
+        # /start 이전 단계)을 위한 하위 호환 기본값일 뿐이다.
+        evidence_lookup = _evidence_lookup_for(
+            record.use_rag,
+            record.project_id,
+            session_id=session_id,
+            selected_candidate_document_id=previous_state.get("selected_idea_document_id"),
+        )
+        ground_claims = _ground_claims_for(record.use_rag)
+        index_target_evidence = _index_target_evidence_for(record.use_rag, record.project_id)
+        evidence_planner = _evidence_planner_for(record.use_rag)
 
         try:
             state = await run_in_threadpool(
@@ -628,6 +854,9 @@ async def reply_conversation(session_id: str, request: ReplyRequest):
                 user_message=message,
                 llm_call=llm_call,
                 evidence_lookup=evidence_lookup,
+                ground_claims=ground_claims,
+                index_target_evidence=index_target_evidence,
+                evidence_planner=evidence_planner,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
@@ -700,7 +929,15 @@ async def reply_conversation_stream(session_id: str, request: ReplyRequest, http
     # project_id로 evidence_lookup을 다시 만든다 — 예전에는 아래 reply_to_interjection/
     # reply_ideation_conversation 호출에 evidence_lookup을 아예 넘기지 않아 첫 턴 이후
     # 모든 스트리밍 턴이 RAG 검색 없이 진행됐다.
-    evidence_lookup = _evidence_lookup_for(record.use_rag, record.project_id)
+    evidence_lookup = _evidence_lookup_for(
+        record.use_rag,
+        record.project_id,
+        session_id=session_id,
+        selected_candidate_document_id=previous_state.get("selected_idea_document_id"),
+    )
+    ground_claims = _ground_claims_for(record.use_rag)
+    index_target_evidence = _index_target_evidence_for(record.use_rag, record.project_id)
+    evidence_planner = _evidence_planner_for(record.use_rag)
 
     def worker() -> None:
         trace_tokens = bind_trace_context(session_id, request_id)
@@ -748,6 +985,9 @@ async def reply_conversation_stream(session_id: str, request: ReplyRequest, http
                     target_speaker_id=target_speaker_id,
                     llm_call=llm_call,
                     evidence_lookup=evidence_lookup,
+                    ground_claims=ground_claims,
+                    index_target_evidence=index_target_evidence,
+                    evidence_planner=evidence_planner,
                 )
             else:
                 state = reply_ideation_conversation(
@@ -755,6 +995,9 @@ async def reply_conversation_stream(session_id: str, request: ReplyRequest, http
                     user_message=message,
                     llm_call=llm_call,
                     evidence_lookup=evidence_lookup,
+                    ground_claims=ground_claims,
+                    index_target_evidence=index_target_evidence,
+                    evidence_planner=evidence_planner,
                 )
             _store.update(session_id, state)
             sink({"type": "state", "state": _serialize_state(state)})
