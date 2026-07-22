@@ -24,7 +24,7 @@ from ai.rag.converters.exceptions import (
     InvalidConvertedPdfError,
     InvalidSourceFileError,
 )
-from ai.rag.converters.hwp_pdf_converter import find_executable
+from ai.rag.converters.hwp_pdf_converter import find_executable, _subprocess_env_for_libreoffice
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +90,7 @@ def convert_to_preview_pdf(
         completed = subprocess.run(
             command, shell=False, check=False,
             timeout=effective_config.timeout_seconds, capture_output=True, text=True,
+            env=_subprocess_env_for_libreoffice(),
         )
     except subprocess.TimeoutExpired as exc:
         _cleanup(staged_source)

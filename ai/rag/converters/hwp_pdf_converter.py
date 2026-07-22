@@ -14,6 +14,7 @@ subprocess timeout이 모두 가능해 요건에 맞는다. 다만 HWP(바이너
 """
 
 import logging
+import os
 import shutil
 import subprocess
 import time
@@ -38,6 +39,22 @@ from ai.rag.converters.schemas import DocumentConversionResult
 logger = logging.getLogger(__name__)
 
 SUPPORTED_EXTENSIONS: frozenset[str] = frozenset({".hwp", ".hwpx"})
+
+# 재인/Claude(2026-07-21, 실측 확인 — 용준님 파일이라 확인 필요): 콘다 환경(review-board)에서
+# 백엔드를 띄운 채 LibreOffice를 서브프로세스로 부르면 "Could not find platform independent
+# libraries <prefix> / Error: source file could not be loaded"로 매번 실패하는 걸 실제
+# 업로드 로그로 확인했다. subprocess.run()이 기본적으로 부모 프로세스(우리 파이썬)의 환경변수를
+# 그대로 물려주는데, 그중 PYTHONHOME/PYTHONPATH가 LibreOffice에 내장된 자체 파이썬 인터프리터
+# 초기화를 방해한다(LibreOffice 스크립팅용 내장 파이썬이 콘다 쪽 경로를 잘못 참조하게 됨) -
+# LibreOffice를 부를 때만 이 값들을 제거한 환경을 넘겨서 격리한다.
+_PYTHON_ENV_VARS_TO_STRIP: tuple[str, ...] = ("PYTHONHOME", "PYTHONPATH", "PYTHONEXECUTABLE")
+
+
+def _subprocess_env_for_libreoffice() -> dict[str, str]:
+    env = dict(os.environ)
+    for key in _PYTHON_ENV_VARS_TO_STRIP:
+        env.pop(key, None)
+    return env
 
 _CANDIDATE_EXECUTABLE_NAMES: tuple[str, ...] = ("soffice", "libreoffice", "soffice.exe")
 
@@ -228,6 +245,7 @@ class HwpPdfConverter:
                 timeout=self._config.timeout_seconds,
                 capture_output=True,
                 text=True,
+                env=_subprocess_env_for_libreoffice(),
             )
         except subprocess.TimeoutExpired as exc:
             duration_ms = int((time.monotonic() - start) * 1000)

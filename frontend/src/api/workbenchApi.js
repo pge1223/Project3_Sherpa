@@ -32,3 +32,26 @@ export async function getContextCheck(projectId) {
   const data = await parseApiResponse(res, '맥락 이상 감지에 실패했습니다.')
   return data.findings // [{id, quote, message}]
 }
+
+// 재인/Claude(2026-07-22): "오탈자 검사" - 맥락 이상 감지 만들 때 보류해뒀던 기능,
+// 사용자 요청으로 뒤늦게 구현. LLM 1회 호출(2단계 재검증 없음, 맥락 이상 감지와 달리
+// 오탈자 판정은 비교적 명확해서 사용자가 그렇게 결정) - AI 호출 없이 캐시가 있으면
+// 그대로 재사용된다.
+export async function getTypoCheck(projectId) {
+  const res = await fetch(`${API_BASE_URL}/workbench/${projectId}/typo-check`, {
+    headers: { ...authHeaders() },
+  })
+  const data = await parseApiResponse(res, '오탈자 검사에 실패했습니다.')
+  return data.findings // [{id, quote, corrected, message}]
+}
+
+// 재인/Claude(2026-07-22): "분량·밀도 체크" - 공고문 요구 페이지 수 대비 실제 페이지 수,
+// 그리고 페이지별 채움 정도(빽빽함)를 가져온다. 오탈자/맥락 검사와 같은 캐싱 방식.
+export async function getFormatCheck(projectId) {
+  const res = await fetch(`${API_BASE_URL}/workbench/${projectId}/format-check`, {
+    headers: { ...authHeaders() },
+  })
+  // { required_pages, actual_pages, page_verdict, page_message,
+  //   overall_coverage, sparse_pages, density_message }
+  return parseApiResponse(res, '분량·밀도 검사에 실패했습니다.')
+}
