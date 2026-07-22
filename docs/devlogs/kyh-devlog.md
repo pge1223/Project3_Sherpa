@@ -9,7 +9,6 @@
   - 첨부파일(PDF/HWP/HWPX) 있으면 텍스트 추출, 없으면 본문 텍스트 크롤링
   - `contest_announcements_it` 컬렉션 103건 저장 완료 (저장 103건 | 스킵 0건 | 실패 0건)
 - **oss.kr 수상작 37건 수집** — `oss_winners` 컬렉션 저장 완료
-- **NAVER API HUB Application 등록** — AIReviewBoard + 뉴스 API 연결, 크레딧 발급 대기
 - **트러블슈팅**
   - NCP 서버 직접 수정 후 git pull 충돌 → `git checkout` 후 재pull로 해결
   - 로컬 MongoDB 터널 27018 미기동 → 수동 SSH 터널 연결 후 크롤링 실행
