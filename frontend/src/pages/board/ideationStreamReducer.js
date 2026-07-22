@@ -12,7 +12,7 @@
 // import: 없음(순수 함수만).
 
 export function createEmptyStreamState() {
-  return { phaseLabel: null, messages: [] }
+  return { phaseLabel: null, messages: [], requestId: null }
 }
 
 // 방어 코드(요청: "중복 버그" 진단) — 실제 OpenAI 호출로 여러 라운드를 재현했지만
@@ -66,11 +66,20 @@ export function applyStreamEvent(state, event) {
   if (!event || typeof event !== 'object' || !event.type) return state
 
   switch (event.type) {
+    // 용준/Claude(2026-07-22, 요청: "잠시만" 실제 취소) — 이번 스트리밍 요청의 request_id를
+    // 기록해 둔다. 이후 이벤트(message_start 등)에 실려오는 request_id와 비교해, 혹시라도
+    // 이전 요청의 늦은 이벤트가 섞여 들어오면(구조적으로는 요청마다 큐가 분리돼 있어 발생하지
+    // 않지만, 방어적으로) 무시할 수 있게 한다.
+    case 'request_started':
+      return { ...state, requestId: event.request_id || state.requestId }
+
     case 'phase':
       return { ...state, phaseLabel: event.label || null }
 
     case 'message_start':
+      if (state.requestId && event.request_id && event.request_id !== state.requestId) return state
       return {
+        ...state,
         phaseLabel: null,
         messages: [
           ...state.messages,

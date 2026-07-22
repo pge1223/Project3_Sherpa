@@ -67,11 +67,27 @@ export async function replyIdeationConversation(sessionId, message, model) {
 // NDJSON 한 줄이 여러 청크로 나뉘거나 한 청크에 여러 줄이 들어있는 문제는
 // splitNdjsonLines()(순수 함수, ideationStreamReducer.js)로 처리한다 — 완성된 줄만 꺼내
 // 파싱하고, 끝나지 않은 나머지는 버퍼에 남겨 다음 청크와 이어붙인다.
-export async function replyIdeationConversationStream(sessionId, message, { model, signal, onEvent } = {}) {
+// 용준/Claude(2026-07-22, 요청: "잠시만" 버튼 — 질문 대상 선택): targetSpeakerId가 주어지면
+// (planning_expert/dev_expert/both) 백엔드가 reply_ideation_conversation 대신
+// reply_to_interjection으로 라우팅해, 지정한 위원이 먼저 답하고 상대 위원이 반드시 검토하도록
+// 회의를 재개한다. content 문자열을 분석해 대상을 추측하지 않고, 버튼 선택 결과를 그대로
+// 필드로 전달한다(요청 사항 그대로) — 값이 없으면 기존 /reply/stream과 완전히 동일하게 동작한다
+// (하위 호환, optional 필드).
+export async function replyIdeationConversationStream(
+  sessionId,
+  message,
+  { model, signal, onEvent, targetSpeakerId, interruptedRequestId, activeIssueId } = {},
+) {
   const res = await fetch(`${API_BASE_URL}/ideation-conversation/${sessionId}/reply/stream`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
-    body: JSON.stringify({ message, model: model || undefined }),
+    body: JSON.stringify({
+      message,
+      model: model || undefined,
+      target_speaker_id: targetSpeakerId || undefined,
+      interrupted_request_id: interruptedRequestId || undefined,
+      active_issue_id: activeIssueId || undefined,
+    }),
     signal,
   })
 
@@ -115,6 +131,19 @@ export async function replyIdeationConversationStream(sessionId, message, { mode
       // 이미 스트림이 취소/종료된 상태면 releaseLock이 예외를 던질 수 있다 — 무시한다.
     }
   }
+}
+
+// 용준/Claude(2026-07-22, 요청: "잠시만" 실제 취소): 진행 중인 스트리밍 요청을 취소한다.
+// requestId를 생략하면 "지금 활성 요청 아무거나"를 취소한다(멱등 — 활성 요청이 이미 없어도
+// 에러 없이 성공 응답을 받는다). 응답의 session_locked=false를 확인한 뒤에만 다음 reply를
+// 보내야 세션 lock 409를 피할 수 있다.
+export async function cancelIdeationConversation(sessionId, requestId) {
+  const res = await fetch(`${API_BASE_URL}/ideation-conversation/${sessionId}/cancel`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ request_id: requestId || undefined }),
+  })
+  return handleResponse(res)
 }
 
 export async function finalizeIdeationConversation(sessionId, model) {

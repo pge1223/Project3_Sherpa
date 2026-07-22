@@ -35,6 +35,20 @@ _REMAINING_TOPICS_RE = re.compile(
 # 후보 제목·핵심 내용이 실제로 들어갔는지(요청 9번 배선)를 검증하는 데 쓴다.
 _SELECTION_CONTEXT_RE = re.compile(r"\[선택 컨텍스트 selection_context\]\n(.*?)\n\n", re.S)
 
+CANVAS_STUB_RESPONSE = json.dumps(
+    {
+        "problem": "문제 상황",
+        "target_user": "목표 사용자",
+        "core_value": "핵심 가치",
+        "solution": "핵심 해결 방식",
+        "differentiation": "차별점",
+        "feasibility": "medium",
+        "risks": ["구현 위험"],
+        "contest_fit": "공모전 기준 대응",
+    },
+    ensure_ascii=False,
+)
+
 
 def _selection_context_from_prompt(prompt: str) -> dict:
     match = _SELECTION_CONTEXT_RE.search(prompt)
@@ -205,6 +219,7 @@ class DiscoveryScriptedLLM:
             is_planning = "당신은 AI Review Board의 기획 전문가입니다" in prompt
             speaker = "planning_expert" if is_planning else "dev_expert"
             payload = {
+                "spoken_text": f"[{speaker}] 발화 질문",
                 "judgment": f"[{speaker}] 판단",
                 "question": f"[{speaker}] 질문",
                 "question_topic": _topic_from_prompt(prompt),
@@ -222,10 +237,15 @@ class DiscoveryScriptedLLM:
 
         if "[의견 규칙]" in prompt:
             is_dev = "당신은 AI Review Board의 개발 전문가입니다" in prompt
-            next_action = self.dev_next_action if is_dev else None
+            # 용준/Claude(2026-07-22, 요청: 동적 전문가 회의로 개편) — next_action은 더 이상
+            # 그래프가 읽지 않지만, dev_next_action="continue_round"면 기존 테스트 의도(다음
+            # 라운드로 자동 진행)를 보존하기 위해 쟁점을 아직 해결하지 않은 채 진행자에게
+            # 넘긴다.
+            dev_resolves_issue = self.dev_next_action != "continue_round"
             return json.dumps(
                 {
                     "stance": "보완",
+                    "spoken_text": "발화 판단입니다",
                     "judgment": "판단",
                     "reason": "근거",
                     "suggestion": "제안",
@@ -237,7 +257,17 @@ class DiscoveryScriptedLLM:
                     "unconfirmed": [],
                     "referenced_message_ids": [],
                     "evidence": [],
-                    "next_action": next_action,
+                    "next_action": None,
+                    "active_issue_id": "mvp_scope",
+                    "active_issue_title": "MVP 범위",
+                    "new_information": ["새로 확인된 내용"],
+                    "proposal": "제안",
+                    "changed_position": False,
+                    "needs_counterpart_response": not is_dev,
+                    "recommended_next_speaker": "ideation_facilitator" if is_dev else "dev_expert",
+                    "issue_resolved": bool(is_dev and dev_resolves_issue),
+                    "needs_user_input": False,
+                    "user_question": None,
                 },
                 ensure_ascii=False,
             )
@@ -248,28 +278,15 @@ class DiscoveryScriptedLLM:
                     "agreements": [],
                     "disagreements": [],
                     "facilitator_summary": "두 전문가가 이번 라운드 의견을 정리했습니다.",
+                    "spoken_text": "두 위원이 이번 라운드 의견을 정리했습니다.",
                     "needs_user_decision": False,
                     "user_question": None,
                 },
                 ensure_ascii=False,
             )
 
-        # 가은/Claude(2026-07-22, 캔버스 자동 갱신) — 매 라운드 끝의 canvas_update 노드 stub.
-        # 메시지를 만들지 않는 기록용 노드라 기존 기대값에는 영향이 없다.
         if "[캔버스 갱신 규칙]" in prompt:
-            return json.dumps(
-                {
-                    "problem": "[canvas] 문제 상황",
-                    "target_user": "[canvas] 타깃 사용자",
-                    "core_value": "[canvas] 핵심 가치",
-                    "solution": "[canvas] 해결 방식",
-                    "differentiation": "[canvas] 차별점",
-                    "feasibility": "medium",
-                    "risks": ["[canvas] 리스크"],
-                    "contest_fit": "[canvas] 심사기준 대응",
-                },
-                ensure_ascii=False,
-            )
+            return CANVAS_STUB_RESPONSE
 
         raise AssertionError(f"예상하지 못한 프롬프트입니다: {prompt[:200]}")
 
@@ -297,7 +314,11 @@ def _legacy_resolve_selection_then_ask_planning_question(llm, state, user_messag
     state = apply_user_answer(state, answer_message)  # phase -> "candidate_selection"
     selection_update = make_candidate_selection_node(llm)(state)
     state = {**state, **selection_update, "messages": state["messages"] + selection_update.get("messages", [])}
-    if state["phase"] != "planning_question":
+    # 용준/Claude(2026-07-22, 요청: "잠시만" 취소 중 phase 오염 수정) — 선택/결합 확정
+    # 신호는 이제 phase가 아니라 next_route("to_refinement")로 표현된다(phase는 항상
+    # canonical 상태 "expert_discussion"을 유지한다). 이 헬퍼가 보존 검증하려는 레거시
+    # 경로 자체는 그대로다 — 그 경로로 갈지 판단하는 신호만 바뀌었다.
+    if state.get("next_route") != "to_refinement":
         return state  # low fit 등 — 질문 노드까지 가지 않는다.
     state = dict(state)
     state["phase"] = "planning_question"
@@ -506,7 +527,12 @@ def test_combine_request_uses_llm_interpretation_and_produces_combined_idea():
     assert update["selected_idea"]["source"] == "combine"
     assert update["selected_idea"]["source_candidate_ids"] == ["candidate_1", "candidate_2"]
     assert "결합 가정1" in update["unresolved_issues"]
-    assert update["phase"] == "planning_question"
+    # 용준/Claude(2026-07-22, 요청: "잠시만" 취소 중 phase 오염 수정) — phase는 항상
+    # canonical 상태("expert_discussion")를 유지하고, "곧바로 라운드테이블로 이어간다"는
+    # 그래프 내부 라우팅 신호는 next_route로 분리됐다(ideation_conv_build.py::
+    # _route_after_candidate_selection 참고).
+    assert update["phase"] == "expert_discussion"
+    assert update["next_route"] == "to_refinement"
 
 
 # ---------------------------------------------------------------------------
@@ -612,7 +638,10 @@ def test_expert_recommend_request_produces_reasoned_recommendation():
     assert update["selected_idea"]["source"] == "recommend"
     assert "데이터 확보가 더 쉽고" in update["selection_reason"]
     assert any("예약 데이터 형식" in issue for issue in update["unresolved_issues"])
-    assert update["phase"] == "planning_question"
+    # 용준/Claude(2026-07-22, 요청: "잠시만" 취소 중 phase 오염 수정) — 위 결합 테스트와
+    # 동일한 이유로 phase="expert_discussion" + next_route="to_refinement"로 바뀌었다.
+    assert update["phase"] == "expert_discussion"
+    assert update["next_route"] == "to_refinement"
 
 
 # ---------------------------------------------------------------------------
@@ -748,6 +777,7 @@ class _CombineAwareScriptedLLM(DiscoveryScriptedLLM):
             ctx = _selection_context_from_prompt(prompt)
             titles = [c.get("title", "") for c in ctx.get("source_candidates", [])]
             payload = {
+                "spoken_text": f"선택하신 {' 와 '.join(titles)}를 결합해 주 기능은 문의 자동응답, 보조 기능은 예약 관리로 제안합니다.",
                 "judgment": f"[{speaker}] 판단",
                 "question": f"[{speaker}] 질문",
                 "question_topic": _topic_from_prompt(prompt),
@@ -825,8 +855,11 @@ def test_combine_first_expert_message_mentions_both_candidates_concretely():
 
     last_message = state["messages"][-1]
     assert last_message["speaker_id"] == "planning_expert"
-    assert "[사용자 선택 반영]" in last_message["content"]
-    assert "[제안]" in last_message["content"]
+    # 용준/Claude(2026-07-22, 요청: 보고서형 메시지 → 자연스러운 회의 발화 전환) — content는
+    # 이제 spoken_text 그대로다([사용자 선택 반영]/[제안] 헤더는 더 이상 붙지 않는다).
+    # user_selection_summary/proposal 원문은 structured에서 확인한다.
+    assert last_message["structured"]["user_selection_summary"]
+    assert last_message["structured"]["proposal"]
     for title in titles:
         assert title in last_message["content"]
 
