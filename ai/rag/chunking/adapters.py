@@ -38,6 +38,8 @@ _FILE_TYPE_TO_LOCATION_TYPE: dict[FileType, ChunkLocationType] = {
     FileType.PDF: ChunkLocationType.PAGE,
     FileType.PPTX: ChunkLocationType.SLIDE,
     FileType.DOCX: ChunkLocationType.DOCUMENT,
+    FileType.HWP: ChunkLocationType.DOCUMENT,
+    FileType.HWPX: ChunkLocationType.DOCUMENT,
 }
 
 # BlockType.IMAGE(OCR 텍스트)/SHAPE(PPTX 일반 도형)는 표/제목이 아니므로 본문(paragraph)으로 취급한다.
