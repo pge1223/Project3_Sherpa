@@ -15,6 +15,7 @@ import {
   pendingCharCount,
   splitNdjsonLines,
 } from "../src/pages/board/ideationStreamReducer.js";
+import { resolveRespondingToSpeakerId } from "../src/pages/board/ideationConversationHelpers.js";
 
 function test(name, fn) {
   try {
@@ -235,6 +236,35 @@ test("dedupeMessagesById: 서로 다른 id의 동일한 content는 절대 지우
 test("dedupeMessagesById: 빈/undefined 입력에도 안전하다", () => {
   assert.deepEqual(dedupeMessagesById(undefined), []);
   assert.deepEqual(dedupeMessagesById([]), []);
+});
+
+test("resolveRespondingToSpeakerId: 실제 message_id와 화자가 일치할 때만 대상을 반환한다", () => {
+  const messages = [
+    { message_id: "PLAN-1", speaker_id: "planning_expert" },
+    {
+      message_id: "DEV-1",
+      speaker_id: "dev_expert",
+      structured: {
+        responding_to_message_id: "PLAN-1",
+        responding_to_speaker_id: "planning_expert",
+      },
+    },
+  ];
+  assert.equal(resolveRespondingToSpeakerId(messages[1], messages), "planning_expert");
+});
+
+test("resolveRespondingToSpeakerId: 선언 화자 불일치·없는 메시지·자기 참조는 숨긴다", () => {
+  const target = { message_id: "PLAN-1", speaker_id: "planning_expert" };
+  const base = { message_id: "DEV-1", speaker_id: "dev_expert" };
+  assert.equal(resolveRespondingToSpeakerId({ ...base, structured: {
+    responding_to_message_id: "PLAN-1", responding_to_speaker_id: "dev_expert",
+  } }, [target]), null);
+  assert.equal(resolveRespondingToSpeakerId({ ...base, structured: {
+    responding_to_message_id: "MISSING", responding_to_speaker_id: "planning_expert",
+  } }, [target]), null);
+  assert.equal(resolveRespondingToSpeakerId({ ...target, structured: {
+    responding_to_message_id: "PLAN-1", responding_to_speaker_id: "planning_expert",
+  } }, [target]), null);
 });
 
 console.log("\nAll ideationStreamReducer manual checks passed.");

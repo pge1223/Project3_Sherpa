@@ -645,13 +645,30 @@ function AnalysisScreen({ mode, onNext, onBack, projectId }) {
   // 못 찾으면(팀 공유 DB에 아직 데이터가 안 올라왔거나 이 카테고리에 사례가 없으면)
   // has_similar_case_data가 false로 오므로 그때는 기존 "미확보" 문구를 그대로 보여준다.
   const similarWorks = analysis?.similar_works || [];
+  const detailFactSections = [
+    {
+      title: "신청·심사 관련 조건",
+      items: facts?.application_review_conditions || [],
+      empty: "공고문에서 확인된 신청·심사 조건이 없어요.",
+    },
+    {
+      title: "선정 혜택",
+      items: facts?.selection_benefits || [],
+      empty: "공고문에서 확인된 선정 혜택이 없어요.",
+    },
+    {
+      title: "수상 취소 조건",
+      items: facts?.disqualification_rules || [],
+      empty: "공고문에서 확인된 수상 취소 조건이 없어요.",
+    },
+  ];
 
   const cards = hasAnnouncement
     ? [
         { icon: Sparkles, color: "purple", title: "아이디어 주제 선정", body: ideaTopic || "미정" },
         { icon: Target, color: "purple", title: "핵심 과제", body: strategy?.core_intent || "핵심 과제를 판단할 근거가 부족해요." },
-        { icon: Award, color: "coral", title: "평가에서 갈리는 지점", list: facts?.evaluation_criteria },
-        { icon: ShieldCheck, color: "green", title: "반드시 지켜야 할 조건", list: [...(facts?.eligibility || []), ...(facts?.submission_requirements || [])].slice(0, 4) },
+        { icon: Award, color: "coral", title: "평가 기준·배점", list: facts?.evaluation_criteria },
+        { icon: ShieldCheck, color: "green", title: "신청 대상·제출 조건", list: [...(facts?.eligibility || []), ...(facts?.submission_requirements || [])] },
         analysis?.has_similar_case_data
           ? {
               icon: TrendingUp, color: "amber", title: "수상작·유사사례 경향",
@@ -727,17 +744,33 @@ function AnalysisScreen({ mode, onNext, onBack, projectId }) {
                   <Calendar size={15} color="var(--purple)" />
                   <div style={{ fontWeight: 700, fontSize: 14 }}>일정</div>
                 </div>
-                <div style={{ fontSize: 12.5, color: (facts?.deadline && facts.deadline !== '미공개') ? "var(--text-1)" : "var(--text-2)" }}>
-                  제출 마감: {facts?.deadline || "미공개"}
-                </div>
+                {(facts?.key_dates?.length || 0) > 0 ? (
+                  <ul style={{ margin: 0, paddingLeft: 16, fontSize: 12.5, color: "var(--text-1)", lineHeight: 1.8 }}>
+                    {facts.key_dates.map((date, i) => <li key={i}>{date}</li>)}
+                  </ul>
+                ) : (
+                  <div style={{ fontSize: 12.5, color: (facts?.deadline && facts.deadline !== '미공개') ? "var(--text-1)" : "var(--text-2)" }}>
+                    제출 마감: {facts?.deadline || "미공개"}
+                  </div>
+                )}
               </div>
+
+              {detailFactSections.map((section) => (
+                <div key={section.title} className="card glass">
+                  <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 10 }}>{section.title}</div>
+                  <ul style={{ margin: 0, paddingLeft: 16, fontSize: 12.5, color: "var(--text-1)", lineHeight: 1.8 }}>
+                    {section.items.map((item, i) => <li key={i}>{item}</li>)}
+                    {section.items.length === 0 && <li style={{ color: "var(--text-2)" }}>{section.empty}</li>}
+                  </ul>
+                </div>
+              ))}
 
               <div className="card glass">
                 <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 10 }}>주의 리스크</div>
                 <ul style={{ margin: 0, paddingLeft: 16, fontSize: 12.5, color: "var(--text-1)", lineHeight: 1.8 }}>
-                  {[...(strategy?.risk_flags || []), ...(facts?.disqualification_rules || [])].map((v, i) => <li key={i}>{v}</li>)}
-                  {(strategy?.risk_flags?.length || 0) + (facts?.disqualification_rules?.length || 0) === 0 && (
-                    <li style={{ color: "var(--text-2)" }}>공고문에 명시된 실격·주의 사항이 없어요.</li>
+                  {(strategy?.risk_flags || []).map((v, i) => <li key={i}>{v}</li>)}
+                  {(strategy?.risk_flags?.length || 0) === 0 && (
+                    <li style={{ color: "var(--text-2)" }}>추가로 분석된 주의 리스크가 없어요.</li>
                   )}
                 </ul>
               </div>

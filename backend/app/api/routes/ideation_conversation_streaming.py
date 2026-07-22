@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import threading
+import time
 import uuid
 from typing import Callable, Iterable
 
@@ -33,9 +35,12 @@ from graph import (
     EXPERT_DELEGATION_STREAM_FIELDS,
     EXPERT_DELEGATION_TRAILER,
     FACILITATOR_SUMMARY_STREAM_FIELDS,
+    IdeationCancelled,
     JSONFieldStreamer,
     QUESTION_STREAM_FIELDS,
-    discussion_headers_for,
+    sanitize_preview,
+    stream_delta_trace_enabled,
+    trace_event,
 )
 from prompts import get_persona_card
 
@@ -88,23 +93,17 @@ def _persona_from_prompt(prompt: str) -> str | None:
 def _stream_plan_for(prompt: str) -> tuple[str, tuple, Callable[[str], str | None]] | None:
     """이 프롬프트가 사용자에게 보이는 메시지를 만드는 호출이면
     (node_kind, field_plan, header_resolver)를 반환하고, 그 외(분류/후보 생성/종합 등)는
-    None을 반환한다. header_resolver(field_name)는 정적 헤더가 없는 필드(예: 전문가
-    위임의 "proposal" — 페르소나 표시 이름에 따라 달라짐)의 헤더를 동적으로 만든다."""
+    None을 반환한다.
+
+    용준/Claude(2026-07-22, 요청: 보고서형 메시지 → 자연스러운 회의 발화 전환): 스트리밍
+    대상 필드는 이제 어느 node_kind든 "spoken_text" 하나뿐이라(예전에는 기획/개발 헤더가
+    달라 discussion_headers_for로 동적 해석이 필요했고, 위임 제안의 "proposal"도 페르소나
+    표시 이름을 붙였다) header_resolver는 모두 항상 None을 반환한다 — 화면에는 순수
+    spoken_text 텍스트만 흘러간다."""
     if _QUESTION_MARKER in prompt:
         return "question", QUESTION_STREAM_FIELDS, lambda _field: None
     if _DISCUSSION_MARKER in prompt:
-        # 용준/Claude(2026-07-21, 요청: 전문가 라운드테이블 전환) — 헤더가 역할별로 다르다
-        # (기획: [기획 관점]/..., 개발: [기술 검토]/...). DISCUSSION_STREAM_FIELDS는 정적
-        # 헤더를 전부 None으로 비워 뒀으므로, 여기서 프롬프트의 페르소나를 판별해 동적으로
-        # 붙인다(discussion_headers_for가 graph.ideation_conv_nodes.
-        # _compose_discussion_content와 같은 매핑을 공유한다).
-        discussion_persona_id = _persona_from_prompt(prompt) or "planning_expert"
-        discussion_headers = discussion_headers_for(discussion_persona_id)
-
-        def _discussion_header(field_name: str, _headers: dict = discussion_headers) -> str | None:
-            return _headers.get(field_name)
-
-        return "discussion", DISCUSSION_STREAM_FIELDS, _discussion_header
+        return "discussion", DISCUSSION_STREAM_FIELDS, lambda _field: None
     if _FACILITATOR_SUMMARY_MARKER in prompt:
         return "facilitator_summary", FACILITATOR_SUMMARY_STREAM_FIELDS, lambda _field: None
     if _DELEGATION_REVIEW_MARKER in prompt:
@@ -112,13 +111,7 @@ def _stream_plan_for(prompt: str) -> tuple[str, tuple, Callable[[str], str | Non
     if _DELEGATION_FACILITATOR_MARKER in prompt:
         return "delegation_facilitator", DELEGATION_FACILITATOR_STREAM_FIELDS, lambda _field: None
     if _DELEGATION_MARKER in prompt:
-        persona_id = _persona_from_prompt(prompt) or "ideation_facilitator"
-        display_name = get_persona_card(persona_id).get("display_name", persona_id)
-
-        def _delegation_header(field_name: str, _display_name: str = display_name) -> str | None:
-            return f"[{_display_name} 제안]" if field_name == "proposal" else None
-
-        return "expert_delegation", EXPERT_DELEGATION_STREAM_FIELDS, _delegation_header
+        return "expert_delegation", EXPERT_DELEGATION_STREAM_FIELDS, lambda _field: None
     return None
 
 
@@ -170,18 +163,33 @@ def make_streaming_llm_call(
     stream_chat_completion: ChatCompletionStreamer,
     call_chat_completion: ChatCompletionCaller,
     max_calls: int,
+    cancel_event: threading.Event | None = None,
+    request_id: str | None = None,
 ) -> Callable[[str], str]:
     """기존 LLMCall 시그니처(Callable[[str], str])를 그대로 만족하는 스트리밍 llm_call을
     만든다. 반환값(전체 텍스트)은 스트리밍이 아닌 기존 _build_llm_call()과 정확히 같은
     형태(OpenAI 응답 원문 그대로)이므로, ai/meeting/graph의 _safe_call_json/
     _safe_call_structured_json이 이 반환값을 그대로 json.loads + 스키마 검증한다 — 검증
     로직·재시도 정책은 단 한 줄도 바뀌지 않는다. 그래프가 이 llm_call을 두 번(재시도)
-    부르면 이 함수가 그것을 감지해 message_reset을 먼저 보낸다."""
+    부르면 이 함수가 그것을 감지해 message_reset을 먼저 보낸다.
+
+    용준/Claude(2026-07-22, 요청: "잠시만" 실제 취소): cancel_event가 주어지고 set()되면,
+    다음 llm_call 진입 시점 또는 OpenAI 스트림의 다음 청크를 받는 시점 중 더 빠른 쪽에서
+    IdeationCancelled를 던진다 — 이 예외는 _safe_call_structured_json/_safe_call_json이
+    (좁은 예외만 잡으므로) 재시도하지 않고 그대로 그래프 실행까지 전파한다. 구조화 JSON이
+    아직 불완전한 상태에서 취소되면 그 텍스트를 파싱하거나 반환하지 않는다(요청: "불완전한
+    JSON을 파싱하거나 재시도하지 않는다") — message_end는 여전히 보내 프런트가 스트리밍
+    말풍선을 정리할 수 있게 하되, canonical 텍스트로 이어지지 않는다."""
     call_count = 0
     reset_tokens: dict[str, str] = {}  # _prompt_key(prompt) -> 그 프롬프트로 시작했던 stream message_id
 
+    def _check_cancelled() -> None:
+        if cancel_event is not None and cancel_event.is_set():
+            raise IdeationCancelled(session_id, request_id)
+
     def llm_call(prompt: str) -> str:
         nonlocal call_count
+        _check_cancelled()
         call_count += 1
         if call_count > max_calls:
             raise RuntimeError(
@@ -211,19 +219,50 @@ def make_streaming_llm_call(
         stream_id = f"STREAM-{uuid.uuid4().hex[:10]}"
         reset_tokens[key] = stream_id
         sink({"type": "phase", "label": f"{display_name}이(가) 응답을 작성하고 있습니다"})
-        sink({"type": "message_start", "message_id": stream_id, "speaker_id": persona_id, "speaker_name": display_name})
+        sink(
+            {
+                "type": "message_start",
+                "message_id": stream_id,
+                "speaker_id": persona_id,
+                "speaker_name": display_name,
+                "request_id": request_id,
+            }
+        )
+        trace_event(
+            "IDEATION_STREAM_MESSAGE_STARTED",
+            speaker=persona_id,
+            message_id=stream_id,
+            node_kind=node_kind,
+        )
 
         streamer = JSONFieldStreamer([name for name, _ in field_plan])
         assembler = _CompositionAssembler(field_plan, header_resolver)
         full_raw_parts: list[str] = []
+        cancelled = False
+        started_at = time.perf_counter()
+        delta_count = 0
+        streamed_chars = 0
+        stream_iterator = iter(stream_chat_completion(prompt))
         try:
-            for chunk in stream_chat_completion(prompt):
+            for chunk in stream_iterator:
+                if cancel_event is not None and cancel_event.is_set():
+                    cancelled = True
+                    close_stream = getattr(stream_iterator, "close", None)
+                    trace_event(
+                        "IDEATION_STREAM_CLOSE_ATTEMPTED",
+                        speaker=persona_id,
+                        message_id=stream_id,
+                        close_supported=callable(close_stream),
+                    )
+                    if callable(close_stream):
+                        close_stream()
+                    break
                 if not chunk:
                     continue
                 full_raw_parts.append(chunk)
                 for field_name, delta in streamer.feed(chunk):
                     if delta is None:
-                        if node_kind == "expert_delegation" and field_name == "assumption":
+                        if node_kind == "expert_delegation" and field_name == "spoken_text":
                             # make_expert_delegation_message가 항상 고정으로 덧붙이는
                             # 문구 — LLM 출력이 아니라 우리 쪽 리터럴이므로, 이 필드가
                             # 닫힌 직후 곧바로 흘려보낸다(canonical 메시지와 100% 동일).
@@ -231,10 +270,33 @@ def make_streaming_llm_call(
                         continue
                     text = assembler.to_delta(field_name, delta)
                     if text:
+                        delta_count += 1
+                        streamed_chars += len(text)
+                        if stream_delta_trace_enabled():
+                            trace_event(
+                                "IDEATION_STREAM_DELTA",
+                                level=logging.DEBUG,
+                                speaker=persona_id,
+                                message_id=stream_id,
+                                seq=delta_count,
+                                chars=len(text),
+                                delta=sanitize_preview(text),
+                            )
                         sink({"type": "message_delta", "message_id": stream_id, "delta": text})
         finally:
             sink({"type": "message_end", "message_id": stream_id})
+            trace_event(
+                "IDEATION_STREAM_MESSAGE_ENDED",
+                speaker=persona_id,
+                message_id=stream_id,
+                cancelled=cancelled,
+                delta_count=delta_count,
+                char_count=streamed_chars,
+                elapsed_ms=round((time.perf_counter() - started_at) * 1000, 1),
+            )
 
+        if cancelled:
+            raise IdeationCancelled(session_id, request_id)
         return "".join(full_raw_parts)
 
     return llm_call

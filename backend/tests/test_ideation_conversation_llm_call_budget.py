@@ -103,6 +103,12 @@ def _comprehensive_responder(*, dev_review_stance: str, discussion_review_stance
     수정까지 이어지고, 곧바로 회의 discussion도 반박+continue_round로 이어지는 경우)를 정확히
     재현하기 위해 stance/next_action을 파라미터로 받는다."""
 
+    # 용준/Claude(2026-07-22, 요청: 동적 전문가 회의로 개편) — "이번 기획 발언이 dev의 수정
+    # 요구에 응답하는 것인가"는 더 이상 고정된 라운드 순번이 아니라 "직전 dev 발언이 수정을
+    # 요구했는가" 상태로 판단해야 한다(_DebateScriptedLLM과 같은 패턴). 클로저 밖에서
+    # nonlocal로 갱신할 수 있게 리스트에 담는다.
+    _awaiting_revision = [False]
+
     def llm_call(prompt: str) -> str:
         is_planning = "당신은 AI Review Board의 기획 전문가입니다" in prompt
         is_dev = "당신은 AI Review Board의 개발 전문가입니다" in prompt
@@ -116,6 +122,7 @@ def _comprehensive_responder(*, dev_review_stance: str, discussion_review_stance
         if "[질문 규칙]" in prompt:
             return json.dumps(
                 {
+                    "spoken_text": f"[{speaker}] 발화 질문",
                     "judgment": f"[{speaker}] 판단",
                     "question": f"[{speaker}] 질문",
                     "question_topic": _topic_from_prompt(prompt),
@@ -128,6 +135,7 @@ def _comprehensive_responder(*, dev_review_stance: str, discussion_review_stance
             is_revision_stage = "[stage]\nrevision" in prompt
             return json.dumps(
                 {
+                    "spoken_text": f"[{speaker}] 발화 제안",
                     "proposal": f"[{speaker}] 제안",
                     "reason": f"[{speaker}] 이유",
                     "assumption": f"[{speaker}] 가정",
@@ -142,6 +150,7 @@ def _comprehensive_responder(*, dev_review_stance: str, discussion_review_stance
             return json.dumps(
                 {
                     "stance": dev_review_stance,
+                    "spoken_text": f"[{speaker}] 발화 검토",
                     "judgment": f"[{speaker}] 검토 판단",
                     "reason": f"[{speaker}] 검토 근거",
                     "responding_to": "상대 제안",
@@ -155,29 +164,57 @@ def _comprehensive_responder(*, dev_review_stance: str, discussion_review_stance
             )
         if "[위임 정리 규칙]" in prompt:
             return json.dumps(
-                {"agreements": [], "considerations": [], "final_recommendation": "위임 최종 권고안"},
+                {
+                    "agreements": [],
+                    "considerations": [],
+                    "final_recommendation": "위임 최종 권고안",
+                    "spoken_text": "위임 최종 권고안",
+                },
                 ensure_ascii=False,
             )
         if "[의견 규칙]" in prompt:
-            is_review_stage = "[discussion_stage]\nreview" in prompt
-            is_revision_stage = "[discussion_stage]\nrevision" in prompt
-            stance = discussion_review_stance if is_review_stage else "보완"
+            needs_revision = discussion_review_stance in {"반박", "조건부_동의", "대안_제시"}
+            if is_dev:
+                stance = discussion_review_stance
+                is_response_stage = True  # dev는 항상 방금 나온 planning 발언에 반응한다.
+                dev_resolves_issue = not needs_revision and discussion_next_action != "continue_round"
+                _awaiting_revision[0] = needs_revision
+                recommended_next_speaker = "planning_expert" if needs_revision else "ideation_facilitator"
+                issue_resolved = dev_resolves_issue
+            else:
+                stance = "보완"
+                is_response_stage = _awaiting_revision[0]
+                if is_response_stage:
+                    _awaiting_revision[0] = False
+                recommended_next_speaker = "dev_expert" if not is_response_stage else "ideation_facilitator"
+                issue_resolved = is_response_stage  # 수정 응답이면 이번 쟁점은 여기서 끝난다.
             return json.dumps(
                 {
                     "stance": stance,
+                    "spoken_text": f"[{speaker}] 발화 판단",
                     "judgment": f"[{speaker}] 판단",
                     "reason": f"[{speaker}] 근거",
                     "suggestion": f"[{speaker}] 제안",
                     "interim_conclusion": f"[{speaker}] 현재 임시 결론",
-                    "responding_to": "상대 발언" if (is_review_stage or is_revision_stage) else None,
+                    "responding_to": "상대 발언" if is_response_stage else None,
                     "agreement": "",
-                    "concern": "우려" if (is_review_stage or is_revision_stage) else "",
-                    "revision": "수정 내용" if is_revision_stage else None,
+                    "concern": "우려" if is_response_stage else "",
+                    "revision": "수정 내용" if (not is_dev and is_response_stage) else None,
                     "confirmed": [],
                     "unconfirmed": [],
                     "referenced_message_ids": [],
                     "evidence": [],
-                    "next_action": discussion_next_action if is_review_stage else None,
+                    "next_action": None,
+                    "active_issue_id": "mvp_scope",
+                    "active_issue_title": "MVP 범위",
+                    "new_information": [f"[{speaker}] 새로 확인된 내용"],
+                    "proposal": f"[{speaker}] 제안",
+                    "changed_position": False,
+                    "needs_counterpart_response": needs_revision if is_dev else False,
+                    "recommended_next_speaker": recommended_next_speaker,
+                    "issue_resolved": issue_resolved,
+                    "needs_user_input": False,
+                    "user_question": None,
                 },
                 ensure_ascii=False,
             )
@@ -187,6 +224,7 @@ def _comprehensive_responder(*, dev_review_stance: str, discussion_review_stance
                     "agreements": [],
                     "disagreements": [],
                     "facilitator_summary": "라운드 정리",
+                    "spoken_text": "라운드 정리",
                     "needs_user_decision": False,
                     "user_question": None,
                 },
