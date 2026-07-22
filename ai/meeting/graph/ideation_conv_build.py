@@ -32,6 +32,7 @@ from .ideation_conv_discovery import (
 )
 from .ideation_conv_nodes import (
     REVISION_TRIGGER_STANCES,
+    make_canvas_update_node,
     make_conv_discussion_node,
     make_conv_question_node,
     make_conv_synthesis_node,
@@ -87,9 +88,20 @@ def _route_after_revision(state: IdeationConvState) -> str:
     return "failed" if state.get("phase") == "failed" else "summarize"
 
 
+def _route_after_facilitator_summary(state: IdeationConvState) -> str:
+    """가은/Claude(2026-07-22, 요청: 아이디어 기획 캔버스 자동 갱신 — 경이 협의 완료):
+    discussion_facilitator 직후에는 라운드 진행 라우팅 전에 canvas_update를 한 번 거친다 —
+    "매 라운드 후 캔버스 필드 갱신". 진행자 정리가 실패했으면(phase="failed") 캔버스 갱신도
+    건너뛰고 즉시 멈춘다."""
+    return "failed" if state.get("phase") == "failed" else "update_canvas"
+
+
 def _route_after_facilitator(state: IdeationConvState) -> str:
     """discussion_facilitator는 phase를 절대 바꾸지 않으므로(dev_expert_discussion이 이미
     정한 값을 그대로 둔다), 여기서 보는 phase는 review 단계가 결정한 값 그대로다.
+    canvas_update도 phase를 절대 바꾸지 않는다(비치명적 노드 — ideation_conv_nodes.py::
+    make_canvas_update_node 참고)라서, canvas_update 뒤에 이 라우팅을 그대로 옮겨 써도
+    보는 phase 값은 기존과 동일하다.
 
     용준/Claude(2026-07-21, 요청: 전문가 라운드테이블 전환): dev_expert_discussion이
     다음 라운드로 이어가기로 판단하면(phase="planning_question") 그 phase 값은 그대로
@@ -170,6 +182,9 @@ def assemble_ideation_conversation_graph(
         discussion_stage="revision",
     )
     discussion_facilitator_node = make_discussion_facilitator_node(llm_call)
+    # 가은/Claude(2026-07-22, 요청: 아이디어 기획 캔버스 자동 갱신 — 경이 협의 완료) — 매
+    # 라운드 진행자 정리 직후 캔버스(state["idea_canvas"])를 갱신하는 비치명적 노드.
+    canvas_update_node = make_canvas_update_node(llm_call)
     synthesis_node = make_conv_synthesis_node(llm_call)
 
     # 용준/Claude(2026-07-21): discovery(아이디어 발굴) 모드 노드 3종.
@@ -183,6 +198,7 @@ def assemble_ideation_conversation_graph(
     graph.add_node("dev_expert_discussion", dev_discussion_node)
     graph.add_node("planning_expert_revision", planning_revision_node)
     graph.add_node("discussion_facilitator", discussion_facilitator_node)
+    graph.add_node("canvas_update", canvas_update_node)
     graph.add_node("synthesis", synthesis_node)
     graph.add_node("candidate_planning", candidate_planning_node)
     graph.add_node("candidate_feasibility", candidate_feasibility_node)
@@ -222,8 +238,17 @@ def assemble_ideation_conversation_graph(
         _route_after_revision,
         {"summarize": "discussion_facilitator", "failed": END},
     )
+    # 가은/Claude(2026-07-22, 요청: 아이디어 기획 캔버스 자동 갱신 — 경이 협의 완료) —
+    # 라운드 종료 라우팅 앞에 canvas_update를 끼워 넣는다: discussion_facilitator ->
+    # canvas_update -> (기존 라우팅 그대로). canvas_update는 phase를 바꾸지 않으므로
+    # _route_after_facilitator가 보는 값은 이 변경 전과 동일하다.
     graph.add_conditional_edges(
         "discussion_facilitator",
+        _route_after_facilitator_summary,
+        {"update_canvas": "canvas_update", "failed": END},
+    )
+    graph.add_conditional_edges(
+        "canvas_update",
         _route_after_facilitator,
         {
             # 용준/Claude(2026-07-21, 요청: 전문가 라운드테이블 전환) — 다음 라운드도 1:1

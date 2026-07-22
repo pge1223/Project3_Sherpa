@@ -77,6 +77,21 @@ def _facilitator_summary_payload_for(prompt: str) -> dict:
     }
 
 
+# 가은/Claude(2026-07-22, 캔버스 자동 갱신) — 매 라운드 끝의 canvas_update 노드 응답.
+# 스트리밍 대상이 아니라(_stream_plan_for가 None을 반환) call_chat_completion 쪽으로 온다.
+def _canvas_payload() -> dict:
+    return {
+        "problem": "[canvas] 문제 상황",
+        "target_user": "[canvas] 타깃 사용자",
+        "core_value": "[canvas] 핵심 가치",
+        "solution": "[canvas] 해결 방식",
+        "differentiation": "[canvas] 차별점",
+        "feasibility": "medium",
+        "risks": ["[canvas] 리스크"],
+        "contest_fit": "[canvas] 심사기준 대응",
+    }
+
+
 def _sync_stub_llm_call(session_id: str, model: str):
     """기존 동기식 /start, /reply(비교용)에 쓰는 완성 응답 스텁 — 스트리밍 스텁과 정확히
     같은 내용을 반환해야 "스트리밍 결과와 동기식 결과가 의미상 같다"를 비교할 수 있다."""
@@ -104,6 +119,8 @@ def _sync_stub_llm_call(session_id: str, model: str):
                 {"answer_type": "answer", "reason": "충분", "follow_up_question": None, "clarification_response": None},
                 ensure_ascii=False,
             )
+        if "[캔버스 갱신 규칙]" in prompt:
+            return json.dumps(_canvas_payload(), ensure_ascii=False)
         raise AssertionError(f"예상하지 못한 프롬프트: {prompt[:150]}")
 
     return llm_call
@@ -145,6 +162,10 @@ class _FakeStreamState:
                 yield raw[i : i + self.chunk_size]
 
         def call_chat_completion(prompt: str) -> str:
+            # 가은/Claude(2026-07-22, 캔버스 자동 갱신) — canvas_update는 화면 메시지를 만들지
+            # 않아 스트리밍 대상이 아니고, 항상 이 동기식 경로로 온다.
+            if "[캔버스 갱신 규칙]" in prompt:
+                return json.dumps(_canvas_payload(), ensure_ascii=False)
             raise AssertionError(f"예상하지 못한 프롬프트: {prompt[:100]}")
 
         return stream_chat_completion, call_chat_completion

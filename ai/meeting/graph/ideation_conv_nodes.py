@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from prompts import (
+    build_ideation_conv_canvas_update_prompt,
     build_ideation_conv_discussion_facilitator_prompt,
     build_ideation_conv_discussion_prompt,
     build_ideation_conv_expert_delegation_facilitator_prompt,
@@ -1294,6 +1295,68 @@ def make_discussion_facilitator_node(llm_call: LLMCall) -> Callable[[IdeationCon
             update["pending_question"] = None
             update["pending_question_topic"] = None
         return update
+
+    return node
+
+
+# 가은/Claude(2026-07-22, 요청: 아이디어 기획 캔버스 자동 갱신 — 경이 협의 완료): 캔버스의
+# 문자열 필드(키 이름은 selected_idea와 동일 — 프론트가 idea_canvas ?? selected_idea 폴백만으로
+# 그릴 수 있게 한다)와 feasibility 허용값, risks 상한.
+_CANVAS_TEXT_FIELDS = ("problem", "target_user", "core_value", "solution", "differentiation", "contest_fit")
+_VALID_CANVAS_FEASIBILITY = {"high", "medium", "low", ""}
+_MAX_CANVAS_RISKS = 4
+
+
+def _validate_canvas_response(raw: dict) -> str | None:
+    """캔버스 갱신 응답 검증. 다른 구조화 검증과 달리 "필수 문자열이 비어 있지 않을 것"을
+    요구하지 않는다 — 아직 논의되지 않은 항목은 빈 문자열로 두는 것이 규칙(프롬프트 2번)
+    이기 때문이다. 키 존재/타입/feasibility 허용값만 본다."""
+    for key in _CANVAS_TEXT_FIELDS:
+        if not isinstance(raw.get(key), str):
+            return f"missing_or_not_string:{key}"
+    feasibility = raw.get("feasibility")
+    if not isinstance(feasibility, str) or feasibility.strip() not in _VALID_CANVAS_FEASIBILITY:
+        return "invalid_feasibility"
+    if not isinstance(raw.get("risks"), list):
+        return "risks_not_a_list"
+    return None
+
+
+def make_canvas_update_node(llm_call: LLMCall) -> Callable[[IdeationConvState], dict]:
+    """가은/Claude(2026-07-22, 요청: 아이디어 기획 캔버스 자동 갱신 — 경이 협의 완료): 라운드테이블
+    한 라운드(discussion_facilitator까지)가 끝난 직후 실행되어, 이번 라운드 발언으로 프론트
+    오른쪽 패널의 '아이디어 기획 캔버스'(state["idea_canvas"])를 갱신한다.
+
+    이 노드만의 두 가지 예외적 성질:
+      - 메시지를 만들지 않는다 — 화면에 보이는 발언이 아니라 구조화 값만 갱신한다(스트리밍
+        레이어에서는 _PHASE_ONLY_LABELS의 진행 문구만 나간다).
+      - 비치명적이다 — 검증 실패 시 phase="failed"로 바꾸지 않고 직전 캔버스를 그대로 둔다.
+        캔버스는 부가 정보라서, 이것 때문에 이미 성공한 라운드 전체를 실패로 만들면 안 된다
+        (회의 진행 로직과의 유일한 접점은 llm_calls_used 누적뿐이다). phase도 절대 바꾸지
+        않는다 — 다음 라우팅(ideation_conv_build.py::_route_after_facilitator)은
+        dev_expert_discussion이 이미 정한 phase를 그대로 읽어야 한다."""
+
+    def node(state: IdeationConvState) -> dict:
+        prompt = build_ideation_conv_canvas_update_prompt(
+            state.get("idea_canvas"),
+            state.get("selected_idea"),
+            state.get("initial_idea"),
+            state.get("discussion_planning_position"),
+            state.get("discussion_development_review"),
+            state.get("discussion_revised_proposal"),
+            state["consensus"],
+            state["unresolved_issues"],
+            state["notice_and_criteria"],
+        )
+        raw, ok, attempts = _safe_call_structured_json(llm_call, prompt, _validate_canvas_response, "canvas_update")
+        used = state.get("llm_calls_used", 0) + attempts
+        if not ok:
+            return {"llm_calls_used": used}
+
+        canvas: dict[str, Any] = {key: raw[key].strip() for key in _CANVAS_TEXT_FIELDS}
+        canvas["feasibility"] = raw["feasibility"].strip()
+        canvas["risks"] = _as_string_list(raw.get("risks"))[:_MAX_CANVAS_RISKS]
+        return {"idea_canvas": canvas, "llm_calls_used": used}
 
     return node
 

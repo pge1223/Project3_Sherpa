@@ -192,6 +192,22 @@ def _comprehensive_responder(*, dev_review_stance: str, discussion_review_stance
                 },
                 ensure_ascii=False,
             )
+        # 가은/Claude(2026-07-22, 캔버스 자동 갱신) — 매 라운드 끝의 canvas_update 노드.
+        # 라운드당 LLM 호출이 1회 늘어난 것이므로 아래 테스트의 호출 수 기대값에 반영돼 있다.
+        if "[캔버스 갱신 규칙]" in prompt:
+            return json.dumps(
+                {
+                    "problem": "[canvas] 문제 상황",
+                    "target_user": "[canvas] 타깃 사용자",
+                    "core_value": "[canvas] 핵심 가치",
+                    "solution": "[canvas] 해결 방식",
+                    "differentiation": "[canvas] 차별점",
+                    "feasibility": "medium",
+                    "risks": ["[canvas] 리스크"],
+                    "contest_fit": "[canvas] 심사기준 대응",
+                },
+                ensure_ascii=False,
+            )
         raise AssertionError(f"예상하지 못한 프롬프트: {prompt[:150]}")
 
     return llm_call
@@ -253,9 +269,10 @@ def test_realistic_max_cascade_stays_comfortably_under_the_cap(client: TestClien
     (_force_session_to_awaiting_developer_answer로 재현). 경로: "잘 모르겠어"(결정적 규칙,
     sufficiency 생략) -> expert_delegation(제안 1 + 반대 위원 검토 1 + [반박이므로] 수정
     1 + 진행자 권고안 1 = 4) -> 같은 요청 안에서 곧바로 expert_discussion 라운드까지
-    이어짐(기획 최초 1 + 개발 검토 1 + [반박이므로] 기획 수정 1 + 진행자 정리 1 = 4,
+    이어짐(기획 최초 1 + 개발 검토 1 + [반박이므로] 기획 수정 1 + 진행자 정리 1 +
+    캔버스 갱신 1(가은/Claude 2026-07-22, 캔버스 자동 갱신) = 5,
     next_action="await_user_decision"이라 다음 라운드로는 이어지지 않는다) = 이번 reply
-    요청에서만 8회.
+    요청에서만 9회.
 
     이 값이 실제 호출 수와 정확히 일치하고, 상한(_MAX_LLM_CALLS_PER_REQUEST)보다 여유 있게
     낮은지 확인한다 — 요청 사항 그대로, 현실적인(재시도 없는) 최대 경로에서 상한이 조기에
@@ -286,8 +303,8 @@ def test_realistic_max_cascade_stays_comfortably_under_the_cap(client: TestClien
     assert reply_resp.status_code == 200
     body = reply_resp.json()
 
-    assert call_counter[0] == 8, (
-        f"위임 4회 + 회의 라운드 4회 = 8회가 아니라 {call_counter[0]}회가 호출됐습니다"
+    assert call_counter[0] == 9, (
+        f"위임 4회 + 회의 라운드 5회(캔버스 갱신 포함) = 9회가 아니라 {call_counter[0]}회가 호출됐습니다"
     )
     assert call_counter[0] < conv_route._MAX_LLM_CALLS_PER_REQUEST, "현실적인 최대 경로가 상한을 초과하면 안 된다"
 
@@ -329,8 +346,8 @@ def test_cap_trips_gracefully_instead_of_looping_forever(client: TestClient, mon
     assert start_resp.json()["phase"] == "awaiting_user_decision"
 
     # 이제부터 LLM이 항상 continue_round를 반환하는 폭주 시나리오로 바꾸고, 상한을 낮춘다
-    # (라운드 하나당 planning+dev+facilitator=3회 — 상한 5로는 두 번째 라운드의 진행자
-    # 호출에서 확실히 넘긴다).
+    # (라운드 하나당 planning+dev+facilitator+canvas=4회 — 상한 5로는 두 번째 라운드의
+    # 개발 위원 호출에서 확실히 넘긴다).
     runaway_responder = _comprehensive_responder(
         dev_review_stance="동의", discussion_review_stance="동의", discussion_next_action="continue_round"
     )

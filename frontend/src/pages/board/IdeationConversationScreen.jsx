@@ -30,6 +30,7 @@ import {
   isFullyDisplayed,
   pendingCharCount,
 } from './ideationStreamReducer'
+import IdeaCanvasPanel from './IdeaCanvasPanel'
 
 // 작성자: 용준/Claude(2026-07-21)
 // 목적: /board "작성 전 → 주제 발굴" 흐름의 실제 대화형 아이디어 회의 화면.
@@ -273,24 +274,6 @@ function ErrorBanner({ error, onRetry }) {
   )
 }
 
-// 요청: "스트리밍이 비활성화되거나 fallback됐다면 화면 또는 콘솔에 그 이유가 드러나게
-// 해주세요. 조용히 기존 /reply로 fallback해서는 안 됩니다." — /reply/stream이 404(플래그
-// 꺼짐)로 응답해 동기식 /reply로 전환할 때 이 배너를 띄운다(handleSend가 console.warn도
-// 함께 남긴다). ErrorBanner와 달리 재시도 버튼이 없다 — 오류가 아니라 "이번 세션은 계속
-// 이 방식으로 동작한다"는 지속 안내이기 때문이다.
-function StreamFallbackNotice({ message }) {
-  if (!message) return null
-  return (
-    <div
-      className="card glass"
-      style={{ borderColor: 'var(--amber-dim, var(--glass-border))', marginBottom: 14, display: 'flex', alignItems: 'flex-start', gap: 10, padding: 12 }}
-    >
-      <AlertCircle size={14} color="var(--amber, var(--coral))" style={{ marginTop: 1, flexShrink: 0 }} />
-      <div style={{ fontSize: 12.5, color: 'var(--text-1)', lineHeight: 1.6 }}>{message}</div>
-    </div>
-  )
-}
-
 export function IdeationScreen({
   projectId,
   criteriaDocuments,
@@ -311,17 +294,21 @@ export function IdeationScreen({
   // createEmptyStreamState()로 비우고 ideationConv(canonical)만 그린다 — 그래서 스트리밍
   // 미리보기와 canonical 메시지가 동시에 화면에 남아 중복되는 경우가 구조적으로 없다.
   const [streamState, setStreamState] = useState(() => createEmptyStreamState())
-  // 요청: "스트리밍이 비활성화되거나 fallback됐다면 화면 또는 콘솔에 그 이유가 드러나게
-  // 해주세요" — 동기식 /reply로 전환했을 때 사용자에게 보여줄 지속 안내 문구.
-  const [streamFallbackNotice, setStreamFallbackNotice] = useState(null)
+  // 가은/Claude(2026-07-22): 아이디어 기획 캔버스(IdeaCanvasPanel)의 "심사기준 대응 포인트"
+  // 시드용. runStart는 원래 이 분석을 start API 페이로드를 만드는 데만 쓰고 버렸는데,
+  // 캔버스가 계속 보여줘야 하므로 상태로 유지한다. 세션 재개(resume) 경로에서는 start를
+  // 다시 부르지 않으므로 거기서도 별도로 채운다.
+  const [announcementAnalysis, setAnnouncementAnalysis] = useState(null)
 
   const startedRef = useRef(false)
   const chatEndRef = useRef(null)
   const streamAbortRef = useRef(null)
   // 스트리밍 엔드포인트가 비활성화(404)로 확인되면 이 세션 동안은 다시 시도하지 않고
   // 동기식 API로만 보낸다(요청: "플래그가 꺼져 있으면 기존 비스트리밍 API로 돌아갈 수
-  // 있도록") — 단, 전환 시점에는 console.warn + streamFallbackNotice로 반드시 알린다
-  // (요청: "조용히 기존 /reply로 fallback해서는 안 됩니다").
+  // 있도록"). 가은/Claude(2026-07-22, 요청: 안내 배너 제거): 전환 사실은 이제 화면 배너
+  // 없이 console.warn으로만 남긴다 — 스트리밍 기본값이 켜진 뒤로(backend/app/config.py::
+  // ENABLE_IDEATION_STREAMING=True) 이 전환은 개발자가 의도적으로 플래그를 껐을 때만
+  // 일어나므로, 일반 사용자에게 설정 안내 문구를 보여줄 이유가 없어졌다.
   const streamingSupportedRef = useRef(true)
   // 네트워크로부터 최종 'state'(또는 'error') 이벤트를 이미 받았지만, 아직 화면 타이핑이
   // 그 텍스트를 다 따라잡지 못해 canonical로 교체를 미루고 있는 상태를 담는다. ref인
@@ -403,6 +390,7 @@ export function IdeationScreen({
       if (projectId) {
         analysis = await getAnnouncementAnalysis(projectId)
       }
+      setAnnouncementAnalysis(analysis)
       const data = await startIdeationConversation({
         competitionName: competitionNameFrom(analysis),
         competitionDocument: buildCompetitionDocumentText(analysis),
@@ -433,6 +421,11 @@ export function IdeationScreen({
     if (!savedSessionId) {
       runStart()
       return
+    }
+    // 세션 재개 경로 — start를 다시 부르지 않으므로 캔버스 시드용 공모전 분석만 별도로
+    // 가져온다. 실패해도 회의 재개 자체는 막지 않는다(캔버스의 심사기준 항목만 비는 것).
+    if (projectId) {
+      getAnnouncementAnalysis(projectId).then(setAnnouncementAnalysis).catch(() => {})
     }
     setStarting(true)
     getIdeationConversation(savedSessionId)
@@ -482,7 +475,6 @@ export function IdeationScreen({
     if (!text || !ideationConv || !canReplyOrContinue) return
     setSending(true)
     setError(null)
-    setStreamFallbackNotice(null)
 
     if (!streamingSupportedRef.current) {
       await sendNonStreaming(text)
@@ -521,16 +513,14 @@ export function IdeationScreen({
       const classified = classifyIdeationConvError(err)
       if (classified.type === 'disabled') {
         // 스트리밍 자체가 꺼져 있다(/reply/stream 404) — 이번 세션은 이후 계속 동기식
-        // API만 쓴다. 요청: "조용히 기존 /reply로 fallback해서는 안 됩니다" — 콘솔과
-        // 화면 배너 양쪽에 이유를 남긴 뒤에만 전환한다.
+        // API만 쓴다. 가은/Claude(2026-07-22, 요청: 안내 배너 제거): "조용히 fallback 금지"
+        // 취지는 console.warn으로 유지하되, 사용자용 화면 배너는 더 이상 띄우지 않는다
+        // (스트리밍이 기본 활성화된 뒤로는 개발자가 의도적으로 끈 경우에만 오는 경로다).
         streamingSupportedRef.current = false
         console.warn(
           '[ideation-stream] POST /reply/stream 이 비활성화(404) 응답을 반환해 동기식 /reply로 전환합니다. ' +
             '백엔드 backend/.env의 ENABLE_IDEATION_STREAMING 값을 확인하세요.',
           err,
-        )
-        setStreamFallbackNotice(
-          '실시간 스트리밍 응답이 비활성화되어 있어 일반 응답 방식으로 전환했습니다. (백엔드 ENABLE_IDEATION_STREAMING 설정을 확인하세요)',
         )
         await sendNonStreaming(text)
         setSending(false)
@@ -596,16 +586,16 @@ export function IdeationScreen({
   return (
     <div className="rb-grid-2" style={{ maxWidth: 900, display: 'grid', gridTemplateColumns: '1fr 320px', gap: 20 }}>
       <div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}>
           {onBack && (
             <button
               className="btn-ghost"
-              style={{ padding: '2px 8px', fontSize: 15, fontWeight: 700, color: '#000', border: 'none', background: 'transparent' }}
+              style={{ padding: '2px 6px', fontSize: 13, fontWeight: 300, color: '#000', border: 'none', background: 'transparent' }}
               onClick={onBack}
               disabled={busy}
               aria-label="이전 화면으로 이동"
             >
-              {'<'}
+              {'←'}
             </button>
           )}
           <div className="badge coral mono">주제 아이디어 회의</div>
@@ -631,7 +621,6 @@ export function IdeationScreen({
         </div>
 
         <ErrorBanner error={error} onRetry={handleRestart} />
-        <StreamFallbackNotice message={streamFallbackNotice} />
         <StreamingCursorStyle />
 
         <div className="card glass" style={{ minHeight: 360, maxHeight: 520, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 4, padding: 16 }}>
@@ -720,6 +709,8 @@ export function IdeationScreen({
             </div>
           )
         )}
+
+        <IdeaCanvasPanel ideationConv={ideationConv} analysis={announcementAnalysis} />
 
         {ideationConv && (ideationConv.consensus?.length > 0 || ideationConv.unresolved_issues?.length > 0) && (
           <div className="card glass" style={{ marginBottom: 12, padding: 14 }}>
@@ -825,11 +816,11 @@ export function IdeationResultScreen({ ideationConv, onBack }) {
         {onBack && (
           <button
             className="btn-ghost"
-            style={{ padding: '2px 8px', fontSize: 15, fontWeight: 700, color: '#000', border: 'none', background: 'transparent' }}
+            style={{ padding: '2px 6px', fontSize: 13, fontWeight: 300, color: '#000', border: 'none', background: 'transparent' }}
             onClick={onBack}
             aria-label="이전 화면으로 이동"
           >
-            {'<'}
+            {'←'}
           </button>
         )}
         <div className="badge green mono">주제 확정 · 기획서 작성 출발점</div>
