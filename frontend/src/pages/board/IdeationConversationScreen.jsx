@@ -481,12 +481,20 @@ export function IdeationScreen({
   return (
     <div className="rb-grid-2" style={{ maxWidth: 900, display: 'grid', gridTemplateColumns: '1fr 320px', gap: 20 }}>
       <div>
-        <div className="badge coral mono" style={{ marginBottom: 10 }}>주제 아이디어 회의</div>
-        {onBack && (
-          <button className="btn-ghost" style={{ marginBottom: 10, padding: '5px 10px', fontSize: 12 }} onClick={onBack} disabled={busy}>
-            ← 이전
-          </button>
-        )}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+          {onBack && (
+            <button
+              className="btn-ghost"
+              style={{ padding: '2px 8px', fontSize: 15, fontWeight: 700, color: '#000', border: 'none', background: 'transparent' }}
+              onClick={onBack}
+              disabled={busy}
+              aria-label="이전 화면으로 이동"
+            >
+              {'<'}
+            </button>
+          )}
+          <div className="badge coral mono">주제 아이디어 회의</div>
+        </div>
         {ideationConv?.competition_name ? (
           <>
             <div style={{ fontSize: 12, color: 'var(--text-2)', fontFamily: 'var(--mono)', marginBottom: 4 }}>공모전 주제</div>
@@ -689,12 +697,19 @@ export function IdeationResultScreen({ ideationConv, onBack }) {
 
   return (
     <div style={{ maxWidth: 780 }}>
-      <div className="badge green mono" style={{ marginBottom: 12 }}>주제 확정 · 기획서 작성 출발점</div>
-      {onBack && (
-        <button className="btn-ghost" style={{ marginBottom: 12, padding: '5px 10px', fontSize: 12 }} onClick={onBack}>
-          ← 이전
-        </button>
-      )}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+        {onBack && (
+          <button
+            className="btn-ghost"
+            style={{ padding: '2px 8px', fontSize: 15, fontWeight: 700, color: '#000', border: 'none', background: 'transparent' }}
+            onClick={onBack}
+            aria-label="이전 화면으로 이동"
+          >
+            {'<'}
+          </button>
+        )}
+        <div className="badge green mono">주제 확정 · 기획서 작성 출발점</div>
+      </div>
       <h2 style={{ fontSize: 22, fontWeight: 700, marginBottom: 20 }}>{proposal.idea_name || '확정된 주제'}</h2>
 
       <div className="card glass">
