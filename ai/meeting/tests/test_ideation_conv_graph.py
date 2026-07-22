@@ -1,9 +1,14 @@
-# 작성자: 용준/Claude(2026-07-20)
-# 목적: 대화형 아이디어 발전 회의(ideation-conversation) 그래프 검증 — 기획 질문 직후/
-#       개발 질문 직후 각각 정지하는지, 개발 전문가가 사용자 답변 전에는 절대 실행되지
-#       않는지, max_rounds가 강제되는지, 라운드 계속 시 다음 질문까지 자동 생성되는지,
-#       확정은 오직 finalize_ideation_conversation() 호출로만 일어나는지를 실제 LLM
-#       호출 없이 확인한다. 기존 test_ideation_graph.py(배치형)와 같은 stub 패턴을 쓴다.
+# 작성자: 용준/Claude(2026-07-20, 2026-07-21 개편)
+# 목적: 대화형 아이디어 발전 회의(ideation-conversation) 그래프 검증. 2026-07-21 "전문가
+#       라운드테이블 전환" 이후 새 세션은 더 이상 1:1 인터뷰(기획 질문 -> 답변 -> 개발
+#       질문 -> 답변)로 시작하지 않고, 진행자 안건 제시 직후 곧바로 기획/개발 위원이 서로
+#       토론하는 라운드테이블로 시작한다(phase="expert_discussion"). 1:1 인터뷰 노드
+#       (planning_question/developer_question, awaiting_planning_answer/
+#       awaiting_developer_answer)는 코드에서 삭제되지 않고 그대로 남아 있지만, 새 세션의
+#       기본 진입점에서는 더 이상 도달하지 않는다 — 이 파일의 일부 테스트는 그 "레거시지만
+#       보존된" 경로를 손으로(직접 노드를 호출하거나 state를 구성해) 계속 검증한다(아래
+#       _legacy_start_at_awaiting_planning_answer 참고). 나머지는 새 기본 흐름(라운드테이블)
+#       자체를 검증하도록 다시 작성됐다.
 # import: 표준 라이브러리 json/sys/pathlib, pytest; ai/meeting/graph 패키지.
 
 import json
@@ -18,9 +23,11 @@ sys.path.insert(0, str(MEETING_DIR))
 
 from graph import (  # noqa: E402
     finalize_ideation_conversation,
+    initial_conv_state,
     reply_ideation_conversation,
     start_ideation_conversation,
 )
+from graph.ideation_conv_nodes import make_conv_question_node  # noqa: E402
 
 NOTICE_AND_CRITERIA = {
     "competition_name": "지역 소상공인 디지털전환 공모전",
@@ -102,6 +109,57 @@ class ScriptedLLM:
                 ensure_ascii=False,
             )
 
+        if "[제안 규칙]" in prompt:
+            # 용준/Claude(2026-07-21, 요청: "모르겠다" UX 개선) — 전문가 위임(expert_delegation)
+            # 제안 생성 프롬프트. stage="revision"(용준/Claude(2026-07-21, 요청: 위원 간
+            # 상호 검토로 확장)이면 responding_to/revision도 채워야 검증을 통과한다.
+            if "expert_delegation" in self.broken_for:
+                return "이것은 JSON이 아닙니다"
+            speaker = "planning_expert" if is_planning else "dev_expert"
+            is_revision_stage = "[stage]\nrevision" in prompt
+            payload = {
+                "proposal": f"[{speaker}] 임시 제안 내용입니다",
+                "reason": f"[{speaker}] 제안 이유입니다",
+                "assumption": f"[{speaker}] 이 방향을 기준으로 진행하겠습니다",
+                "responding_to": "상대 전문가가 방금 제기한 우려" if is_revision_stage else None,
+                "revision": f"[{speaker}] 그 우려를 반영해 범위를 조정했습니다" if is_revision_stage else None,
+                "referenced_message_ids": [],
+                "evidence": [],
+            }
+            return json.dumps(payload, ensure_ascii=False)
+
+        if "[위임 검토 규칙]" in prompt:
+            # 용준/Claude(2026-07-21, 요청: expert_delegation도 위원 간 상호 검토로 확장) —
+            # 반대 위원의 검토 stub. stance="보완"(REVISION_TRIGGER_STANCES 밖)이라 기본
+            # 흐름에서는 수정 턴이 추가로 실행되지 않는다.
+            reviewer = "dev_expert" if is_dev else "planning_expert"
+            return json.dumps(
+                {
+                    "stance": "보완",
+                    "judgment": f"[{reviewer}] 검토 판단입니다",
+                    "reason": f"[{reviewer}] 검토 근거입니다",
+                    "responding_to": "상대 전문가의 임시 제안 내용",
+                    "agreement": f"[{reviewer}] 동의 지점입니다",
+                    "concern": "",
+                    "recommendation": f"[{reviewer}] 이 방향을 채택해도 좋습니다",
+                    "referenced_message_ids": [],
+                    "evidence": [],
+                },
+                ensure_ascii=False,
+            )
+
+        if "[위임 정리 규칙]" in prompt:
+            # 용준/Claude(2026-07-21, 요청: expert_delegation도 위원 간 상호 검토로 확장) —
+            # 진행자 최종 권고안 stub. 스키마에 재질문 필드가 없다.
+            return json.dumps(
+                {
+                    "agreements": ["제안 방향에 합의"],
+                    "considerations": ["추후 세부 사항은 계속 조정 가능"],
+                    "final_recommendation": "이 방향으로 진행하겠습니다.",
+                },
+                ensure_ascii=False,
+            )
+
         if "[질문 규칙]" in prompt:
             if is_planning and "planning_question" in self.broken_for:
                 return "이것은 JSON이 아닙니다"
@@ -128,6 +186,16 @@ class ScriptedLLM:
                     "judgment": f"[{speaker}] 핵심 판단입니다",
                     "reason": f"[{speaker}] 판단 근거입니다",
                     "suggestion": f"[{speaker}] 개선 제안입니다",
+                    # 용준/Claude(2026-07-21, 요청: 전문가 라운드테이블 전환) — 매 발언 필수인
+                    # "현재 임시 결론"(interim_conclusion).
+                    "interim_conclusion": f"[{speaker}] 현재 임시 결론입니다",
+                    # 용준/Claude(2026-07-21, 요청: 위원 간 실제 회의로 개편) — review 단계
+                    # (is_dev) 검증이 responding_to/agreement 또는 concern 중 하나를 요구하므로
+                    # 항상 채워둔다. stance="보완"은 REVISION_TRIGGER_STANCES에 없어
+                    # planning_expert_revision은 실행되지 않는다(기본 stub 흐름 유지).
+                    "responding_to": "기획 전문가가 방금 말한 핵심 판단" if is_dev else None,
+                    "agreement": f"[{speaker}] 동의 지점입니다" if is_dev else "",
+                    "concern": "",
                     "confirmed": ["소상공인 손님 응대 자동화로 범위를 좁힌다"],
                     "unconfirmed": ["결제 연동 필요 여부"],
                     "referenced_message_ids": [],
@@ -137,43 +205,97 @@ class ScriptedLLM:
                 ensure_ascii=False,
             )
 
+        if "[진행자 정리 규칙]" in prompt:
+            # 용준/Claude(2026-07-21, 요청: 위원 간 실제 회의로 개편) — discussion_facilitator
+            # 노드용 stub. needs_user_decision은 항상 false로 둬 기존 테스트의 phase 기대값
+            # (dev_next_action이 그대로 결정)에 영향을 주지 않는다 — 이 노드는 phase를 절대
+            # 바꾸지 않는다.
+            return json.dumps(
+                {
+                    "agreements": [],
+                    "disagreements": [],
+                    "facilitator_summary": "두 전문가가 이번 라운드 의견을 정리했습니다.",
+                    "needs_user_decision": False,
+                    "user_question": None,
+                },
+                ensure_ascii=False,
+            )
+
         raise AssertionError(f"예상하지 못한 프롬프트입니다: {prompt[:200]}")
 
 
-def _start(llm, max_rounds=3):
+def _start(llm, max_rounds=3, evidence_lookup=None):
     return start_ideation_conversation(
         session_id="CONV-TEST",
         notice_and_criteria=NOTICE_AND_CRITERIA,
         user_idea=USER_IDEA,
         llm_call=llm,
         max_rounds=max_rounds,
+        evidence_lookup=evidence_lookup,
     )
 
 
+def _legacy_planning_question_state(max_rounds=3):
+    """용준/Claude(2026-07-21, 요청: 전문가 라운드테이블 전환): 레거시 1:1 인터뷰 진입
+    phase("planning_question")로 손수 되돌린 state. initial_conv_state()는 이제 refinement
+    세션을 곧바로 "expert_discussion"으로 시작하므로, 새 세션은 더 이상 이 phase를 거치지
+    않는다 — 하지만 planning_question 노드 자체는 하위 호환을 위해 삭제하지 않았으므로, 이
+    state로 그 노드를 직접 호출해 여전히 올바르게 동작하는지 검증한다."""
+    state = dict(initial_conv_state("CONV-TEST-LEGACY", NOTICE_AND_CRITERIA, USER_IDEA, max_rounds=max_rounds))
+    state["phase"] = "planning_question"
+    state["messages"] = []
+    return state
+
+
+def _legacy_start_at_awaiting_planning_answer(llm, max_rounds=3, evidence_lookup=None):
+    """레거시 인터뷰 진입점(planning_question 노드)을 직접 호출해 phase=
+    "awaiting_planning_answer"에 도달한 state를 만든다 — 과거
+    start_ideation_conversation()이 만들던 것과 동일한 결과다. 새 세션의 기본 진입점에서는
+    더 이상 도달하지 않는 경로지만(라운드테이블로 즉시 진입), 노드 자체는 보존돼 있으므로
+    이 헬퍼로 그 보존된 경로를 계속 검증한다."""
+    state = _legacy_planning_question_state(max_rounds=max_rounds)
+    node = make_conv_question_node("planning_expert", "awaiting_planning_answer", llm, evidence_lookup)
+    update = node(state)
+    return {**state, **update, "messages": state["messages"] + update.get("messages", [])}
+
+
 # ---------------------------------------------------------------------------
-# 1. 세션을 시작하면 기획 전문가의 질문 하나만 만들고 즉시 멈추는지
+# 1. 세션을 시작하면 라운드테이블(진행자 안건 제시 -> 기획 위원 최초 의견 -> 개발 위원
+#    검토 -> 진행자 정리)이 같은 호출 안에서 곧바로 실행되는지(전문가 라운드테이블 전환)
 # ---------------------------------------------------------------------------
 
 
-def test_start_stops_after_single_planning_question():
+def test_start_runs_roundtable_immediately_without_interview_question():
+    """용준/Claude(2026-07-21, 요청: 전문가 라운드테이블 전환) 이후 start_ideation_conversation()은
+    더 이상 기획 전문가의 1:1 질문 하나만 만들고 멈추지 않는다 — dev_next_action 기본값이
+    "await_user_decision"이라 첫 라운드가 끝나면 멈춘다."""
     llm = ScriptedLLM()
     state = _start(llm)
-    assert state["phase"] == "awaiting_planning_answer"
-    assert len(state["messages"]) == 1
-    assert state["messages"][0]["speaker_id"] == "planning_expert"
-    assert state["messages"][0]["message_type"] == "question"
+    assert state["phase"] == "awaiting_user_decision"
+    speakers_and_types = [(m["speaker_id"], m["message_type"]) for m in state["messages"]]
+    assert speakers_and_types == [
+        ("ideation_facilitator", "summary"),
+        ("planning_expert", "opinion"),
+        ("dev_expert", "opinion"),
+        ("ideation_facilitator", "summary"),
+    ]
+    assert state["messages"][0]["content"].startswith("오늘은 '")
+    # 사용자에게 직접 던지는 인터뷰 질문(message_type="question")은 하나도 없어야 한다.
+    assert not any(m["message_type"] == "question" for m in state["messages"])
     dev_prompts = [p for p in llm.captured_prompts if "당신은 AI Review Board의 개발 전문가입니다" in p]
-    assert not dev_prompts, "사용자가 답하기 전에 개발 전문가가 호출되면 안 된다"
+    assert dev_prompts, "라운드테이블에서는 사용자 답변을 기다리지 않고 개발 위원도 곧바로 실행돼야 한다"
 
 
 # ---------------------------------------------------------------------------
-# 2. 사용자가 기획 질문에 답하면 개발 전문가가 그 답변을 참조해 질문 하나만 만들고 멈추는지
+# 2. 레거시 인터뷰 경로 보존: 기획 질문에 답하면 개발 전문가가 그 답변을 참조해 질문 하나만
+#    만들고 멈추는지(새 세션의 기본 진입점에서는 더 이상 도달하지 않지만, 코드는 보존됨)
 # ---------------------------------------------------------------------------
 
 
 def test_reply_to_planning_question_triggers_only_developer_question():
+    """레거시 인터뷰 경로(planning_question 노드) 보존 검증."""
     llm = ScriptedLLM()
-    state = _start(llm)
+    state = _legacy_start_at_awaiting_planning_answer(llm)
     state = reply_ideation_conversation(previous_state=state, user_message="타깃은 동네 카페 사장님입니다", llm_call=llm)
 
     assert state["phase"] == "awaiting_developer_answer"
@@ -187,40 +309,50 @@ def test_reply_to_planning_question_triggers_only_developer_question():
 
 
 # ---------------------------------------------------------------------------
-# 3. 사용자가 개발 질문에 답하면 두 전문가가 순서대로 보완 의견을 말하는지
+# 3. 레거시 인터뷰 경로 보존: 개발 질문에 답하면 두 전문가가 순서대로 보완 의견을 말하는지
 # ---------------------------------------------------------------------------
 
 
 def test_reply_to_developer_question_runs_both_experts_in_order():
+    """레거시 인터뷰 경로 보존 검증 — 두 질문에 모두 답한 뒤에는(새 세션에서는 이 경로 자체를
+    타지 않지만) 여전히 두 전문가가 순서대로 보완 의견을 말해야 한다."""
     llm = ScriptedLLM(dev_next_action="await_user_decision")
-    state = _start(llm)
+    state = _legacy_start_at_awaiting_planning_answer(llm)
     state = reply_ideation_conversation(previous_state=state, user_message="답변1", llm_call=llm)
     state = reply_ideation_conversation(previous_state=state, user_message="카카오톡 채널 API를 쓰려 합니다", llm_call=llm)
 
     assert state["phase"] == "awaiting_user_decision"
     speakers = [m["speaker_id"] for m in state["messages"]]
-    # user(답1), user(답2) 다음에 planning_expert -> dev_expert 순서로 이어져야 한다.
-    assert speakers[-2:] == ["planning_expert", "dev_expert"]
+    # dev_next_action="await_user_decision"이고 stance="보완"(REVISION_TRIGGER_STANCES
+    # 밖)이라 planning_expert_revision은 끼지 않는다. 진행자 정리 메시지가 항상 마지막에
+    # 추가된다.
+    assert speakers[-3:] == ["planning_expert", "dev_expert", "ideation_facilitator"]
+    assert state["messages"][-3]["message_type"] == "opinion"
     assert state["messages"][-2]["message_type"] == "opinion"
-    assert state["messages"][-1]["message_type"] == "opinion"
+    assert state["messages"][-1]["message_type"] == "summary"
     assert "결제 연동 필요 여부" in state["unresolved_issues"]
 
 
 # ---------------------------------------------------------------------------
-# 4. 개발 전문가가 continue_round를 판단하면 같은 호출 안에서 다음 질문까지 자동 생성되는지
+# 4. 개발 위원이 continue_round를 판단하면 같은 호출 안에서 다음 라운드 discussion까지
+#    자동 이어지는지(1:1 인터뷰 질문으로 돌아가지 않는지) — 전문가 라운드테이블 전환으로
+#    동작 자체가 바뀐 지점.
 # ---------------------------------------------------------------------------
 
 
-def test_continue_round_auto_generates_next_planning_question():
+def test_continue_round_auto_advances_to_next_discussion_round_without_stopping():
+    """용준/Claude(2026-07-21, 요청: 전문가 라운드테이블 전환) — 개발 위원이
+    next_action="continue_round"를 반환하면(그리고 아직 max_rounds에 도달하지 않았으면)
+    같은 그래프 호출 안에서 곧바로 다음 라운드의 기획 위원 최초 의견까지 자동 생성된다
+    (1:1 인터뷰 질문으로는 절대 돌아가지 않는다). dev_next_action이 항상 "continue_round"
+    이므로 max_rounds(3)에 도달할 때까지 자동으로 라운드가 이어지다가 강제로 멈춘다."""
     llm = ScriptedLLM(dev_next_action="continue_round")
     state = _start(llm, max_rounds=3)
-    state = reply_ideation_conversation(previous_state=state, user_message="답변1", llm_call=llm)
-    state = reply_ideation_conversation(previous_state=state, user_message="답변2", llm_call=llm)
 
-    assert state["phase"] == "awaiting_planning_answer"
-    assert state["round"] == 2
-    assert state["messages"][-1]["speaker_id"] == "planning_expert"
-    assert state["messages"][-1]["message_type"] == "question"
+    assert state["phase"] == "awaiting_user_decision"
+    assert state["round"] == 3
+    assert len(state["discussion_rounds"]) == 3
+    assert not any(m["message_type"] == "question" for m in state["messages"])
 
 
 # ---------------------------------------------------------------------------
@@ -231,11 +363,10 @@ def test_continue_round_auto_generates_next_planning_question():
 def test_max_rounds_forces_awaiting_user_decision_even_if_llm_says_continue():
     llm = ScriptedLLM(dev_next_action="continue_round")
     state = _start(llm, max_rounds=1)
-    state = reply_ideation_conversation(previous_state=state, user_message="답변1", llm_call=llm)
-    state = reply_ideation_conversation(previous_state=state, user_message="답변2", llm_call=llm)
 
     assert state["phase"] == "awaiting_user_decision"
     assert state["round"] == 1
+    assert len(state["discussion_rounds"]) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -246,8 +377,7 @@ def test_max_rounds_forces_awaiting_user_decision_even_if_llm_says_continue():
 def test_idea_proposal_only_exists_after_explicit_finalize_call():
     llm = ScriptedLLM(dev_next_action="await_user_decision")
     state = _start(llm)
-    state = reply_ideation_conversation(previous_state=state, user_message="답변1", llm_call=llm)
-    state = reply_ideation_conversation(previous_state=state, user_message="답변2", llm_call=llm)
+    assert state["phase"] == "awaiting_user_decision"
     assert state["idea_proposal"] is None
     assert not any('"idea_name"' in p for p in llm.captured_prompts)
 
@@ -263,7 +393,7 @@ def test_idea_proposal_only_exists_after_explicit_finalize_call():
 
 def test_finalize_rejected_before_awaiting_user_decision():
     llm = ScriptedLLM()
-    state = _start(llm)
+    state = _legacy_start_at_awaiting_planning_answer(llm)
     with pytest.raises(ValueError):
         finalize_ideation_conversation(previous_state=state, llm_call=llm)
 
@@ -276,8 +406,6 @@ def test_finalize_rejected_before_awaiting_user_decision():
 def test_reply_rejected_when_conversation_already_finalized():
     llm = ScriptedLLM(dev_next_action="await_user_decision")
     state = _start(llm)
-    state = reply_ideation_conversation(previous_state=state, user_message="답변1", llm_call=llm)
-    state = reply_ideation_conversation(previous_state=state, user_message="답변2", llm_call=llm)
     state = finalize_ideation_conversation(previous_state=state, llm_call=llm)
 
     with pytest.raises(ValueError):
@@ -285,27 +413,28 @@ def test_reply_rejected_when_conversation_already_finalized():
 
 
 # ---------------------------------------------------------------------------
-# 9. JSON 파싱 실패 시 폴백이 동작하는지(질문 턴)
+# 9. 레거시 인터뷰 경로 보존: JSON 파싱 실패 시 폴백이 동작하는지(질문 턴)
 # ---------------------------------------------------------------------------
 
 
 def test_json_parse_failure_falls_back_to_failed_phase():
+    """레거시 인터뷰 경로(planning_question 노드) 보존 검증 — 구조화 검증 실패 시 여전히
+    phase="failed"로 안전하게 끝난다."""
     llm = ScriptedLLM(broken_for={"planning_question"})
-    state = _start(llm)
+    state = _legacy_start_at_awaiting_planning_answer(llm)
     assert state["phase"] == "failed"
     assert state["failed_node"] == "question__planning_expert"
 
 
 # ---------------------------------------------------------------------------
-# 10. 기획/개발 두 전문가가 서로 다른 역할 지시를 받는지(프롬프트 경계)
+# 10. 기획/개발 두 전문가가 서로 다른 역할 지시를 받는지(프롬프트 경계) — 라운드테이블에서는
+#     사용자 답변을 기다리지 않고 한 번의 start() 호출로 둘 다 실행된다.
 # ---------------------------------------------------------------------------
 
 
 def test_planning_and_dev_prompts_carry_different_role_instructions():
     llm = ScriptedLLM(dev_next_action="await_user_decision")
-    state = _start(llm)
-    state = reply_ideation_conversation(previous_state=state, user_message="답변1", llm_call=llm)
-    reply_ideation_conversation(previous_state=state, user_message="답변2", llm_call=llm)
+    _start(llm)
 
     planning_prompts = [p for p in llm.captured_prompts if "당신은 AI Review Board의 기획 전문가입니다" in p]
     dev_prompts = [p for p in llm.captured_prompts if "당신은 AI Review Board의 개발 전문가입니다" in p]
@@ -315,7 +444,9 @@ def test_planning_and_dev_prompts_carry_different_role_instructions():
 
 
 # ---------------------------------------------------------------------------
-# 11. 답변이 불충분하면 다음 전문가로 넘어가지 않고 재질문이 생성되는지(요청 3번)
+# 11. 레거시 인터뷰 경로 보존: 답변이 불충분하면 다음 전문가로 넘어가지 않고 재질문이
+#     생성되는지(요청 3번) — answer_sufficiency 게이트는 여전히 awaiting_planning_answer/
+#     awaiting_developer_answer(레거시 인터뷰 phase)에서만 동작한다.
 # ---------------------------------------------------------------------------
 
 
@@ -325,7 +456,7 @@ def test_insufficient_answer_triggers_follow_up_instead_of_next_question():
             {"is_sufficient": False, "reason": "구체성이 부족합니다", "follow_up_question": "정확히 누구를 위한 서비스인가요?"}
         ]
     )
-    state = _start(llm)
+    state = _legacy_start_at_awaiting_planning_answer(llm)
     state = reply_ideation_conversation(previous_state=state, user_message="그런 것 같아요", llm_call=llm)
 
     # 재질문 후에도 여전히 기획 질문 답변을 기다리는 상태여야 하고, 개발 전문가는 아직 호출되면 안 된다.
@@ -339,7 +470,8 @@ def test_insufficient_answer_triggers_follow_up_instead_of_next_question():
 
 
 # ---------------------------------------------------------------------------
-# 12. 같은 쟁점의 재질문이 상한(2회)에 도달하면 판정과 무관하게 다음 단계로 강제 진행되는지(요청 5번)
+# 12. 레거시 인터뷰 경로 보존: 같은 쟁점의 재질문이 상한(2회)에 도달하면 판정과 무관하게
+#     다음 단계로 강제 진행되는지(요청 5번)
 # ---------------------------------------------------------------------------
 
 
@@ -351,7 +483,7 @@ def test_repeated_insufficient_answers_force_progress_after_retry_cap():
             {"is_sufficient": False, "reason": "세 번째도 불충분합니다", "follow_up_question": "다시 설명해 주세요"},
         ]
     )
-    state = _start(llm)
+    state = _legacy_start_at_awaiting_planning_answer(llm)
     state = reply_ideation_conversation(previous_state=state, user_message="그런 것 같아요", llm_call=llm)
     assert state["phase"] == "awaiting_planning_answer"
     assert state["answer_retry_count"] == 1
@@ -369,27 +501,28 @@ def test_repeated_insufficient_answers_force_progress_after_retry_cap():
 
 
 # ---------------------------------------------------------------------------
-# 13. 충분한 답변은 재질문 없이 곧바로 다음 단계로 진행되는지 + 전문가 의견이 구조화된 형식으로 출력되는지(요청 4번)
+# 13. 전문가 의견이 구조화된(역할별 헤더) 형식으로 출력되는지(요청 4번) — 라운드테이블이
+#     사용자 답변을 기다리지 않고 곧바로 실행되므로 start() 한 번으로 충분하다.
 # ---------------------------------------------------------------------------
 
 
 def test_sufficient_answer_advances_and_opinion_is_structured():
+    """용준/Claude(2026-07-21, 요청: 위원 간 실제 회의로 개편) — 헤더는 이제 역할별로 다르다
+    (discussion_headers_for): 기획 위원은 [기획 관점]/[근거]/[제안]/.../[임시 결론]을 쓴다."""
     llm = ScriptedLLM(dev_next_action="await_user_decision")
     state = _start(llm)
-    state = reply_ideation_conversation(previous_state=state, user_message="타깃은 동네 카페 사장님입니다", llm_call=llm)
-    assert state["phase"] == "awaiting_developer_answer"
-    assert state["answer_retry_count"] == 0
-
-    state = reply_ideation_conversation(previous_state=state, user_message="카카오톡 채널 API를 쓰려 합니다", llm_call=llm)
     assert state["phase"] == "awaiting_user_decision"
 
-    planning_opinion = next(m for m in state["messages"] if m["speaker_id"] == "planning_expert" and m["message_type"] == "opinion")
-    for header in ("[판단]", "[근거]", "[제안]", "[확정 사항]", "[미확정 사항]"):
+    planning_opinion = next(
+        m for m in state["messages"] if m["speaker_id"] == "planning_expert" and m["message_type"] == "opinion"
+    )
+    for header in ("[기획 관점]", "[근거]", "[제안]", "[임시 결론]", "[확정 사항]", "[미확정 사항]"):
         assert header in planning_opinion["content"]
 
 
 # ---------------------------------------------------------------------------
-# 14. answer_retry_count가 전역 누적이 아니라 "현재 쟁점"에만 스코프되는지(리뷰 지적 1번)
+# 14. 레거시 인터뷰 경로 보존: answer_retry_count가 전역 누적이 아니라 "현재 쟁점"에만
+#     스코프되는지(리뷰 지적 1번)
 # ---------------------------------------------------------------------------
 
 
@@ -404,7 +537,7 @@ def test_retry_count_is_scoped_to_current_pending_question_not_global():
             {"is_sufficient": False, "reason": "불명확(개발1)", "follow_up_question": "다시 설명해주세요(개발)"},
         ]
     )
-    state = _start(llm)
+    state = _legacy_start_at_awaiting_planning_answer(llm)
 
     state = reply_ideation_conversation(previous_state=state, user_message="모호1", llm_call=llm)
     assert state["phase"] == "awaiting_planning_answer"
@@ -430,7 +563,9 @@ def test_retry_count_is_scoped_to_current_pending_question_not_global():
 # expected_answer_type 플러밍 — 실제 모델의 판정 품질(생활비 절감 답변이 부당하게
 # 재질문당한 문제)은 scripts/run_ideation_sufficiency_scenarios.py(실제 LLM)로 확인한다.
 # 여기서는 stub으로 "질문 노드가 만든 expected_answer_type이 state에 저장되고, sufficiency
-# 프롬프트에 실제로 전달되는지"라는 배선(plumbing)만 결정적으로 검증한다.
+# 프롬프트에 실제로 전달되는지"라는 배선(plumbing)만 결정적으로 검증한다. 이 값은
+# 레거시 인터뷰 질문 노드(planning_question/developer_question)가 만드는 값이므로 아래
+# 테스트들은 모두 레거시 경로를 사용한다.
 # ---------------------------------------------------------------------------
 
 
@@ -465,13 +600,13 @@ def _llm_with_question_expected_answer_type(expected_answer_type):
 
 def test_question_node_stores_expected_answer_type_in_state():
     llm = _llm_with_question_expected_answer_type("preference")
-    state = _start(llm)
+    state = _legacy_start_at_awaiting_planning_answer(llm)
     assert state["pending_expected_answer_type"] == "preference"
 
 
 def test_expected_answer_type_is_forwarded_to_sufficiency_prompt():
     llm = _llm_with_question_expected_answer_type("selection")
-    state = _start(llm)
+    state = _legacy_start_at_awaiting_planning_answer(llm)
     reply_ideation_conversation(previous_state=state, user_message="1번이 더 좋다", llm_call=llm)
 
     assert llm.captured_sufficiency_prompts
@@ -482,7 +617,7 @@ def test_invalid_expected_answer_type_falls_back_to_unknown_in_sufficiency_promp
     """LLM이 허용값 밖의 값(스키마 오류)을 반환해도 질문 생성 자체는 실패시키지 않고,
     sufficiency 프롬프트에는 "미상"으로 전달돼야 한다(요청 사항의 하위 호환 원칙)."""
     llm = _llm_with_question_expected_answer_type("이상한값")
-    state = _start(llm)
+    state = _legacy_start_at_awaiting_planning_answer(llm)
     assert state["pending_expected_answer_type"] is None
 
     reply_ideation_conversation(previous_state=state, user_message="답변", llm_call=llm)
@@ -514,7 +649,7 @@ def test_pending_expected_answer_type_resets_after_advancing_to_next_question():
             )
         raise AssertionError(f"예상하지 못한 프롬프트입니다: {prompt[:200]}")
 
-    state = _start(llm_call)
+    state = _legacy_start_at_awaiting_planning_answer(llm_call)
     assert state["pending_expected_answer_type"] == "preference"
 
     state = reply_ideation_conversation(previous_state=state, user_message="1번이 더 좋다", llm_call=llm_call)
@@ -529,6 +664,8 @@ def test_pending_expected_answer_type_resets_after_advancing_to_next_question():
 # 정확히 동작하는지"(재질문 카운터 미증가, pending_question 유지, 설명 메시지 추가)만
 # 결정적으로 검증한다 — 실제 모델이 이 세 메시지를 clarification_request로 올바르게
 # *분류*하는지는 scripts/run_ideation_sufficiency_scenarios.py(실제 LLM)로 확인한다.
+# 레거시 인터뷰 질문 노드를 통해 pending_question이 세팅된 상태를 전제로 하므로 레거시
+# 경로를 사용한다.
 # ---------------------------------------------------------------------------
 
 
@@ -576,7 +713,7 @@ def test_clarification_request_message_types_are_handled_without_reasking_raw(cl
             ),
         }
     )
-    state = _start(llm)
+    state = _legacy_start_at_awaiting_planning_answer(llm)
     original_pending_question = state["pending_question"]
 
     state = reply_ideation_conversation(previous_state=state, user_message=clarification_message, llm_call=llm)
@@ -622,7 +759,7 @@ def test_clarification_request_then_sufficient_answer_advances_normally():
             return json.dumps(responses.pop(0), ensure_ascii=False)
         raise AssertionError(f"예상하지 못한 프롬프트입니다: {prompt[:200]}")
 
-    state = _start(llm_call)
+    state = _legacy_start_at_awaiting_planning_answer(llm_call)
     state = reply_ideation_conversation(previous_state=state, user_message="가치의 종류가 뭔가요?", llm_call=llm_call)
     assert state["phase"] == "awaiting_planning_answer"
     assert state["answer_retry_count"] == 0
@@ -635,7 +772,7 @@ def test_answer_type_answer_advances_without_retry():
     llm = _llm_with_sufficiency_response(
         {"answer_type": "answer", "reason": "명확히 선택함", "follow_up_question": None, "clarification_response": None}
     )
-    state = _start(llm)
+    state = _legacy_start_at_awaiting_planning_answer(llm)
     state = reply_ideation_conversation(previous_state=state, user_message="생활비 절감이 중요합니다", llm_call=llm)
     assert state["phase"] == "awaiting_developer_answer"
     assert state["answer_retry_count"] == 0
@@ -650,22 +787,25 @@ def test_answer_type_insufficient_answer_triggers_follow_up_and_increments_retry
             "clarification_response": None,
         }
     )
-    state = _start(llm)
-    state = reply_ideation_conversation(previous_state=state, user_message="잘 모르겠습니다", llm_call=llm)
+    state = _legacy_start_at_awaiting_planning_answer(llm)
+    # "잘 모르겠습니다"류 표현은 이제 결정적 규칙으로 expert_delegation으로 먼저 분류되므로
+    # (별도 테스트로 검증한다), 순수한 insufficient_answer 경로를 확인하려면 위임 표현이
+    # 아닌 모호한 답변을 보낸다.
+    state = reply_ideation_conversation(previous_state=state, user_message="그런 것 같기도 하고 아닌 것 같기도 해요", llm_call=llm)
     assert state["phase"] == "awaiting_planning_answer"
     assert state["answer_retry_count"] == 1
     assert "둘 중 무엇을 더 우선하시겠어요?" in state["messages"][-1]["content"]
 
 
 # ---------------------------------------------------------------------------
-# 15. answer_retry_count 필드가 없는 구버전 저장 state를 재개해도 KeyError 없이 동작하는지
-#     (리뷰 지적 2번 — 배포 전에 저장된 세션을 재개하는 상황을 흉내낸다)
+# 15. 레거시 인터뷰 경로 보존: answer_retry_count 필드가 없는 구버전 저장 state를 재개해도
+#     KeyError 없이 동작하는지(리뷰 지적 2번 — 배포 전에 저장된 세션을 재개하는 상황을 흉내낸다)
 # ---------------------------------------------------------------------------
 
 
 def test_reply_works_when_previous_state_missing_answer_retry_count_field():
     llm = ScriptedLLM()
-    state = _start(llm)
+    state = _legacy_start_at_awaiting_planning_answer(llm)
     legacy_state = dict(state)
     del legacy_state["answer_retry_count"]
 
@@ -683,9 +823,10 @@ def test_reply_works_when_previous_state_missing_answer_retry_count_field():
 
 
 def test_question_node_rejects_missing_keys_instead_of_producing_empty_card():
-    """judgment/question 키가 아예 없는 응답 — 빈 카드를 만들지 않고(요청 7번) 재시도 1회
-    후에도 여전히 비어 있으면 phase="failed"로 안전하게 끝난다. 이전 실사용에서 빈 카드가
-    화면에 보였던 문제(요청 7번 배경)를 재현하지 않는지 검증한다."""
+    """레거시 인터뷰 경로(planning_question 노드) 보존 검증 — judgment/question 키가 아예
+    없는 응답은 빈 카드를 만들지 않고(요청 7번) 재시도 1회 후에도 여전히 비어 있으면
+    phase="failed"로 안전하게 끝난다. 이전 실사용에서 빈 카드가 화면에 보였던 문제(요청
+    7번 배경)를 재현하지 않는지 검증한다."""
 
     call_count = {"n": 0}
 
@@ -695,12 +836,7 @@ def test_question_node_rejects_missing_keys_instead_of_producing_empty_card():
             return json.dumps({"referenced_message_ids": [], "evidence": []}, ensure_ascii=False)
         raise AssertionError(f"예상하지 못한 프롬프트: {prompt[:100]}")
 
-    state = start_ideation_conversation(
-        session_id="CONV-TEST-MISSING-KEYS",
-        notice_and_criteria=NOTICE_AND_CRITERIA,
-        user_idea=USER_IDEA,
-        llm_call=llm,
-    )
+    state = _legacy_start_at_awaiting_planning_answer(llm)
     assert state["phase"] == "failed"
     assert state["failed_node"] == "question__planning_expert"
     assert state["messages"] == []  # 빈 content의 메시지가 저장되지 않았다.
@@ -710,24 +846,10 @@ def test_question_node_rejects_missing_keys_instead_of_producing_empty_card():
 
 def test_discussion_node_handles_non_list_confirmed_and_unconfirmed_safely():
     """confirmed/unconfirmed가 배열이 아니라 문자열로 오면(타입 오류) consensus/unresolved_issues가
-    그 문자열의 글자 단위로 쪼개져 오염되면 안 된다."""
+    그 문자열의 글자 단위로 쪼개져 오염되면 안 된다. discussion 노드는 이제 라운드테이블
+    진입 즉시 실행되므로 start() 한 번으로 충분하다."""
 
     def llm(prompt: str) -> str:
-        if "[판정 규칙]" in prompt:
-            return json.dumps({"is_sufficient": True, "reason": "충분", "follow_up_question": None}, ensure_ascii=False)
-        if "[질문 규칙]" in prompt:
-            is_planning = "당신은 AI Review Board의 기획 전문가입니다" in prompt
-            speaker = "planning_expert" if is_planning else "dev_expert"
-            return json.dumps(
-                {
-                    "judgment": "판단",
-                    "question": f"[{speaker}] 질문",
-                    "question_topic": _topic_from_prompt(prompt),
-                    "referenced_message_ids": [],
-                    "evidence": [],
-                },
-                ensure_ascii=False,
-            )
         if "[의견 규칙]" in prompt:
             is_dev = "당신은 AI Review Board의 개발 전문가입니다" in prompt
             return json.dumps(
@@ -736,6 +858,10 @@ def test_discussion_node_handles_non_list_confirmed_and_unconfirmed_safely():
                     "judgment": "판단",
                     "reason": "근거",
                     "suggestion": "제안",
+                    "interim_conclusion": "임시 결론",
+                    "responding_to": "기획 전문가의 방금 판단" if is_dev else None,
+                    "agreement": "범위를 좁히는 방향에 동의" if is_dev else "",
+                    "concern": "",
                     "confirmed": "이것은 배열이 아니라 문자열입니다",
                     "unconfirmed": "이것도 배열이 아니라 문자열입니다",
                     "referenced_message_ids": [],
@@ -744,11 +870,20 @@ def test_discussion_node_handles_non_list_confirmed_and_unconfirmed_safely():
                 },
                 ensure_ascii=False,
             )
+        if "[진행자 정리 규칙]" in prompt:
+            return json.dumps(
+                {
+                    "agreements": [],
+                    "disagreements": [],
+                    "facilitator_summary": "두 전문가가 이번 라운드 의견을 정리했습니다.",
+                    "needs_user_decision": False,
+                    "user_question": None,
+                },
+                ensure_ascii=False,
+            )
         raise AssertionError(f"예상하지 못한 프롬프트: {prompt[:100]}")
 
     state = _start(llm)
-    state = reply_ideation_conversation(previous_state=state, user_message="답변1", llm_call=llm)
-    state = reply_ideation_conversation(previous_state=state, user_message="답변2", llm_call=llm)
 
     assert state["phase"] == "awaiting_user_decision"
     assert state["consensus"] == []
@@ -760,8 +895,9 @@ def test_discussion_node_handles_non_list_confirmed_and_unconfirmed_safely():
 
 
 def test_node_recovers_when_json_is_wrapped_in_explanatory_prose():
-    """코드블록 없이 JSON 앞뒤로 설명문이 붙어 있어도(parse_json_response의 방어적 추출로)
-    질문 노드가 실패 처리되지 않고 정상적으로 질문을 만든다."""
+    """레거시 인터뷰 경로(planning_question 노드) 보존 검증 — 코드블록 없이 JSON 앞뒤로
+    설명문이 붙어 있어도(parse_json_response의 방어적 추출로) 질문 노드가 실패 처리되지
+    않고 정상적으로 질문을 만든다."""
 
     def llm(prompt: str) -> str:
         if "[질문 규칙]" in prompt:
@@ -778,18 +914,16 @@ def test_node_recovers_when_json_is_wrapped_in_explanatory_prose():
             return f"물론이죠! 요청하신 질문은 다음과 같습니다:\n{payload}\n도움이 되었길 바랍니다."
         raise AssertionError(f"예상하지 못한 프롬프트: {prompt[:100]}")
 
-    state = start_ideation_conversation(
-        session_id="CONV-TEST-PROSE-JSON",
-        notice_and_criteria=NOTICE_AND_CRITERIA,
-        user_idea=USER_IDEA,
-        llm_call=llm,
-    )
+    state = _legacy_start_at_awaiting_planning_answer(llm)
     assert state["phase"] == "awaiting_planning_answer"
     assert state["failed_node"] is None
     assert "핵심 질문" in state["messages"][0]["content"]
 
 
 def test_empty_llm_response_falls_back_to_failed_phase():
+    """새 기본 진입점(planning_expert_discussion)이 빈 응답을 받아도 안전하게
+    phase="failed"로 끝나는지 확인한다."""
+
     def llm(prompt: str) -> str:
         return ""
 
@@ -800,14 +934,15 @@ def test_empty_llm_response_falls_back_to_failed_phase():
         llm_call=llm,
     )
     assert state["phase"] == "failed"
-    assert state["failed_node"] == "question__planning_expert"
+    assert state["failed_node"] == "discussion__planning_expert"
 
 
 def test_sufficiency_call_failure_fails_open_and_conversation_still_progresses():
-    """sufficiency 판정 호출 자체가 파싱 실패하면(인프라 문제) 회의를 막지 않고 충분함으로
-    간주해 정상 진행한다(요청: 판정 호출 실패가 핵심 콘텐츠 생성 실패처럼 전체를 막지 않아야 함)."""
+    """레거시 인터뷰 경로 보존 검증 — sufficiency 판정 호출 자체가 파싱 실패하면(인프라
+    문제) 회의를 막지 않고 충분함으로 간주해 정상 진행한다(요청: 판정 호출 실패가 핵심
+    콘텐츠 생성 실패처럼 전체를 막지 않아야 함)."""
     llm = ScriptedLLM(broken_for={"sufficiency"})
-    state = _start(llm)
+    state = _legacy_start_at_awaiting_planning_answer(llm)
     state = reply_ideation_conversation(previous_state=state, user_message="타깃은 동네 카페 사장님입니다", llm_call=llm)
 
     assert state["phase"] == "awaiting_developer_answer"
@@ -817,48 +952,22 @@ def test_sufficiency_call_failure_fails_open_and_conversation_still_progresses()
 
 def test_discussion_node_rejects_blank_judgment_instead_of_producing_empty_card():
     """judgment/reason이 빈 문자열인 의견 응답 — 빈 카드를 만들지 않고 재시도 후에도
-    여전히 비어 있으면 phase="failed"로 끝난다(요청 7번 배경의 재현 방지)."""
+    여전히 비어 있으면 phase="failed"로 끝난다(요청 7번 배경의 재현 방지). 기획 위원이
+    라운드테이블의 첫 발언자이므로 start() 한 번으로 재현된다(개발 위원은 호출되지 않는다)."""
 
     def llm(prompt: str) -> str:
-        if "[판정 규칙]" in prompt:
-            return json.dumps({"is_sufficient": True, "reason": "충분", "follow_up_question": None}, ensure_ascii=False)
-        if "[질문 규칙]" in prompt:
-            is_planning = "당신은 AI Review Board의 기획 전문가입니다" in prompt
-            speaker = "planning_expert" if is_planning else "dev_expert"
-            return json.dumps(
-                {
-                    "judgment": "판단",
-                    "question": f"[{speaker}] 질문",
-                    "question_topic": _topic_from_prompt(prompt),
-                    "referenced_message_ids": [],
-                    "evidence": [],
-                },
-                ensure_ascii=False,
-            )
         if "[의견 규칙]" in prompt:
             is_planning = "당신은 AI Review Board의 기획 전문가입니다" in prompt
             if is_planning:
                 # 기획 전문가 응답만 의도적으로 비운다.
-                return json.dumps({"stance": "보완", "judgment": "", "reason": "   ", "referenced_message_ids": [], "evidence": []}, ensure_ascii=False)
-            return json.dumps(
-                {
-                    "stance": "보완",
-                    "judgment": "판단",
-                    "reason": "근거",
-                    "suggestion": "제안",
-                    "confirmed": [],
-                    "unconfirmed": [],
-                    "referenced_message_ids": [],
-                    "evidence": [],
-                    "next_action": "await_user_decision",
-                },
-                ensure_ascii=False,
-            )
+                return json.dumps(
+                    {"stance": "보완", "judgment": "", "reason": "   ", "referenced_message_ids": [], "evidence": []},
+                    ensure_ascii=False,
+                )
+            raise AssertionError("기획 전문가 응답이 비어 있으면 개발 전문가는 호출되면 안 된다")
         raise AssertionError(f"예상하지 못한 프롬프트: {prompt[:100]}")
 
     state = _start(llm)
-    state = reply_ideation_conversation(previous_state=state, user_message="답변1", llm_call=llm)
-    state = reply_ideation_conversation(previous_state=state, user_message="답변2", llm_call=llm)
 
     assert state["phase"] == "failed"
     assert state["failed_node"] == "discussion__planning_expert"
@@ -892,8 +1001,6 @@ _SYNTHESIS_13_FIELDS = [
 def test_idea_proposal_preserves_all_13_required_fields_verbatim():
     llm = ScriptedLLM(dev_next_action="await_user_decision")
     state = _start(llm)
-    state = reply_ideation_conversation(previous_state=state, user_message="답변1", llm_call=llm)
-    state = reply_ideation_conversation(previous_state=state, user_message="답변2", llm_call=llm)
     state = finalize_ideation_conversation(previous_state=state, llm_call=llm)
 
     assert state["phase"] == "finalized"
@@ -905,6 +1012,857 @@ def test_idea_proposal_preserves_all_13_required_fields_verbatim():
     assert proposal["idea_name"] == "동네 가게 챗봇"
     assert proposal["expert_final_opinions"] == {"planning_expert": "적합", "dev_expert": "구현 가능"}
     assert proposal["risks_and_mitigations"] == [{"risk": "오답 응대", "mitigation": "FAQ 범위 밖 질문은 사람에게 이관"}]
+
+
+# ---------------------------------------------------------------------------
+# 용준/Claude(2026-07-21, 요청: "모르겠다" UX 개선) — 사용자가 전문가 질문에 "모르겠다"류
+# 표현으로 답했을 때 같은 질문을 반복하지 않고, 담당 전문가가 자신의 평가 범위 안에서
+# 임시 가정을 제안한 뒤 다음 단계로 진행하는지 검증한다. 이 위임 흐름은 여전히
+# awaiting_planning_answer/awaiting_developer_answer(레거시 인터뷰 phase)에서만 동작하므로
+# (PHASE_TO_PENDING_PERSONA), 아래 테스트들은 모두 레거시 경로로 시작한다.
+# ---------------------------------------------------------------------------
+
+
+def test_expert_delegation_on_planning_question_produces_proposal_and_advances():
+    """시나리오 1 — 기획 위원 질문 -> "잘 모르겠어": 같은 질문을 반복하지 않고, 기획
+    전문가의 제안 메시지가 생성되며, 개발 위원 질문으로 진행되는지."""
+    llm = ScriptedLLM(dev_next_action="await_user_decision")
+    state = _legacy_start_at_awaiting_planning_answer(llm)
+    assert state["phase"] == "awaiting_planning_answer"
+    original_question_content = state["messages"][-1]["content"]
+
+    state = reply_ideation_conversation(previous_state=state, user_message="잘 모르겠어", llm_call=llm)
+
+    assert state["phase"] == "awaiting_developer_answer"
+    assert state["answer_retry_count"] == 0
+    # 용준/Claude(2026-07-21, 요청: expert_delegation도 위원 간 상호 검토로 확장) — 단일
+    # 위원 제안으로 끝나지 않고 [사용자 답, 담당(기획) 제안, 반대(개발) 검토, 진행자 권고안,
+    # 다음 질문(개발)] 순서로 이어진다. stance="보완"(REVISION_TRIGGER_STANCES 밖)이라
+    # planning_expert의 수정 턴은 끼지 않는다.
+    speakers_and_types = [(m["speaker_id"], m["message_type"]) for m in state["messages"]]
+    assert speakers_and_types[-5:] == [
+        ("user", "answer"),
+        ("planning_expert", "opinion"),
+        ("dev_expert", "opinion"),
+        ("ideation_facilitator", "summary"),
+        ("dev_expert", "question"),
+    ]
+    proposal_message = next(
+        m for m in state["messages"] if m["speaker_id"] == "planning_expert" and m["message_type"] == "opinion"
+    )
+    assert "[기획 전문가 제안]" in proposal_message["content"]
+    assert "[제안 이유]" in proposal_message["content"]
+    assert "[임시 가정]" in proposal_message["content"]
+    assert "다른 방향을 제시하면" in proposal_message["content"]
+    review_message = next(
+        m for m in state["messages"] if m["speaker_id"] == "dev_expert" and m["message_type"] == "opinion"
+    )
+    assert "[검토]" in review_message["content"]
+    assert "[검토 결론]" in review_message["content"]
+    facilitator_message = next(m for m in state["messages"] if m["speaker_id"] == "ideation_facilitator")
+    assert facilitator_message["content"].startswith("이 방향으로 진행하겠습니다.")
+    assert facilitator_message["message_type"] == "summary"
+    # 결정적 규칙으로 먼저 감지되어 sufficiency(LLM) 판정 호출 자체를 건너뛰었다.
+    assert not [p for p in llm.captured_prompts if "[판정 규칙]" in p]
+    # 동일한 기획 질문이 그대로 반복되지 않고 새 질문(개발 전문가)이 생성됐다.
+    assert state["messages"][-1]["content"] != original_question_content
+    assert any("불명확하여 다음 가정으로 진행합니다" not in issue for issue in state["unresolved_issues"])
+
+
+def test_expert_delegation_on_developer_question_produces_mvp_proposal_and_advances():
+    """시나리오 2 — 개발 위원 질문 -> "어떤 기술이 좋은지 모르겠어요": 개발 위원이 MVP
+    기술 방향을 제안하고, 같은 질문을 반복하지 않고 다음 단계(두 전문가 의견)로 진행되는지.
+    이 표현은 결정적 규칙("어떤 ~이 좋은지 모르겠")으로 바로 잡히므로 sufficiency LLM
+    호출 자체가 생략된다."""
+    llm = ScriptedLLM(dev_next_action="await_user_decision")
+    state = _legacy_start_at_awaiting_planning_answer(llm)
+    state = reply_ideation_conversation(previous_state=state, user_message="답변1", llm_call=llm)
+    assert state["phase"] == "awaiting_developer_answer"
+    original_question_content = state["messages"][-1]["content"]
+    # "답변1"(기획 질문에 대한 정상 답변)은 그 자체로 한 번의 sufficiency 판정을 거친다 —
+    # 이번 검증 대상은 "두 번째" 답변(개발 질문에 대한 위임 표현)이 sufficiency LLM을
+    # 새로 호출하지 않는지이므로, 이 시점 이후의 호출 수만 비교한다.
+    sufficiency_calls_before = len([p for p in llm.captured_prompts if "[판정 규칙]" in p])
+
+    state = reply_ideation_conversation(previous_state=state, user_message="어떤 기술이 좋은지 모르겠어요", llm_call=llm)
+
+    sufficiency_calls_after = len([p for p in llm.captured_prompts if "[판정 규칙]" in p])
+    assert sufficiency_calls_after == sufficiency_calls_before
+    assert state["phase"] == "awaiting_user_decision"
+    assert state["answer_retry_count"] == 0
+    dev_delegation_messages = [
+        m for m in state["messages"] if m["speaker_id"] == "dev_expert" and m["message_type"] == "opinion"
+    ]
+    assert dev_delegation_messages
+    assert "[개발 전문가 제안]" in dev_delegation_messages[0]["content"]
+    assert state["messages"][-2]["content"] != original_question_content or state["messages"][-1]["content"] != original_question_content
+
+
+def test_delegation_phrase_not_deterministically_matched_falls_back_to_llm_classification():
+    """개발 위원 질문에서, 결정적 규칙으로는 잡히지 않는 위임 표현이 LLM
+    판정(answer_type="expert_delegation")을 거쳐서도 정상적으로 위임 처리되는지 검증한다
+    (결정적 규칙 우선 + LLM 판정 fallback 두 경로가 모두 동작함을 별도로 증명). 첫 번째
+    답변("답변1")은 정상적인 answer로 처리되어야 하므로, sufficiency_queue 첫 항목을
+    answer로 채워 둔다(큐는 호출 순서대로 소비된다)."""
+    llm = ScriptedLLM(
+        dev_next_action="await_user_decision",
+        sufficiency_queue=[
+            {"answer_type": "answer", "reason": "충분", "follow_up_question": None, "clarification_response": None},
+            {"answer_type": "expert_delegation"},
+        ],
+    )
+    state = _legacy_start_at_awaiting_planning_answer(llm)
+    state = reply_ideation_conversation(previous_state=state, user_message="답변1", llm_call=llm)
+    assert state["phase"] == "awaiting_developer_answer"
+
+    # 결정적 규칙에 걸리지 않는 문장(길이 제한 초과 + 정형화되지 않은 표현)이지만 실제
+    # 의미는 위임이다 — LLM 판정이 잡아야 한다.
+    long_delegation_text = "이 부분은 제가 기술을 잘 몰라서 어떻게 접근해야 할지 잘 판단이 서지 않네요"
+    state = reply_ideation_conversation(previous_state=state, user_message=long_delegation_text, llm_call=llm)
+
+    assert llm.sufficiency_queue == []  # 두 항목 모두 소비됐다.
+    sufficiency_prompts = [p for p in llm.captured_prompts if "[판정 규칙]" in p]
+    assert sufficiency_prompts  # 이번에는 LLM 판정 호출이 실제로 일어났다.
+    assert state["phase"] == "awaiting_user_decision"
+    assert state["answer_retry_count"] == 0
+    assert any(
+        m["speaker_id"] == "dev_expert" and m["message_type"] == "opinion" and "[개발 전문가 제안]" in m["content"]
+        for m in state["messages"]
+    )
+
+
+def test_mvp_meaning_question_is_clarification_request_not_expert_delegation():
+    """시나리오 3 — "MVP가 무슨 뜻인지 모르겠어요"는 전문가 위임이 아니라 기존
+    clarification_request로 처리되어 원래 질문을 유지해야 한다."""
+    llm = ScriptedLLM(
+        sufficiency_queue=[
+            {
+                "answer_type": "clarification_request",
+                "reason": "용어 설명 요청",
+                "follow_up_question": None,
+                "clarification_response": "MVP는 최소 기능 제품을 뜻합니다. 다시 핵심 질문을 여쭤봅니다: 우선순위가 무엇인가요?",
+            }
+        ]
+    )
+    state = _legacy_start_at_awaiting_planning_answer(llm)
+    original_pending_question = state["pending_question"]
+
+    state = reply_ideation_conversation(previous_state=state, user_message="MVP가 무슨 뜻인지 모르겠어요", llm_call=llm)
+
+    assert state["phase"] == "awaiting_planning_answer"  # 같은 질문을 여전히 기다린다.
+    assert state["pending_question"] == original_pending_question
+    assert state["answer_retry_count"] == 0
+    assert "[설명]" in state["messages"][-1]["content"]
+    # sufficiency LLM은 실제로 호출됐다(결정적 규칙이 용어 질문 표지를 보고 위임으로 보지
+    # 않았으므로 정상적으로 LLM 판정으로 넘어갔다) — 위임 제안 프롬프트는 호출되지 않았다.
+    assert not [p for p in llm.captured_prompts if "[제안 규칙]" in p]
+
+
+def test_explicit_expert_recommendation_request_triggers_delegation():
+    """시나리오 4 — "잘 모르겠으니 전문가가 추천해줘"는 expert_delegation으로 처리된다."""
+    llm = ScriptedLLM(dev_next_action="await_user_decision")
+    state = _legacy_start_at_awaiting_planning_answer(llm)
+
+    state = reply_ideation_conversation(
+        previous_state=state, user_message="잘 모르겠으니 전문가가 추천해줘", llm_call=llm
+    )
+
+    assert state["phase"] == "awaiting_developer_answer"
+    assert any(
+        m["speaker_id"] == "planning_expert" and m["message_type"] == "opinion" and "[기획 전문가 제안]" in m["content"]
+        for m in state["messages"]
+    )
+
+
+def test_meaningless_answer_still_treated_as_insufficient_answer():
+    """시나리오 5 — 의미 없는 답변("그냥")은 기존 insufficient_answer 재질문 로직을
+    그대로 유지해야 한다(전문가 위임으로 오판하지 않는다)."""
+    llm = ScriptedLLM(
+        sufficiency_queue=[
+            {"answer_type": "insufficient_answer", "reason": "질문과 무관한 답변입니다", "follow_up_question": "다시 여쭤봅니다 — 핵심 사용자가 누구인가요?"}
+        ]
+    )
+    state = _legacy_start_at_awaiting_planning_answer(llm)
+
+    state = reply_ideation_conversation(previous_state=state, user_message="그냥", llm_call=llm)
+
+    assert state["phase"] == "awaiting_planning_answer"
+    assert state["answer_retry_count"] == 1
+    assert "다시 여쭤봅니다 — 핵심 사용자가 누구인가요?" in state["messages"][-1]["content"]
+    assert not [p for p in llm.captured_prompts if "[제안 규칙]" in p]
+
+
+def test_expert_delegation_content_is_visible_to_next_question_and_synthesis_prompts():
+    """시나리오 7 — 전문가가 제안한 내용을 이후 질문 프롬프트(conversation_context)와
+    최종 종합(synthesis) 프롬프트가 참조할 수 있는지 확인한다."""
+    llm = ScriptedLLM(dev_next_action="await_user_decision")
+    state = _legacy_start_at_awaiting_planning_answer(llm)
+    state = reply_ideation_conversation(previous_state=state, user_message="잘 모르겠어", llm_call=llm)
+    assert state["phase"] == "awaiting_developer_answer"
+
+    dev_question_prompts = [p for p in llm.captured_prompts if "[질문 규칙]" in p and "개발 전문가입니다" in p]
+    assert dev_question_prompts
+    # ScriptedLLM의 "[제안 규칙]" 스텁이 만든 proposal 문자열 자체를 그대로 찾는다(요청
+    # 8번 — conversation_context의 recent_messages를 통해 이후 질문 프롬프트가 전문가
+    # 제안 내용을 실제로 볼 수 있어야 한다).
+    assert "[planning_expert] 임시 제안 내용입니다" in dev_question_prompts[-1]
+
+    state = reply_ideation_conversation(previous_state=state, user_message="카카오톡 채널 API를 쓰려 합니다", llm_call=llm)
+    assert state["phase"] == "awaiting_user_decision"
+    state = finalize_ideation_conversation(previous_state=state, llm_call=llm)
+    assert state["phase"] == "finalized"
+
+    synthesis_prompts = [p for p in llm.captured_prompts if '"idea_name"' in p]
+    assert synthesis_prompts
+    assert "[planning_expert] 임시 제안 내용입니다" in synthesis_prompts[-1]
+
+
+def test_expert_delegation_generation_failure_falls_back_to_failed_phase():
+    """제안 생성 자체가 구조화 검증에 실패하면(재시도 후에도 무효) 다른 콘텐츠 생성 노드와
+    동일하게 phase="failed"로 끝나야 한다(빈 카드를 만들지 않는다는 코드베이스 전체 정책)."""
+    llm = ScriptedLLM(broken_for={"expert_delegation"})
+    state = _legacy_start_at_awaiting_planning_answer(llm)
+
+    state = reply_ideation_conversation(previous_state=state, user_message="잘 모르겠어", llm_call=llm)
+
+    assert state["phase"] == "failed"
+    assert state["failed_node"] == "expert_delegation__planning_expert"
+
+
+# ---------------------------------------------------------------------------
+# 18. 위원 간 실제 회의로 개편(요청 2026-07-21): 상호참조 / 조건부 수정 / 진행자 정리 /
+#     종료 조건 / discussion_rounds 보존. 라운드테이블 전환 이후에는 사용자 답변을 기다릴
+#     필요 없이 start() 한 번으로 라운드 하나(또는 max_rounds까지 여러 라운드)가 자동으로
+#     완료된다.
+# ---------------------------------------------------------------------------
+
+
+class _DebateScriptedLLM:
+    """review 단계(dev_expert)의 stance를 자유롭게 지정할 수 있는 stub — 실제 개발 위원의
+    검토가 기획 위원의 발언을 구체적으로 인용하는지, stance에 따라
+    planning_expert_revision이 켜지고 꺼지는지 검증하기 위함이다."""
+
+    def __init__(self, dev_stance="보완", dev_next_action="await_user_decision", revision_concern="개발 관점 우려"):
+        self.captured_prompts: list[str] = []
+        self.dev_stance = dev_stance
+        self.dev_next_action = dev_next_action
+        self.revision_concern = revision_concern
+
+    def __call__(self, prompt: str) -> str:
+        self.captured_prompts.append(prompt)
+        is_planning = "당신은 AI Review Board의 기획 전문가입니다" in prompt
+
+        if "[판정 규칙]" in prompt:
+            return json.dumps({"is_sufficient": True, "reason": "충분", "follow_up_question": None}, ensure_ascii=False)
+
+        if "[질문 규칙]" in prompt:
+            speaker = "planning_expert" if is_planning else "dev_expert"
+            return json.dumps(
+                {
+                    "judgment": f"[{speaker}] 판단",
+                    "question": f"[{speaker}] 질문",
+                    "question_topic": _topic_from_prompt(prompt),
+                    "referenced_message_ids": [],
+                    "evidence": [],
+                },
+                ensure_ascii=False,
+            )
+
+        if "[의견 규칙]" in prompt:
+            is_dev = "당신은 AI Review Board의 개발 전문가입니다" in prompt
+            if "[discussion_stage]\nrevision" in prompt:
+                # planning_expert_revision — dev의 concern에 구체적으로 응답한다.
+                return json.dumps(
+                    {
+                        "stance": "조건부_동의",
+                        "judgment": "기획 전문가가 개발 전문가의 우려를 반영해 범위를 조정합니다",
+                        "reason": "MVP 범위를 좁히면 남은 라운드 안에 검증할 수 있습니다",
+                        "suggestion": "핵심 기능 하나만 우선 구현합니다",
+                        "interim_conclusion": "MVP 범위를 문서 요약 하나로 좁히는 방향으로 정리합니다",
+                        "responding_to": self.revision_concern,
+                        "agreement": "MVP 범위를 좁혀야 한다는 지적에 동의합니다",
+                        "concern": "",
+                        "revision": f"'{self.revision_concern}'을 반영해 범위를 자동화 전체에서 문서 요약 하나로 좁혔습니다",
+                        "confirmed": [],
+                        "unconfirmed": [],
+                        "referenced_message_ids": [],
+                        "evidence": [],
+                        "next_action": None,
+                    },
+                    ensure_ascii=False,
+                )
+            if is_dev:
+                # review — 방금 나온 기획 전문가의 최초 의견을 구체적으로 검토한다.
+                return json.dumps(
+                    {
+                        "stance": self.dev_stance,
+                        "judgment": "기획 방향에는 동의하지만 범위가 큽니다",
+                        "reason": "업무 자동화 전체를 MVP에 넣으면 남은 라운드 안에 검증하기 어렵습니다",
+                        "suggestion": "문서 요약과 학습 추천부터 검증하는 편이 현실적입니다",
+                        "interim_conclusion": "문서 요약부터 검증하는 방향으로 잠정 결론짓습니다",
+                        "responding_to": self.revision_concern,
+                        "agreement": "문제 정의 자체에는 동의합니다",
+                        "concern": self.revision_concern,
+                        "confirmed": [],
+                        "unconfirmed": [],
+                        "referenced_message_ids": [],
+                        "evidence": [],
+                        "next_action": self.dev_next_action,
+                    },
+                    ensure_ascii=False,
+                )
+            # initial_position — planning_expert의 최초 의견.
+            return json.dumps(
+                {
+                    "stance": "보완",
+                    "judgment": "두 후보를 결합하면 업무 자동화 과정의 부족한 역량을 학습으로 연결하는 서비스가 됩니다",
+                    "reason": "사용자 답변에서 반복 업무 부담이 확인됐습니다",
+                    "suggestion": "업무 자동화 전체를 MVP 범위로 제안합니다",
+                    "interim_conclusion": "업무 자동화 전체를 MVP 범위로 잠정 제안합니다",
+                    "responding_to": None,
+                    "agreement": "",
+                    "concern": "",
+                    "confirmed": [],
+                    "unconfirmed": [],
+                    "referenced_message_ids": [],
+                    "evidence": [],
+                    "next_action": None,
+                },
+                ensure_ascii=False,
+            )
+
+        if "[진행자 정리 규칙]" in prompt:
+            return json.dumps(
+                {
+                    "agreements": ["문서 업무 분석에서 시작한다"],
+                    "disagreements": [],
+                    "facilitator_summary": "기획 위원과 개발 위원이 문서 업무 분석부터 시작하는 방향에 합의했습니다.",
+                    "needs_user_decision": False,
+                    "user_question": None,
+                },
+                ensure_ascii=False,
+            )
+
+        raise AssertionError(f"예상하지 못한 프롬프트입니다: {prompt[:200]}")
+
+
+def _run_to_discussion(llm, max_rounds=3, evidence_lookup=None):
+    """용준/Claude(2026-07-21, 요청: 전문가 라운드테이블 전환) 이후에는 start() 한 번만으로
+    라운드테이블(안건 제시 -> 기획 최초 의견 -> 개발 검토 -> [선택적 수정] -> 진행자 정리,
+    필요하면 다음 라운드까지)이 끝까지 실행된다 — 과거에는 이 지점에 도달하려고 두 번의
+    reply(질문 답변)가 필요했지만 이제는 필요 없다."""
+    return start_ideation_conversation(
+        session_id="CONV-TEST",
+        notice_and_criteria=NOTICE_AND_CRITERIA,
+        user_idea=USER_IDEA,
+        llm_call=llm,
+        max_rounds=max_rounds,
+        evidence_lookup=evidence_lookup,
+    )
+
+
+def test_dev_review_prompt_actually_contains_planning_expert_real_statement():
+    """개발 위원의 검토 프롬프트(conversation_context)에 기획 위원이 방금 실제로 한 발언이
+    포함되는지 확인한다 — 독립적인 일반론이 아니라 실제 상호참조임을 검증한다."""
+    llm = _DebateScriptedLLM(dev_stance="보완")
+    _run_to_discussion(llm)
+
+    review_prompts = [
+        p for p in llm.captured_prompts if "[의견 규칙]" in p and "당신은 AI Review Board의 개발 전문가입니다" in p
+    ]
+    assert review_prompts
+    assert "업무 자동화 전체를 MVP 범위로 제안합니다" in review_prompts[-1]
+
+
+def test_planning_revision_runs_when_dev_stance_needs_response_and_references_concern():
+    """dev의 stance가 REVISION_TRIGGER_STANCES(반박/조건부_동의/대안_제시)에 속하면
+    planning_expert_revision이 실행되고, 그 발언이 dev의 구체적 concern을 실제로
+    반영한다."""
+    llm = _DebateScriptedLLM(dev_stance="반박", revision_concern="MVP 범위가 너무 큽니다")
+    state = _run_to_discussion(llm)
+
+    speakers = [m["speaker_id"] for m in state["messages"]]
+    # planning(최초) -> dev(검토) -> planning(수정) -> facilitator(정리) 순서.
+    assert speakers[-4:] == ["planning_expert", "dev_expert", "planning_expert", "ideation_facilitator"]
+
+    revision_message = state["messages"][-2]
+    assert revision_message["speaker_id"] == "planning_expert"
+    assert "MVP 범위가 너무 큽니다" in revision_message["content"]
+    assert "[수정 내용]" in revision_message["content"]
+
+    assert state["discussion_rounds"], "discussion_rounds가 비어 있으면 안 된다"
+    record = state["discussion_rounds"][-1]
+    assert record["revised_proposal"] is not None
+    assert "MVP 범위가 너무 큽니다" in record["revised_proposal"]
+
+
+def test_planning_revision_skipped_when_dev_simply_agrees():
+    """dev의 stance가 "동의"/"보완"이면(원래 제안을 바꿀 만한 반론이 아니면)
+    planning_expert_revision이 실행되지 않아야 한다(요청 6번: 필요할 때만 수정 1회,
+    비용 절감)."""
+    llm = _DebateScriptedLLM(dev_stance="동의")
+    state = _run_to_discussion(llm)
+
+    speakers = [m["speaker_id"] for m in state["messages"]]
+    assert speakers[-3:] == ["planning_expert", "dev_expert", "ideation_facilitator"]
+    revision_prompts = [p for p in llm.captured_prompts if "[discussion_stage]\nrevision" in p]
+    assert not revision_prompts, "동의 stance에서는 revision LLM 호출 자체가 없어야 한다"
+
+
+def test_facilitator_message_always_present_and_summarizes_not_repeats():
+    """진행자 정리 메시지가 항상 마지막에 생성되고, 두 위원의 문장을 그대로 복사하지 않은
+    별도의 요약 텍스트임을 확인한다(요청 5번)."""
+    llm = _DebateScriptedLLM(dev_stance="보완")
+    state = _run_to_discussion(llm)
+
+    facilitator_messages = [m for m in state["messages"] if m["speaker_id"] == "ideation_facilitator"]
+    assert facilitator_messages
+    summary = facilitator_messages[-1]
+    assert summary["message_type"] == "summary"
+    assert "문서 업무 분석" in summary["content"]
+    # 기획/개발 위원의 원문 그대로가 아니라 진행자 고유의 요약 문장이어야 한다.
+    assert "두 후보를 결합하면 업무 자동화" not in summary["content"]
+
+    # 용준/Claude(2026-07-21, 요청: 전문가 라운드테이블 전환) — 진행자 메시지 형식이
+    # "[다음 질문]"에서 "[합의 사항]"으로 바뀌었다.
+    assert state["discussion_rounds"][-1]["facilitator_summary"] == summary["content"].split("\n\n[합의 사항]")[0]
+
+
+def test_facilitator_does_not_change_phase_decided_by_dev_review():
+    """discussion_facilitator는 dev_expert_discussion(review)이 이미 정한 phase(next_action)를
+    바꾸지 않는다 — continue_round면 같은 요청 안에서 곧바로 다음 라운드 discussion으로
+    자동 이어지는지(1:1 인터뷰 질문으로 돌아가지 않는지) 확인한다. dev_next_action이 항상
+    "continue_round"이므로 max_rounds(3)에 도달할 때까지 자동으로 라운드가 이어지다가
+    강제로 멈춰야 한다."""
+    llm = _DebateScriptedLLM(dev_stance="보완", dev_next_action="continue_round")
+    state = _run_to_discussion(llm, max_rounds=3)
+
+    assert state["phase"] == "awaiting_user_decision"
+    assert state["round"] == 3
+    assert len(state["discussion_rounds"]) == 3
+    assert not any(m["message_type"] == "question" for m in state["messages"])
+    facilitator_indices = [i for i, m in enumerate(state["messages"]) if m["speaker_id"] == "ideation_facilitator"]
+    # 오프닝 안건 제시 메시지(1) + 라운드별 정리(3) = 4.
+    assert len(facilitator_indices) == 4
+
+
+def test_dev_review_references_planning_message_id():
+    """요청 4번 — 상호참조는 코드가 결정한다. dev의 review 메시지 structured에 담긴
+    responding_to_message_id가 실제 planning_expert 최초 의견 메시지의 message_id와
+    정확히 일치해야 한다(LLM이 만든 값이 아니라 코드가 계산한 값)."""
+    llm = _DebateScriptedLLM(dev_stance="보완")
+    state = _run_to_discussion(llm)
+
+    planning_message = next(m for m in state["messages"] if m["speaker_id"] == "planning_expert")
+    dev_message = next(m for m in state["messages"] if m["speaker_id"] == "dev_expert")
+
+    assert dev_message["structured"]["responding_to_message_id"] == planning_message["message_id"]
+    assert dev_message["structured"]["responding_to_speaker_id"] == "planning_expert"
+    assert planning_message["message_id"] in dev_message["referenced_message_ids"]
+
+
+def test_message_ids_unique_after_multi_round_auto_chain():
+    """회귀 방지(중복 메시지 진단 1번) — 여러 라운드가 한 번의 그래프 실행 안에서 자동으로
+    이어져도(continue_round) state["messages"]의 message_id가 전부 고유해야 한다."""
+    llm = _DebateScriptedLLM(dev_stance="보완", dev_next_action="continue_round")
+    state = _run_to_discussion(llm, max_rounds=3)
+
+    ids = [m["message_id"] for m in state["messages"]]
+    assert len(ids) == len(set(ids)), f"중복된 message_id가 있습니다: {ids}"
+
+
+def test_facilitator_is_sole_source_of_user_questions():
+    """요청 5~6번 — pending_question은 진행자가 needs_user_decision=True로 실제 질문을
+    던졌을 때만 설정된다. 여기서는 dev_next_action="await_user_decision"이지만
+    facilitator 응답이 needs_user_decision=False이므로(고정 stub) pending_question이
+    None이어야 한다."""
+    llm = _DebateScriptedLLM(dev_stance="보완", dev_next_action="await_user_decision")
+    state = _run_to_discussion(llm, max_rounds=3)
+
+    assert state["phase"] == "awaiting_user_decision"
+    assert state.get("pending_question") is None
+    assert state.get("pending_question_topic") is None
+
+
+class _NeedsDecisionScriptedLLM(_DebateScriptedLLM):
+    """진행자가 실제로 사용자에게 질문하는 경우(needs_user_decision=True)를 재현한다."""
+
+    def __call__(self, prompt: str) -> str:
+        if "[진행자 정리 규칙]" in prompt:
+            return json.dumps(
+                {
+                    "agreements": [],
+                    "disagreements": ["MVP 범위를 어디까지 좁힐지"],
+                    "facilitator_summary": "MVP 범위에 대해 두 위원의 의견이 갈립니다.",
+                    "needs_user_decision": True,
+                    "user_question": "MVP를 문서 요약만으로 시작할까요, 업무 자동화까지 포함할까요?",
+                },
+                ensure_ascii=False,
+            )
+        return super().__call__(prompt)
+
+
+def test_facilitator_sets_pending_question_when_needs_user_decision():
+    llm = _NeedsDecisionScriptedLLM(dev_stance="보완", dev_next_action="await_user_decision")
+    state = _run_to_discussion(llm, max_rounds=3)
+
+    assert state["phase"] == "awaiting_user_decision"
+    assert state["pending_question"] == "MVP를 문서 요약만으로 시작할까요, 업무 자동화까지 포함할까요?"
+    assert state["pending_question_topic"] == "facilitator_decision"
+    assert "[사용자 의견이 필요한 사항]" in state["messages"][-1]["content"]
+
+
+def test_user_answer_to_facilitator_question_is_answer_type():
+    """진행자가 실제로 물었을 때 사용자가 답하면 message_type이 "answer"여야 한다."""
+    llm = _NeedsDecisionScriptedLLM(dev_stance="보완", dev_next_action="await_user_decision")
+    state = _run_to_discussion(llm, max_rounds=3)
+
+    state = reply_ideation_conversation(
+        previous_state=state, user_message="문서 요약만으로 시작할게요.", llm_call=llm
+    )
+    user_messages = [m for m in state["messages"] if m["speaker_id"] == "user"]
+    assert user_messages[-1]["message_type"] == "answer"
+
+
+def test_user_interjection_without_pending_question_is_recorded_and_referenced():
+    """요청 6번 — 진행자가 needs_user_decision=False였는데 사용자가 자유롭게 한 마디
+    남기면 message_type="interjection"으로 기록되고, 다음 라운드에서 기획/개발 위원 중
+    하나 이상이 그 메시지를 referenced_message_ids에 포함해야 한다."""
+    llm = _DebateScriptedLLM(dev_stance="보완", dev_next_action="await_user_decision")
+    state = _run_to_discussion(llm, max_rounds=3)
+    assert state.get("pending_question") is None  # 진행자가 실제로 묻지 않았다.
+
+    interjection_text = "학습 범위가 너무 좁은 것 같아. 대학생도 포함하고 싶어."
+    state = reply_ideation_conversation(previous_state=state, user_message=interjection_text, llm_call=llm)
+
+    user_messages = [m for m in state["messages"] if m["speaker_id"] == "user"]
+    interjection_message = next(m for m in user_messages if m["content"] == interjection_text)
+    assert interjection_message["message_type"] == "interjection"
+
+    # continue_round 라운드에서 두 위원이 이 메시지를 상호참조 대상으로 볼 수 있어야 한다
+    # (initial_position은 messages 마지막 메시지를 항상 responding_to로 삼는다 — 여기서는
+    # 방금 넣은 사용자 개입 메시지).
+    later_messages = state["messages"][state["messages"].index(interjection_message) + 1 :]
+    expert_messages = [m for m in later_messages if m["speaker_id"] in ("planning_expert", "dev_expert")]
+    assert expert_messages
+    assert any(interjection_message["message_id"] in m["referenced_message_ids"] for m in expert_messages)
+
+
+def test_no_direct_questions_to_user_from_experts_across_rounds():
+    """요청 4번 — 기획/개발 위원은 기본 라운드테이블 경로에서 절대 message_type="question"을
+    만들지 않는다(사용자에게 직접 묻지 않는다). 여러 라운드가 자동으로 이어져도 마찬가지다."""
+    llm = _DebateScriptedLLM(dev_stance="보완", dev_next_action="continue_round")
+    state = _run_to_discussion(llm, max_rounds=3)
+
+    expert_messages = [m for m in state["messages"] if m["speaker_id"] in ("planning_expert", "dev_expert")]
+    assert expert_messages
+    assert not any(m["message_type"] == "question" for m in expert_messages)
+
+
+# ---------------------------------------------------------------------------
+# 19. RAG 근거 공유 검증(요청 2026-07-21 후속): 기획/개발이 같은 공모전 분석을 역할에 맞게
+#     따로 검색하는지, 상대 발언에 실린 근거를 서로 볼 수 있는지, 근거가 없을 때 지어내지
+#     않는지. 라운드테이블 전환 이후에는 start() 한 번으로 두 위원이 모두 실행된다.
+# ---------------------------------------------------------------------------
+
+
+def _role_tagged_evidence_lookup(calls: list[tuple[str, str]]):
+    """persona_id별로 서로 다른 quote를 반환하는 가짜 evidence_lookup — 호출 인자(persona_id,
+    query)를 calls 리스트에 기록해, 각 페르소나가 실제로 "자신의 role로" 별도 검색을
+    호출했는지 검증할 수 있게 한다."""
+
+    def lookup(persona_id: str, query: str):
+        calls.append((persona_id, query))
+        return [
+            {
+                "document_id": f"DOC-{persona_id}",
+                "document_name": f"공고문({persona_id} 검색)",
+                "chunk_id": "C1",
+                "page": 1,
+                "section": None,
+                "quote": f"[{persona_id}용 근거 원문] 평가 기준 발췌",
+                "relevance": None,
+            }
+        ]
+
+    return lookup
+
+
+class _RagAwareScriptedLLM(_DebateScriptedLLM):
+    """_DebateScriptedLLM을 상속해 discussion 노드 응답에 retrieved_evidence를 그대로
+    반영한 evidence를 담아 반환한다 — conversation_context에 실려 다음 페르소나 프롬프트로
+    전달되는지 확인하기 위함이다."""
+
+    def __call__(self, prompt: str) -> str:
+        raw_text = super().__call__(prompt)
+        if "[의견 규칙]" in prompt and "[discussion_stage]\ninitial_position" in prompt:
+            # planning_expert의 최초 의견에 실제로 검색된 근거(quote)를 그대로 인용해 반환한다.
+            payload = json.loads(raw_text)
+            payload["evidence"] = [
+                {
+                    "document_id": "DOC-planning_expert",
+                    "document_name": "공고문(planning_expert 검색)",
+                    "chunk_id": "C1",
+                    "page": 1,
+                    "section": None,
+                    "quote": "[planning_expert용 근거 원문] 평가 기준 발췌",
+                    "relevance": "문제 정의 근거",
+                }
+            ]
+            return json.dumps(payload, ensure_ascii=False)
+        return raw_text
+
+
+def test_dev_expert_receives_own_role_specific_rag_retrieval():
+    """기획/개발이 각자 자신의 persona_id로 evidence_lookup을 별도 호출하는지(공유된 같은
+    공모전 분석을 역할에 맞게 각자 검색) 확인한다."""
+    calls: list[tuple[str, str]] = []
+    lookup = _role_tagged_evidence_lookup(calls)
+    llm = _DebateScriptedLLM(dev_stance="보완")
+
+    start_ideation_conversation(
+        session_id="CONV-RAG-1",
+        notice_and_criteria=NOTICE_AND_CRITERIA,
+        user_idea=USER_IDEA,
+        llm_call=llm,
+        evidence_lookup=lookup,
+    )
+
+    personas_called = {persona_id for persona_id, _query in calls}
+    assert "planning_expert" in personas_called
+    assert "dev_expert" in personas_called, "개발 위원도 자신의 role로 RAG 검색을 별도로 호출해야 한다"
+
+
+def test_dev_review_prompt_can_see_planning_evidence_via_conversation_context():
+    """기획 위원이 실제로 인용한 RAG 근거(quote)가, 개발 위원의 검토 프롬프트
+    conversation_context(상대 발언 전체)에 그대로 실려 전달되는지 확인한다 — 개발 위원이
+    "상대 발언"과 "자신의 RAG 근거"를 구분할 수 있으려면 상대 발언에 실린 근거가 먼저
+    프롬프트에 도달해야 한다."""
+    calls: list[tuple[str, str]] = []
+    lookup = _role_tagged_evidence_lookup(calls)
+    llm = _RagAwareScriptedLLM(dev_stance="보완")
+
+    start_ideation_conversation(
+        session_id="CONV-RAG-2",
+        notice_and_criteria=NOTICE_AND_CRITERIA,
+        user_idea=USER_IDEA,
+        llm_call=llm,
+        evidence_lookup=lookup,
+    )
+
+    dev_review_prompts = [
+        p for p in llm.captured_prompts if "[의견 규칙]" in p and "[discussion_stage]\nreview" in p
+    ]
+    assert dev_review_prompts
+    dev_prompt = dev_review_prompts[-1]
+    # 상대(planning_expert)가 인용한 근거 원문이 개발 위원 프롬프트의 대화 맥락 섹션에
+    # 실제로 도달했다.
+    assert "[planning_expert용 근거 원문]" in dev_prompt
+    # 자신의(dev_expert) RAG 검색 결과는 별도의 [검색 근거 retrieved_evidence] 섹션에 있다
+    # — 두 출처가 서로 다른 섹션으로 구분돼 있어야 "상대 발언"과 "자신의 근거"를 혼동하지
+    # 않는다.
+    # "[대화 맥락 conversation_context]"라는 문구는 [경계]/[입력] 설명 섹션에도 나오므로,
+    # 실제 데이터가 주입되는 지점(구분선 아래)부터만 잘라낸다.
+    injected = dev_prompt.split("이하 실행 시 주입되는 컨텍스트")[1]
+    context_section = injected.split("[대화 맥락 conversation_context]")[1].split("[speaks_second]")[0]
+    evidence_section = injected.split("[검색 근거 retrieved_evidence]")[1].split("[대화 맥락")[0]
+    assert "[planning_expert용 근거 원문]" in context_section
+    assert "[dev_expert용 근거 원문]" in evidence_section
+    assert "[dev_expert용 근거 원문]" not in context_section  # 자신의 새 검색 결과가 상대 발언 섹션에 섞이지 않는다.
+
+
+def test_facilitator_and_discussion_prompts_instruct_against_fabricating_evidence():
+    """진행자·전문가 프롬프트가 "근거 없는 사실을 지어내지 않는다"를 명시적으로 지시하는지
+    확인한다(모델이 실제로 그 지시를 따르는지는 실제 LLM 평가 영역이라 이 테스트의 범위
+    밖이다 — 여기서는 그 지시 자체가 프롬프트에 존재하는지만 구조적으로 검증한다)."""
+    from prompts import build_ideation_conv_discussion_facilitator_prompt
+
+    facilitator_prompt = build_ideation_conv_discussion_facilitator_prompt(
+        NOTICE_AND_CRITERIA, {"judgment": "j"}, {"judgment": "j2"}, None, [], [], "await_user_decision", 1, 3
+    )
+    assert "근거 없는 사실" in facilitator_prompt and "만들어내지" in facilitator_prompt
+
+    discussion_prompt_path = MEETING_DIR / "prompts" / "ideation_conv_discussion.txt"
+    assert "근거 없는 사실" in discussion_prompt_path.read_text(encoding="utf-8")
+
+
+def test_no_evidence_available_produces_empty_evidence_section_without_crashing():
+    """evidence_lookup이 없을 때(RAG 미사용) retrieved_evidence 섹션이 빈 배열로 표시되고,
+    질문/의견 생성 자체는 정상적으로 완료되는지 확인한다(요청: "RAG가 없을 때 일반적인
+    전문가 판단임을 구분") — 프롬프트에도 "근거가 없으면 지어내지 않는다"는 지시가
+    포함돼야 한다."""
+    llm = _DebateScriptedLLM(dev_stance="보완")
+    state = start_ideation_conversation(
+        session_id="CONV-RAG-3",
+        notice_and_criteria=NOTICE_AND_CRITERIA,
+        user_idea=USER_IDEA,
+        llm_call=llm,
+        evidence_lookup=None,  # RAG 미사용.
+    )
+    assert state["phase"] == "awaiting_user_decision"
+    planning_prompt = next(
+        p for p in llm.captured_prompts if "[의견 규칙]" in p and "당신은 AI Review Board의 기획 전문가입니다" in p
+    )
+    assert "[검색 근거 retrieved_evidence]\n[]" in planning_prompt
+    assert "지어내지" in planning_prompt
+
+
+# ---------------------------------------------------------------------------
+# 20. expert_delegation 위원 간 상호 검토 확장(요청 2026-07-21 후속) — 반박이면 수정 턴이
+#     실행되고, 단순 동의면 생략되며, 어느 경우든 진행자 최종 권고안으로 끝나는지. 위임
+#     흐름은 여전히 레거시 인터뷰 phase(PHASE_TO_PENDING_PERSONA)에서만 동작하므로, 레거시
+#     경로로 시작한다.
+# ---------------------------------------------------------------------------
+
+
+def _delegation_scripted_llm(review_stance: str):
+    """expert_delegation 전용 스텁 — 개발 질문에서 위임하면 planning_expert가 검토자다.
+    review_stance로 검토 stance를 통제해 REVISION_TRIGGER_STANCES 게이팅을 검증한다."""
+
+    def llm_call(prompt: str) -> str:
+        is_planning = "당신은 AI Review Board의 기획 전문가입니다" in prompt
+        is_dev = "당신은 AI Review Board의 개발 전문가입니다" in prompt
+        speaker = "planning_expert" if is_planning else "dev_expert"
+
+        if "[질문 규칙]" in prompt:
+            return json.dumps(
+                {
+                    "judgment": f"[{speaker}] 판단",
+                    "question": f"[{speaker}] 질문",
+                    "question_topic": _topic_from_prompt(prompt),
+                    "referenced_message_ids": [],
+                    "evidence": [],
+                },
+                ensure_ascii=False,
+            )
+        if "[판정 규칙]" in prompt:
+            return json.dumps(
+                {"answer_type": "answer", "reason": "충분", "follow_up_question": None, "clarification_response": None},
+                ensure_ascii=False,
+            )
+        if "[제안 규칙]" in prompt:
+            is_revision_stage = "[stage]\nrevision" in prompt
+            return json.dumps(
+                {
+                    "proposal": f"[{speaker}] 제안",
+                    "reason": f"[{speaker}] 이유",
+                    "assumption": f"[{speaker}] 가정",
+                    "responding_to": "구현 범위가 너무 넓습니다" if is_revision_stage else None,
+                    "revision": f"[{speaker}] '구현 범위가 너무 넓습니다'를 반영해 범위를 조정" if is_revision_stage else None,
+                    "referenced_message_ids": [],
+                    "evidence": [],
+                },
+                ensure_ascii=False,
+            )
+        if "[위임 검토 규칙]" in prompt:
+            return json.dumps(
+                {
+                    "stance": review_stance,
+                    "judgment": f"[{speaker}] 검토 판단",
+                    "reason": f"[{speaker}] 검토 근거",
+                    "responding_to": "상대의 임시 제안 내용",
+                    "agreement": "제안 방향에는 동의" if review_stance != "반박" else "",
+                    "concern": "구현 범위가 너무 넓습니다" if review_stance == "반박" else "",
+                    "recommendation": f"[{speaker}] 검토 결론",
+                    "referenced_message_ids": [],
+                    "evidence": [],
+                },
+                ensure_ascii=False,
+            )
+        if "[위임 정리 규칙]" in prompt:
+            return json.dumps(
+                {"agreements": [], "considerations": [], "final_recommendation": "위임 최종 권고안입니다."},
+                ensure_ascii=False,
+            )
+        if "[의견 규칙]" in prompt:
+            # 위임이 developer_question에서 일어나면 apply_user_answer가 곧바로
+            # expert_discussion으로 넘어가 같은 요청 안에서 실제 회의(기획/개발 보완 의견)까지
+            # 이어진다 — 이 테스트들은 위임 흐름 자체만 검증하므로 discussion 응답은 항상
+            # "보완"으로 단순하게 고정한다.
+            is_review_stage = "[discussion_stage]\nreview" in prompt
+            return json.dumps(
+                {
+                    "stance": "보완",
+                    "judgment": f"[{speaker}] 판단",
+                    "reason": f"[{speaker}] 근거",
+                    "suggestion": f"[{speaker}] 제안",
+                    "interim_conclusion": f"[{speaker}] 임시 결론",
+                    "responding_to": "상대 발언" if is_review_stage else None,
+                    "agreement": "동의 지점" if is_review_stage else "",
+                    "concern": "",
+                    "confirmed": [],
+                    "unconfirmed": [],
+                    "referenced_message_ids": [],
+                    "evidence": [],
+                    "next_action": "await_user_decision" if is_review_stage else None,
+                },
+                ensure_ascii=False,
+            )
+        if "[진행자 정리 규칙]" in prompt:
+            return json.dumps(
+                {
+                    "agreements": [],
+                    "disagreements": [],
+                    "facilitator_summary": "라운드 정리",
+                    "needs_user_decision": False,
+                    "user_question": None,
+                },
+                ensure_ascii=False,
+            )
+        raise AssertionError(f"예상하지 못한 프롬프트: {prompt[:150]}")
+
+    return llm_call
+
+
+def test_delegation_revision_runs_when_counterpart_review_disagrees():
+    """개발 질문에서 위임 -> 기획 위원(반대 역할)의 검토가 "반박"이면
+    planning_expert_revision과 동등한 수정 턴(같은 expert_delegation 스키마, stage="revision")
+    이 실행되고, 그 발언이 검토의 구체적 우려를 반영하는지 확인한다."""
+    llm = _delegation_scripted_llm(review_stance="반박")
+    state = _legacy_start_at_awaiting_planning_answer(llm)
+    state = reply_ideation_conversation(previous_state=state, user_message="답변1", llm_call=llm)
+    assert state["phase"] == "awaiting_developer_answer"
+
+    state = reply_ideation_conversation(previous_state=state, user_message="잘 모르겠어요", llm_call=llm)
+
+    dev_messages = [m for m in state["messages"] if m["speaker_id"] == "dev_expert" and "[개발 전문가 제안]" in m["content"]]
+    assert len(dev_messages) == 2, "제안(1회) + 검토를 반영한 수정(1회) = 2건이어야 한다"
+    revision_message = dev_messages[-1]
+    assert "구현 범위가 너무 넓습니다" in revision_message["content"]
+    assert "[수정 내용]" in revision_message["content"]
+    facilitator_message = next(m for m in state["messages"] if m["speaker_id"] == "ideation_facilitator")
+    assert facilitator_message["content"].startswith("위임 최종 권고안입니다.")
+
+
+def test_delegation_revision_skipped_when_counterpart_review_simply_agrees():
+    """검토가 "동의"면(REVISION_TRIGGER_STANCES 밖) 수정 턴 없이 곧바로 진행자 권고안으로
+    끝나야 한다(비용 절감)."""
+    llm = _delegation_scripted_llm(review_stance="동의")
+    state = _legacy_start_at_awaiting_planning_answer(llm)
+    state = reply_ideation_conversation(previous_state=state, user_message="답변1", llm_call=llm)
+    state = reply_ideation_conversation(previous_state=state, user_message="잘 모르겠어요", llm_call=llm)
+
+    dev_messages = [m for m in state["messages"] if m["speaker_id"] == "dev_expert" and "[개발 전문가 제안]" in m["content"]]
+    assert len(dev_messages) == 1, "동의면 제안(1회)만 있고 수정 턴이 추가되면 안 된다"
+    facilitator_message = next(m for m in state["messages"] if m["speaker_id"] == "ideation_facilitator")
+    assert facilitator_message["content"].startswith("위임 최종 권고안입니다.")
+
+
+def test_delegation_never_re_asks_the_same_question_to_user():
+    """요청: "다시 사용자에게 같은 질문을 넘기면 안 됩니다" — 위임 흐름이 끝난 뒤에도
+    다음 단계로 실제로 진행되고(질문이 반복되지 않고), 진행자 메시지 어디에도 사용자에게
+    되묻는 물음표 형태의 원래 질문 반복이 남지 않는지 확인한다."""
+    llm = _delegation_scripted_llm(review_stance="조건부_동의")
+    state = _legacy_start_at_awaiting_planning_answer(llm)
+    original_question = state["pending_question"]
+    state = reply_ideation_conversation(previous_state=state, user_message="잘 모르겠어요", llm_call=llm)
+
+    assert state["phase"] == "awaiting_developer_answer"  # 같은 기획 질문에 머물지 않고 진행됐다.
+    assert state["pending_question"] != original_question
+    facilitator_message = next(m for m in state["messages"] if m["speaker_id"] == "ideation_facilitator")
+    # 진행자 최종 권고안 스키마 자체에 재질문 필드가 없으므로, 원래 질문 문자열이 그대로
+    # 반복될 수 없다.
+    assert original_question not in facilitator_message["content"]
 
 
 if __name__ == "__main__":
