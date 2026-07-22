@@ -57,6 +57,24 @@ def sample_pptx(fixtures_dir: Path) -> Path:
 
 
 @pytest.fixture
+def sample_hwpx(fixtures_dir: Path) -> Path:
+    """테스트용 HWPX 파일 경로"""
+    return fixtures_dir / "sample.hwpx"
+
+
+@pytest.fixture
+def empty_hwpx(fixtures_dir: Path) -> Path:
+    """빈 HWPX 파일 경로 (섹션은 있지만 텍스트 없음)"""
+    return fixtures_dir / "empty.hwpx"
+
+
+@pytest.fixture
+def corrupted_hwpx(fixtures_dir: Path) -> Path:
+    """손상된 HWPX 파일 경로"""
+    return fixtures_dir / "corrupted.hwpx"
+
+
+@pytest.fixture
 def sample_jpeg(fixtures_dir: Path) -> Path:
     """테스트용 JPEG 파일 경로 (공고 포스터 이미지 지원 테스트용)"""
     return fixtures_dir / "sample_poster.jpg"

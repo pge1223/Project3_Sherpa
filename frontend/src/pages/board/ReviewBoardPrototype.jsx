@@ -20,6 +20,11 @@ import { analyzeProject, getAnalyzeProgress, getMentorCandidates } from "../../a
 import { isAcceptedDocument, formatFileSize, ACCEPTED_DOCUMENT_EXTENSIONS } from "../../utils/file";
 import { assessCriteriaContent } from "../../utils/criteriaAssessment";
 import WorkbenchScreen from "./WorkbenchScreen";
+// 경이/Claude(2026-07-22): "AI 피드백" 다음 "완성 리포트" 단계 — 경이가 설계한 버전 추적형
+// 리포트(VersionTrackerTestPage, 애니메이션/버전추적/프로필 토글/이전·현재 비교 포함)를
+// 흐름 안에 embedded 모드로 끼워 넣는다. 이 파일(가은님 소유)의 변경은 워크벤치와 같은
+// 방식으로 라벨/흐름/렌더 3곳만 최소화했다.
+import VersionTrackerTestPage from "../VersionTrackerTestPage";
 import { IdeationScreen, IdeationResultScreen } from "./IdeationConversationScreen";
 
 // 가은/Claude(2026-07-20, INF-007): fetch-url이 색인을 백그라운드로 넘기면서
@@ -49,6 +54,7 @@ const STAGE_LABELS = {
   // WorkbenchScreen.jsx(신규 파일)에 분리해서, 이 파일(가은님 소유)의 변경은
   // 이 라벨/흐름 추가 정도로 최소화했다.
   workbench: "AI 피드백",
+  report: "완성 리포트",
 };
 
 const FLOW_BY_MODE = {
@@ -57,7 +63,7 @@ const FLOW_BY_MODE = {
   // 화면 없이 바로 기획서 업로드·분석으로 간다. 공모전 분석은 주제를 정하기 전(작성 전)
   // 에나 필요한 단계라서다. entry에서 등록한 공고문(criteria)은 화면만 안 거칠 뿐,
   // 색인은 그대로 되어 피드백 때 심사기준 근거로 쓰인다.
-  post: ["entry", "upload", "workbench"],
+  post: ["entry", "upload", "workbench", "report"],
 };
 
 // 가은/Claude(2026-07-21): "작성 전" 흐름에서 확정한 아이디어 프로젝트를 표시하는 마커.
@@ -1288,6 +1294,7 @@ export default function ReviewBoardPrototype() {
         <UploadAndAnalyzeScreen projectId={projectId} onFeedbackReady={handleFeedbackReady} onBack={goPrev} initialDocuments={targetDocuments} />
       )}
       {stage === "workbench" && <WorkbenchScreen projectId={projectId} />}
+      {stage === "report" && <VersionTrackerTestPage embedded />}
     </Shell>
   );
 }
