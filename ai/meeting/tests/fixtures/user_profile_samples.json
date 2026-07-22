@@ -1,0 +1,52 @@
+{
+  "_meta": {
+    "note": "작성자: 경이. 개인 맞춤형 피드백 루프(버전 추적형 User RAG)의 사용자 프로필 계약. 마이페이지(가은 폼)에서 제출하고 윤한 users.profile로 저장돼 personalization.classify_impl_difficulty()가 그대로 소비한다(중간 매핑 없음). GitHub 값은 api.github.com 공개 조회로 얻는 것만 사용(공개저장소 수/팔로워/총 스타/주요 언어). degree는 영문 enum(bachelor/master/phd/other)으로 통일 — 한글 라벨은 프론트 표시용, 저장은 enum. 담당: 폼=가은, 저장=윤한, 소비=경이.",
+    "schema_version": "0.2.0-draft"
+  },
+  "profiles": [
+    {
+      "profile_id": "sample-nonmajor",
+      "display_label": "비전공자",
+      "education": {
+        "is_technical_major": false,
+        "field": "경영학",
+        "degree": "bachelor",
+        "graduation_status": "graduated"
+      },
+      "experience": {
+        "internship_months": 0,
+        "competition_count": 0,
+        "award_count": 0
+      },
+      "github": {
+        "connected": true,
+        "public_repos": 3,
+        "followers": 5,
+        "total_stars": 0,
+        "primary_languages": ["HTML", "CSS"]
+      }
+    },
+    {
+      "profile_id": "sample-major",
+      "display_label": "컴퓨터공학 전공자",
+      "education": {
+        "is_technical_major": true,
+        "field": "컴퓨터공학",
+        "degree": "bachelor",
+        "graduation_status": "graduated"
+      },
+      "experience": {
+        "internship_months": 6,
+        "competition_count": 1,
+        "award_count": 1
+      },
+      "github": {
+        "connected": true,
+        "public_repos": 24,
+        "followers": 120,
+        "total_stars": 340,
+        "primary_languages": ["Python", "TypeScript"]
+      }
+    }
+  ]
+}

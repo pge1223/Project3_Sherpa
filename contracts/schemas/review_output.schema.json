@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://review-board.local/contracts/review_output.schema.json",
   "title": "AI Review Board Output",
-  "$comment": "v2.2.0 (팀 승인·적용, 가은/경이 확인). v2.1.0에서 chair_summary/top_revisions를 top-level required에서 빼고 nullable로 완화 — 위원장 종합을 backend가 리뷰+채점 이후 백그라운드로 늦게 돌릴 수 있게 되면서, 그 사이엔 null인 문서(status=synthesizing)가 정상 상태가 됐다(document_id/title이 이미 nullable인 것과 같은 패턴). 선택 필드 완화라 하위 호환. v2.1.0에서 선택 필드 similar_success_cases(RAG-006 유사사례, reference_only) 추가 + schema_version enum화(하위호환). 개정 배경: review_output.v2.1.proposal.md. v2.0.0 배경: review_output.v2.proposal.md",
+  "$comment": "v2.3.0 (재인/Claude 제안, 2026-07-21 — 사용자 확인 하에 진행, 경이님 확인 필요). reviewerResult에 선택 필드 unscored_criteria 추가 — 위원이 근거 부족으로 평가하지 못한 rubric 항목을 지금까지는 transform.py가 조용히 버려서(rubric_scores에서 그냥 빠짐), 워크벤치 화면에서 그 항목이 왜 없는지 사용자가 전혀 알 수 없었다. 위원이 직접 insufficient_evidence/not_applicable로 판단한 경우와, 위원은 판단(judgment)을 냈지만 RAG 근거충족도 게이트가 숫자 점수 반영을 막은 경우(이땐 원래 판단값도 함께 보존)를 담는다 — GPT가 항목 자체를 아예 언급하지 않은 경우(리뷰어 쪽 별도 이슈)는 여기 포함하지 않아, 두 경우를 구분할 수 있게 한다. 선택 필드 추가라 하위 호환. v2.2.0에서 chair_summary/top_revisions를 top-level required에서 빼고 nullable로 완화 — 위원장 종합을 backend가 리뷰+채점 이후 백그라운드로 늦게 돌릴 수 있게 되면서, 그 사이엔 null인 문서(status=synthesizing)가 정상 상태가 됐다(document_id/title이 이미 nullable인 것과 같은 패턴). 선택 필드 완화라 하위 호환. v2.1.0에서 선택 필드 similar_success_cases(RAG-006 유사사례, reference_only) 추가 + schema_version enum화(하위호환). 개정 배경: review_output.v2.1.proposal.md. v2.0.0 배경: review_output.v2.proposal.md",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -18,7 +18,7 @@
     "media_script"
   ],
   "properties": {
-    "schema_version": { "type": "string", "enum": ["2.0.0", "2.1.0", "2.2.0"] },
+    "schema_version": { "type": "string", "enum": ["2.0.0", "2.1.0", "2.2.0", "2.3.0"] },
     "meta": { "$ref": "#/$defs/meta" },
     "meeting_id": { "type": "string", "minLength": 1 },
     "project_id": { "type": "string", "minLength": 1 },
@@ -93,7 +93,29 @@
         "rubric_scores": { "type": "array", "items": { "$ref": "#/$defs/rubricScore" } },
         "confidence": { "type": "string", "enum": ["low", "medium", "high"] },
         "cross_reviews": { "type": "array", "items": { "$ref": "#/$defs/crossReview" } },
-        "out_of_scope": { "type": "array", "items": { "$ref": "#/$defs/outOfScope" } }
+        "out_of_scope": { "type": "array", "items": { "$ref": "#/$defs/outOfScope" } },
+        "unscored_criteria": { "type": "array", "items": { "$ref": "#/$defs/unscoredCriterion" } }
+      }
+    },
+    "unscoredCriterion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["criterion_id", "criterion_name", "reason"],
+      "properties": {
+        "criterion_id": { "type": "string" },
+        "criterion_name": { "type": "string" },
+        "reason": {
+          "type": "string",
+          "enum": ["insufficient_evidence", "not_applicable", "evidence_gate_blocked"],
+          "$comment": "insufficient_evidence/not_applicable: 위원이 직접 그렇게 판단(reviewer_prompt.txt judgment). evidence_gate_blocked: 위원은 실제 judgment(attempted_judgment 참고)를 냈으나 RAG 근거충족도 게이트가 숫자 점수 반영을 막음."
+        },
+        "attempted_judgment": {
+          "type": ["string", "null"],
+          "enum": ["strong", "acceptable", "needs_improvement", "critical_risk", null],
+          "$comment": "reason=evidence_gate_blocked일 때만 채움 - 위원이 실제로 낸 판단(rubricScore.judgment와 동일 값 집합)."
+        },
+        "strengths": { "type": "array", "items": { "type": "string" } },
+        "weaknesses": { "type": "array", "items": { "type": "string" } }
       }
     },
     "rubricScore": {

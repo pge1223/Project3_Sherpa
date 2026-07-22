@@ -27,11 +27,19 @@ class Settings(BaseSettings):
     # analyze_project()/reevaluate_reviewer()가 실제 OpenAI를 부르게 되면서 호출마다 비용이
     # 발생한다. LLM_PROFILE=dev(기본값, 저렴한 모델)로 두면 실수로 눌러도 싸게 끝나고,
     # 진짜 품질 확인이 필요할 때만 quality로 바꾸도록 두 세트를 분리했다.
+    # 가은/Claude(2026-07-21): premium 단계 추가 — dev(개발·파싱·JSON 형식 테스트) /
+    # quality(일반 사용자 피드백·MVP 데모, 기본으로 쓰는 실사용 품질) / premium(정말
+    # 중요한 최종 시연·심층 회의만, gpt-5-nano처럼 느리지만 추론 품질이 높은 모델).
+    # dev에 gpt-5-nano(추론 모델)를 넣으면 호출당 30~60초+ 걸려 일반 사용 흐름(주제
+    # 아이디어 회의 등)이 느려지므로, 그런 무거운 모델은 premium에만 두고 quality는
+    # 항상 빠른 비-추론 모델(gpt-4o-mini)로 유지한다.
     LLM_PROFILE: str = "dev"
     DEV_LLM_REVIEWER_MODEL: str = "gpt-4o-mini"
     DEV_LLM_CHAIR_MODEL: str = "gpt-4o-mini"
     QUALITY_LLM_REVIEWER_MODEL: str = "gpt-4o-mini"
     QUALITY_LLM_CHAIR_MODEL: str = "gpt-4o-mini"
+    PREMIUM_LLM_REVIEWER_MODEL: str = "gpt-4o-mini"
+    PREMIUM_LLM_CHAIR_MODEL: str = "gpt-4o-mini"
 
     # NCP
     NCP_ACCESS_KEY: str = ""
@@ -76,6 +84,26 @@ class Settings(BaseSettings):
         env_file = str(_ENV_FILE)
         env_file_encoding = "utf-8"
         extra = "ignore"
+
+    # 가은/Claude(2026-07-21): dev/quality/premium 3단계를 한 곳에서만 분기 — 이전엔
+    # documents.py/meetings.py(3곳)/ideation_conversation_preview.py 각자
+    # `"quality" if profile == "quality" else DEV_...` 식으로 흩어져 있어서 premium을
+    # 추가하려면 매번 4곳을 고쳐야 했다.
+    def reviewer_model(self) -> str:
+        profile = (self.LLM_PROFILE or "dev").lower()
+        if profile == "premium":
+            return self.PREMIUM_LLM_REVIEWER_MODEL
+        if profile == "quality":
+            return self.QUALITY_LLM_REVIEWER_MODEL
+        return self.DEV_LLM_REVIEWER_MODEL
+
+    def chair_model(self) -> str:
+        profile = (self.LLM_PROFILE or "dev").lower()
+        if profile == "premium":
+            return self.PREMIUM_LLM_CHAIR_MODEL
+        if profile == "quality":
+            return self.QUALITY_LLM_CHAIR_MODEL
+        return self.DEV_LLM_CHAIR_MODEL
 
 
 settings = Settings()

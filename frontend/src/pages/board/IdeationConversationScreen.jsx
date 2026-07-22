@@ -602,7 +602,15 @@ export function IdeationScreen({
             ← 이전
           </button>
         )}
-        <h2 style={{ fontSize: 20, fontWeight: 700, marginBottom: 10 }}>기획 위원 · 개발 위원과 함께 좁혀가는 중</h2>
+        {ideationConv?.competition_name ? (
+          <>
+            <div style={{ fontSize: 12, color: 'var(--text-2)', fontFamily: 'var(--mono)', marginBottom: 4 }}>공모전 주제</div>
+            <h2 style={{ fontSize: 20, fontWeight: 700, marginBottom: 4 }}>{ideationConv.competition_name}</h2>
+            <div style={{ fontSize: 13, color: 'var(--text-2)', marginBottom: 10 }}>기획 위원 · 개발 위원과 함께 좁혀가는 중</div>
+          </>
+        ) : (
+          <h2 style={{ fontSize: 20, fontWeight: 700, marginBottom: 10 }}>기획 위원 · 개발 위원과 함께 좁혀가는 중</h2>
+        )}
         <div style={{ display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
           {ideationConv && (
             <span className="badge amber mono">

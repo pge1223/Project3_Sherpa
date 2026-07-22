@@ -55,6 +55,7 @@ def raw_reviewer_to_v2(
     raw: dict[str, Any],
     evidence_pool: EvidencePool,
     criterion_evidence: dict[str, dict] | None = None,
+    expected_criterion_ids: set[str] | None = None,
 ) -> dict[str, Any]:
     """reviewer_prompt.txt 출력(raw) 한 건을 review_output.schema.json v2의 reviewerResult로 변환한다.
 
@@ -62,19 +63,63 @@ def raw_reviewer_to_v2(
     sufficiency}로: ①최종 sufficiency.allow_numeric_score=False인 항목은 미채점 처리하고(누락
     경로로 흘려보냄), ②근거(evidence_ids)는 위원 자기보고 대신 linked_evidence_refs로 발급한다.
     None이면(레거시) 위원 자기보고 evidence_refs를 그대로 등록한다.
+
+    재인/Claude(2026-07-21, 사용자 확인 하에 진행 — review_output.schema.json v2.3.0):
+    지금까지는 위 두 경로(judgment가 insufficient_evidence/not_applicable이거나, RAG 게이트가
+    막은 경우) 모두 그냥 continue로 조용히 버려서, "이 항목이 왜 없는지"가 어디에도 안 남았다
+    (워크벤치 화면에서 실측 확인 — 사용자가 항목이 통째로 사라진 이유를 알 방법이 없었음).
+    이제 unscored_criteria에 그 이유를 남긴다 - GPT가 review_items에 그 criterion_id 자체를
+    아예 안 넣은 경우(위원 응답 누락, 별도 이슈)는 raw에 없으니 애초에 이 루프를 안 거쳐서
+    unscored_criteria에도 안 남는다 - 그래서 "위원이 시도는 했지만 못 채점" vs "위원이 그
+    항목을 아예 언급 안 함"을 rubric.criteria와 대조하면 구분할 수 있다(후자는 rubric_scores에도
+    unscored_criteria에도 없는 criterion_id).
+
+    재인/Claude(2026-07-21, 실측 확인 — 사용자 확인 하에 진행): rubric 전체가 위원 프롬프트에
+    그대로 노출되다 보니, 위원이 자기 담당(primary_persona_id) 아닌 기준까지 "어차피 보이니까"
+    같이 의견을 내는 경우가 실제로 있었다. 그 기준은 RAG가애초에 이 (persona,criterion)
+    조합으로 근거를 준비한 적이 없어서 evidence_gate_blocked로 항상 막히는데, 이건 "문서에
+    근거가 부족하다"는 의미 있는 신호가 아니라 그냥 "담당 아닌 위원이 낸 의견이 정상적으로
+    무시된 것"뿐이다 - 화면에는 소음으로 보인다(실측: 위원 4명 중 3명이 자기 담당 1개 외
+    3개씩 더 "평가되지 않음"으로 뜸). expected_criterion_ids(reviewer.py의 my_ctx 기반, 이
+    위원이 실제로 맡은 범위)가 주어지면 그 범위 밖의 항목은 unscored_criteria에 남기지
+    않는다(점수 매기기는 시도하지 않으므로 rubric_scores에도 안 들어감 - 애초에 이 위원의
+    몫이 아닌 항목이니 조용히 버리는 게 맞다). None이면(레거시 등 범위를 모르는 경우) 기존처럼
+    전부 기록한다.
     """
     review_items = raw.get("review_items", [])
     rubric_scores = []
+    unscored_criteria = []
     for item in review_items:
         cid = item["criterion_id"]
         judgment = item["judgment"]
+        in_scope = expected_criterion_ids is None or cid in expected_criterion_ids
+
         if judgment in _UNSCORABLE_JUDGMENTS:
+            if in_scope:
+                unscored_criteria.append(
+                    {
+                        "criterion_id": cid,
+                        "criterion_name": item["criterion_name"],
+                        "reason": judgment,
+                    }
+                )
             continue
 
         if criterion_evidence is not None:
             ce = criterion_evidence.get(cid)
             # 게이팅: 최종 근거충족도가 숫자 점수를 허용하지 않으면 미채점(그 (persona,criterion)만 제외)
             if ce is None or not ce.get("sufficiency", {}).get("allow_numeric_score", False):
+                if in_scope:
+                    unscored_criteria.append(
+                        {
+                            "criterion_id": cid,
+                            "criterion_name": item["criterion_name"],
+                            "reason": "evidence_gate_blocked",
+                            "attempted_judgment": _JUDGMENT_MAP[judgment],
+                            "strengths": item.get("strengths", []),
+                            "weaknesses": item.get("weaknesses", []),
+                        }
+                    )
                 continue
             linked_refs = ce.get("linked_evidence_refs", [])
             evidence_ids = [evidence_pool.register_linked(r) for r in linked_refs]
@@ -110,6 +155,8 @@ def raw_reviewer_to_v2(
         "rubric_scores": rubric_scores,
         "confidence": _overall_confidence(review_items),
     }
+    if unscored_criteria:
+        result["unscored_criteria"] = unscored_criteria
 
     cross_reviews = [
         {

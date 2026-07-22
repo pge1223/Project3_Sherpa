@@ -1,7 +1,25 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { getProjects, deleteProject } from '../api/projectApi'
+import { getProjects, deleteProject, getLatestMeeting } from '../api/projectApi'
 import StatusBadge from '../components/common/StatusBadge'
+import { IDEA_PROJECT_MARKER } from './board/ReviewBoardPrototype'
+
+// 가은/Claude(2026-07-21): 실측 제보 — "공모전 분석"(작성 전)이나 "기획서 업로드·분석"
+// (작성 후)에서 더 못 넘어가고 이탈한 프로젝트가 "내 프로젝트"에 그대로 쌓였다.
+// ensureProject()가 "분석 시작"만 눌러도(문서 하나 없이도) DB row를 만들기 때문 —
+// status 필드는 늘 "pending" 고정이라 이걸로는 구분이 안 된다(ReviewBoardPrototype.jsx
+// resume 로직과 동일하게 실제 신호로 판단): 작성 후는 회의(분석) 완료 여부(getLatestMeeting)
+// 로 본다.
+// ⚠️ 작성 전은 처음에 "아이디어 확정(IDEA_PROJECT_MARKER)까지 끝나야 유지"로 잘못
+// 구현했었다 — 실측 결과 "공모전 분석은 끝났는데 아이디어 회의 직전"인 프로젝트까지
+// 걸러져버렸다(분석 화면 로딩 중에 이탈한 것과 구분이 안 됐던 게 원인). 공모전 분석이
+// 실제로 끝났는지는 has_announcement_analysis(백엔드 announcement_analysis_cache 존재
+// 여부, PRJ-002/003 응답에 새로 추가)로 판단한다 — 아이디어 확정 전이라도 이거면 유지.
+function hasMeaningfulProgress(project) {
+  const isPreFlow = project.flow_mode === 'pre' || project.description === IDEA_PROJECT_MARKER
+  if (isPreFlow) return project.description === IDEA_PROJECT_MARKER || !!project.has_announcement_analysis
+  return getLatestMeeting(project.id).then(() => true).catch(() => false)
+}
 
 function FolderIcon() {
   return (
@@ -144,15 +162,20 @@ export default function ProjectListPage() {
   const [deleteError, setDeleteError] = useState('')
 
   useEffect(() => {
+    let cancelled = false
     getProjects()
-      .then((data) => {
-        setProjects(data)
+      .then(async (data) => {
+        const flags = await Promise.all(data.map(hasMeaningfulProgress))
+        if (cancelled) return
+        setProjects(data.filter((_, i) => flags[i]))
         setLoading(false)
       })
       .catch((err) => {
+        if (cancelled) return
         setError(err.message)
         setLoading(false)
       })
+    return () => { cancelled = true }
   }, [])
 
   function handleDelete(projectId) {

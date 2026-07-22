@@ -345,6 +345,10 @@ def _serialize_state(state: IdeationConvState) -> dict:
         "phase": state["phase"],
         "round": state["round"],
         "max_rounds": state["max_rounds"],
+        # 가은/Claude(2026-07-21): /board "주제 아이디어 회의" 화면 헤더에 지금 어떤 공모전
+        # 주제로 좁혀가는 중인지 보여주려고 노출한다. notice_and_criteria는 start 시점에
+        # 넣어둔 값이라 세션을 이어받아(resume) 다시 그려도 그대로 유지된다 — 순수 추가 필드.
+        "competition_name": (state.get("notice_and_criteria") or {}).get("competition_name", ""),
         "messages": state["messages"],
         "consensus": state["consensus"],
         "unresolved_issues": state["unresolved_issues"],
@@ -384,7 +388,7 @@ class StartRequest(BaseModel):
     max_rounds: int = 3
     use_rag: bool = False
     project_id: Optional[str] = None
-    model: str = Field(default="")  # 비워두면 settings.DEV_LLM_REVIEWER_MODEL 사용(개발용 오버라이드 허용).
+    model: str = Field(default="")  # 비워두면 settings.reviewer_model()(LLM_PROFILE 기준) 사용 — 개발용 오버라이드 허용.
 
 
 class ReplyRequest(BaseModel):
@@ -396,8 +400,13 @@ class FinalizeRequest(BaseModel):
     model: str = Field(default="")
 
 
+# 가은/Claude(2026-07-21): 실측 제보 — 이 화면(board "작성 전" 흐름)이 늘 DEV_LLM_REVIEWER_
+# MODEL로 고정돼 있어서, dev 프로필에 gpt-5-nano처럼 느린 추론 모델을 넣으면(파싱/JSON
+# 형식 테스트용으로 dev 프로필을 그렇게 쓰는 게 팀 의도) 실제 사용자가 쓰는 이 대화형
+# 회의까지 덩달아 느려졌다. 다른 LLM 호출(documents.py/meetings.py)과 똑같이
+# LLM_PROFILE(dev|quality|premium)을 그대로 따르게 통일한다.
 def _effective_model(requested: str) -> str:
-    return requested.strip() or settings.DEV_LLM_REVIEWER_MODEL
+    return requested.strip() or settings.reviewer_model()
 
 
 @router.post("/start")

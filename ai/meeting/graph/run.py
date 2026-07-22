@@ -110,7 +110,7 @@ def assemble_document(
     # "synthesizing"(review_output.schema.json)으로 표시한다.
     status = "completed" if final_state["chair_summary"] is not None else "synthesizing"
     return {
-        "schema_version": "2.2.0",
+        "schema_version": "2.3.0",
         "meeting_id": meeting_id,
         "project_id": project_id,
         "document_id": document_id,
