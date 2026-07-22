@@ -1,4 +1,5 @@
 import { API_BASE_URL } from './client'
+import { parseNdjsonLine, splitNdjsonLines } from '../pages/board/ideationStreamReducer'
 
 // 용준/Claude(2026-07-20): 개발용 "대화형 아이디어 발전 회의" 프리뷰 API 호출부.
 // backend/app/api/routes/ideation_conversation_preview.py(ENABLE_IDEATION_PREVIEW=true일
@@ -49,6 +50,71 @@ export async function replyIdeationConversation(sessionId, message, model) {
     body: JSON.stringify({ message, model: model || undefined }),
   })
   return handleResponse(res)
+}
+
+// 용준/Claude(2026-07-21, 요청: 실시간 스트리밍): POST /reply/stream(NDJSON, 백엔드
+// backend/app/api/routes/ideation_conversation_preview.py::reply_conversation_stream)을
+// 호출해 이벤트를 도착하는 즉시 onEvent로 넘긴다. 응답 전체를 기다리는 replyIdeationConversation
+// 과 달리 fetch().json()을 쓰지 않고 ReadableStream을 직접 읽는다 — 실제 OpenAI 토큰이
+// 여기로 그대로 흘러온다(백엔드가 만들어내는 가짜 지연이 아니다).
+//
+// TextDecoder({stream:true})로 디코딩해야 하는 이유: 한글은 UTF-8에서 멀티바이트라,
+// 네트워크 청크 경계가 한 글자의 바이트 중간에서 잘릴 수 있다 — stream 옵션 없이 매
+// 청크를 독립적으로 decode하면 그 잘린 바이트가 깨진 문자(�)로 나온다. stream:true는
+// 디코더가 "다음 청크와 이어붙여야 할 수도 있는 불완전한 바이트"를 내부에 들고 있다가
+// 다음 decode() 호출에서 이어붙인다.
+//
+// NDJSON 한 줄이 여러 청크로 나뉘거나 한 청크에 여러 줄이 들어있는 문제는
+// splitNdjsonLines()(순수 함수, ideationStreamReducer.js)로 처리한다 — 완성된 줄만 꺼내
+// 파싱하고, 끝나지 않은 나머지는 버퍼에 남겨 다음 청크와 이어붙인다.
+export async function replyIdeationConversationStream(sessionId, message, { model, signal, onEvent } = {}) {
+  const res = await fetch(`${API_BASE_URL}/ideation-conversation/${sessionId}/reply/stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ message, model: model || undefined }),
+    signal,
+  })
+
+  if (!res.ok || !res.body) {
+    let detail
+    try {
+      const data = await res.json()
+      detail = data.detail
+    } catch {
+      // 본문이 JSON이 아니면(예: 프록시가 끊은 경우) 기본 메시지로 대체한다.
+    }
+    throw new Error(detail || '아이디어 회의 스트리밍 요청에 실패했습니다.')
+  }
+
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder('utf-8')
+  let buffer = ''
+
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const { lines, remainder } = splitNdjsonLines(buffer)
+      buffer = remainder
+      for (const line of lines) {
+        const event = parseNdjsonLine(line)
+        if (event) onEvent?.(event)
+      }
+    }
+    // 마지막 남은 버퍼(정상 흐름에서는 서버가 항상 줄 끝에 개행을 붙이므로 비어 있어야
+    // 하지만, 방어적으로 마지막 조각도 확인한다) + 디코더에 남아있을 수 있는 잔여 바이트를
+    // 마저 비운다.
+    buffer += decoder.decode()
+    const event = parseNdjsonLine(buffer)
+    if (event) onEvent?.(event)
+  } finally {
+    try {
+      reader.releaseLock()
+    } catch {
+      // 이미 스트림이 취소/종료된 상태면 releaseLock이 예외를 던질 수 있다 — 무시한다.
+    }
+  }
 }
 
 export async function finalizeIdeationConversation(sessionId, model) {
