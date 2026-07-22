@@ -1,20 +1,35 @@
 import { useNavigate } from 'react-router-dom'
-import SpaceBackground from '../components/landing/SpaceBackground'
 import './LandingPage.css'
 
-const TAGLINE_WORDS = 'AI 심사위원단에게 당신의 사업계획서를 검토받아보세요'.split(' ')
+const TAGLINE_WORDS = '어떤 공모전을 준비해볼까요?'.split(' ')
 const WORD_START_DELAY = 0.9
 const WORD_STEP = 0.18
+
+// 새벽 하늘 영역(상단)에만 뿌리는 별 — 위치·반짝임 딜레이 고정값
+const STARS = [
+  { left: '8%', top: '12%', delay: '0s' },
+  { left: '19%', top: '34%', delay: '1.1s' },
+  { left: '31%', top: '8%', delay: '0.6s' },
+  { left: '47%', top: '22%', delay: '1.7s' },
+  { left: '62%', top: '6%', delay: '0.3s' },
+  { left: '74%', top: '28%', delay: '2.2s' },
+  { left: '88%', top: '14%', delay: '0.9s' },
+  { left: '93%', top: '38%', delay: '1.4s' },
+]
 
 export default function LandingPage() {
   const navigate = useNavigate()
 
   return (
     <div className="landing-page">
-      <SpaceBackground />
+      <div className="landing-stars" aria-hidden="true">
+        {STARS.map((s, i) => (
+          <i key={i} style={{ left: s.left, top: s.top, animationDelay: s.delay }} />
+        ))}
+      </div>
 
       <div className="landing-content">
-        <img src="/images/logo4.png" alt="AI Review Board" className="landing-logo" />
+        <img src="/images/logo1.png" alt="AI Review Board" className="landing-logo" />
 
         <p className="landing-tagline">
           {TAGLINE_WORDS.map((word, i) => (
@@ -22,6 +37,10 @@ export default function LandingPage() {
               {word}
             </span>
           ))}
+        </p>
+
+        <p className="landing-sub">
+          공모전 분석부터 문서 피드백까지, AI 멘토가 당신과 함께 합니다.
         </p>
 
         {/* 가은/Claude(2026-07-21): "내 프로젝트"가 실제로 사용자별로 구분되려면

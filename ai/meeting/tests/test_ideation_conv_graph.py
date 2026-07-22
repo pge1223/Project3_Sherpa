@@ -39,6 +39,24 @@ _REMAINING_TOPICS_RE = re.compile(
     r"\[아직 확인되지 않은 주제\(우선순위 순\) remaining_topics\]\n(.*?)\n\n", re.S
 )
 
+# 가은/Claude(2026-07-22, 요청: 아이디어 기획 캔버스 자동 갱신 — 경이 협의 완료): 매 라운드
+# 끝에 canvas_update 노드가 "[캔버스 갱신 규칙]" 프롬프트로 LLM을 한 번 더 부른다 — 이 파일의
+# 모든 stub이 이 프롬프트를 처리하지 못하면 "예상하지 못한 프롬프트"로 죽으므로 공용 응답을
+# 둔다. 메시지를 만들지 않는 기록용 노드라 기존 테스트의 메시지/phase 기대값에는 영향이 없다.
+CANVAS_STUB_RESPONSE = json.dumps(
+    {
+        "problem": "[canvas] 손님 문의 응대 부담",
+        "target_user": "[canvas] 동네 소상공인",
+        "core_value": "[canvas] 응대 시간 절감",
+        "solution": "[canvas] FAQ 자동 응답 챗봇",
+        "differentiation": "[canvas] 저비용 구축",
+        "feasibility": "medium",
+        "risks": ["[canvas] 오답 응대 위험"],
+        "contest_fit": "[canvas] 실현가능성·차별성 기준에 대응",
+    },
+    ensure_ascii=False,
+)
+
 
 def _topic_from_prompt(prompt: str) -> str:
     """질문 프롬프트에 실제로 주입된 remaining_topics(우선순위 순, 이미 resolved_topics를
@@ -221,6 +239,9 @@ class ScriptedLLM:
                 ensure_ascii=False,
             )
 
+        if "[캔버스 갱신 규칙]" in prompt:
+            return CANVAS_STUB_RESPONSE
+
         raise AssertionError(f"예상하지 못한 프롬프트입니다: {prompt[:200]}")
 
 
@@ -284,6 +305,73 @@ def test_start_runs_roundtable_immediately_without_interview_question():
     assert not any(m["message_type"] == "question" for m in state["messages"])
     dev_prompts = [p for p in llm.captured_prompts if "당신은 AI Review Board의 개발 전문가입니다" in p]
     assert dev_prompts, "라운드테이블에서는 사용자 답변을 기다리지 않고 개발 위원도 곧바로 실행돼야 한다"
+
+
+# ---------------------------------------------------------------------------
+# 1-1. 아이디어 기획 캔버스 자동 갱신 — 가은/Claude(2026-07-22, 경이 협의 완료)
+# ---------------------------------------------------------------------------
+
+
+def test_canvas_updated_after_roundtable_round():
+    """매 라운드가 끝나면(discussion_facilitator 직후) canvas_update 노드가
+    state["idea_canvas"]를 갱신한다 — 프론트 IdeaCanvasPanel이 이 값을 우선 사용한다."""
+    llm = ScriptedLLM()
+    state = _start(llm)
+
+    assert state["phase"] == "awaiting_user_decision"
+    canvas = state.get("idea_canvas")
+    assert canvas is not None
+    assert canvas["problem"] == "[canvas] 손님 문의 응대 부담"
+    assert canvas["target_user"] == "[canvas] 동네 소상공인"
+    assert canvas["feasibility"] == "medium"
+    assert canvas["risks"] == ["[canvas] 오답 응대 위험"]
+    # 캔버스 프롬프트에 이번 라운드 발언(구조화 원문)이 실제로 주입됐는지도 확인한다.
+    canvas_prompts = [p for p in llm.captured_prompts if "[캔버스 갱신 규칙]" in p]
+    assert len(canvas_prompts) == 1
+    assert "[기획 전문가 최초 의견 planning_position]" in canvas_prompts[0]
+
+
+def test_canvas_update_failure_is_non_fatal():
+    """canvas_update는 비치명적이다 — 캔버스 응답이 끝까지 JSON이 아니어도 라운드는 이미
+    성공했으므로 phase가 "failed"로 바뀌면 안 되고, 캔버스만 갱신되지 않은 채 남는다."""
+    base = ScriptedLLM()
+
+    def llm(prompt: str) -> str:
+        if "[캔버스 갱신 규칙]" in prompt:
+            return "이것은 JSON이 아닙니다"
+        return base(prompt)
+
+    state = _start(llm)
+
+    assert state["phase"] == "awaiting_user_decision"
+    assert state["failed_node"] is None
+    assert state.get("idea_canvas") is None
+
+
+def test_canvas_keeps_previous_value_when_later_update_fails():
+    """첫 라운드에서 캔버스가 채워진 뒤, 이후 라운드의 캔버스 갱신이 실패하면 직전 값이
+    그대로 유지돼야 한다(빈 값으로 덮어쓰이면 안 된다)."""
+    base = ScriptedLLM()
+    canvas_calls = {"n": 0}
+
+    def llm(prompt: str) -> str:
+        if "[캔버스 갱신 규칙]" in prompt:
+            canvas_calls["n"] += 1
+            if canvas_calls["n"] > 1:
+                return "이것은 JSON이 아닙니다"  # 두 번째 라운드부터 실패
+            return CANVAS_STUB_RESPONSE
+        return base(prompt)
+
+    state = _start(llm)
+    assert state["idea_canvas"] is not None
+
+    # 사용자가 의견을 남겨 다음 라운드가 실행되게 한다(awaiting_user_decision에서 reply).
+    state = reply_ideation_conversation(
+        previous_state=state, user_message="MVP 범위를 더 좁히고 싶어요", llm_call=llm
+    )
+    assert canvas_calls["n"] >= 2, "두 번째 라운드에서도 캔버스 갱신이 시도돼야 한다"
+    assert state["idea_canvas"] is not None
+    assert state["idea_canvas"]["problem"] == "[canvas] 손님 문의 응대 부담"
 
 
 # ---------------------------------------------------------------------------
@@ -881,6 +969,8 @@ def test_discussion_node_handles_non_list_confirmed_and_unconfirmed_safely():
                 },
                 ensure_ascii=False,
             )
+        if "[캔버스 갱신 규칙]" in prompt:
+            return CANVAS_STUB_RESPONSE
         raise AssertionError(f"예상하지 못한 프롬프트: {prompt[:100]}")
 
     state = _start(llm)
@@ -1342,6 +1432,9 @@ class _DebateScriptedLLM:
                 },
                 ensure_ascii=False,
             )
+
+        if "[캔버스 갱신 규칙]" in prompt:
+            return CANVAS_STUB_RESPONSE
 
         raise AssertionError(f"예상하지 못한 프롬프트입니다: {prompt[:200]}")
 
@@ -1809,6 +1902,8 @@ def _delegation_scripted_llm(review_stance: str):
                 },
                 ensure_ascii=False,
             )
+        if "[캔버스 갱신 규칙]" in prompt:
+            return CANVAS_STUB_RESPONSE
         raise AssertionError(f"예상하지 못한 프롬프트: {prompt[:150]}")
 
     return llm_call

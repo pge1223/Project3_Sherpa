@@ -214,6 +214,21 @@ def _stub_llm_call(session_id: str, model: str):
                 },
                 ensure_ascii=False,
             )
+        # 가은/Claude(2026-07-22, 캔버스 자동 갱신) — 매 라운드 끝의 canvas_update 노드 stub.
+        if "[캔버스 갱신 규칙]" in prompt:
+            return json.dumps(
+                {
+                    "problem": "[canvas] 문제 상황",
+                    "target_user": "[canvas] 타깃 사용자",
+                    "core_value": "[canvas] 핵심 가치",
+                    "solution": "[canvas] 해결 방식",
+                    "differentiation": "[canvas] 차별점",
+                    "feasibility": "medium",
+                    "risks": ["[canvas] 리스크"],
+                    "contest_fit": "[canvas] 심사기준 대응",
+                },
+                ensure_ascii=False,
+            )
         if "[해석 규칙]" in prompt:
             # 용준/Claude(2026-07-21, /board 실 연동): 후보 결합(combine) 응답 — 이번
             # 확장(원본 후보/결합 분석을 API 응답에 노출)을 검증하는 테스트에서만 실제로
@@ -388,6 +403,26 @@ def test_start_with_user_idea_still_returns_refinement_mode_backward_compatible(
     # stub은 needs_user_decision=False를 반환하므로 None이다). 1:1 인터뷰 질문 노드가 만드는
     # "problem"이라는 고정값은 더 이상 첫 라운드에서 나오지 않는다.
     assert body["pending_question_topic"] is None
+
+
+def test_start_response_includes_idea_canvas_after_roundtable(client: TestClient):
+    """가은/Claude(2026-07-22, 요청: 아이디어 기획 캔버스 자동 갱신 — 경이 협의 완료) —
+    라운드테이블 한 라운드가 끝나면 canvas_update 노드가 갱신한 idea_canvas(순수 추가
+    필드)가 API 응답에 노출된다. 프론트 IdeaCanvasPanel이 이 값을 우선 사용한다."""
+    resp = client.post(
+        "/ideation-conversation/start",
+        json={
+            "competition_name": "데모 공모전",
+            "competition_document": "실현가능성을 평가한다.",
+            "user_idea": "소상공인이 손님 문의에 자동으로 답하는 챗봇",
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["phase"] == "awaiting_user_decision"
+    assert body["idea_canvas"] is not None
+    assert body["idea_canvas"]["problem"] == "[canvas] 문제 상황"
+    assert body["idea_canvas"]["feasibility"] == "medium"
 
 
 def test_reply_response_includes_topic_fields_after_first_answer(client: TestClient):
