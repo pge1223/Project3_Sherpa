@@ -254,6 +254,23 @@ class DiscoveryScriptedLLM:
                 ensure_ascii=False,
             )
 
+        # 가은/Claude(2026-07-22, 캔버스 자동 갱신) — 매 라운드 끝의 canvas_update 노드 stub.
+        # 메시지를 만들지 않는 기록용 노드라 기존 기대값에는 영향이 없다.
+        if "[캔버스 갱신 규칙]" in prompt:
+            return json.dumps(
+                {
+                    "problem": "[canvas] 문제 상황",
+                    "target_user": "[canvas] 타깃 사용자",
+                    "core_value": "[canvas] 핵심 가치",
+                    "solution": "[canvas] 해결 방식",
+                    "differentiation": "[canvas] 차별점",
+                    "feasibility": "medium",
+                    "risks": ["[canvas] 리스크"],
+                    "contest_fit": "[canvas] 심사기준 대응",
+                },
+                ensure_ascii=False,
+            )
+
         raise AssertionError(f"예상하지 못한 프롬프트입니다: {prompt[:200]}")
 
 

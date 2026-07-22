@@ -1,3 +1,7 @@
+/* B안 — 새벽 그라디언트 랜딩 (2026-07-22 확정)
+   /board 웜 화이트 팔레트(#faf8f4, 보라 #7c5cea)를 그대로 쓰되,
+   기존 우주 테마의 잔향을 상단 하늘 그라디언트 + 별 파티클 + 글로우로만 남긴다. */
+
 .landing-page {
   position: relative;
   z-index: 1;
@@ -6,7 +10,33 @@
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  color: #eaf0ff;
+  background:
+    linear-gradient(180deg, rgba(76, 56, 160, 0.16) 0%, rgba(124, 92, 234, 0.07) 34%, rgba(250, 248, 244, 0) 60%),
+    radial-gradient(800px 500px at 50% 115%, rgba(224, 96, 61, 0.07), transparent 55%),
+    #faf8f4;
+  color: #1c1a2e;
+  font-family: 'Pretendard', -apple-system, 'Malgun Gothic', sans-serif;
+}
+
+.landing-stars {
+  position: absolute;
+  inset: 0 0 55% 0;
+  pointer-events: none;
+  z-index: 1;
+}
+
+.landing-stars i {
+  position: absolute;
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: rgba(124, 92, 234, 0.55);
+  animation: starTwinkle 3.2s ease-in-out infinite;
+}
+
+@keyframes starTwinkle {
+  0%, 100% { opacity: 0.15; }
+  50% { opacity: 0.7; }
 }
 
 .landing-content {
@@ -20,11 +50,11 @@
 }
 
 .landing-logo {
-  width: 260px;
-  max-width: 70vw;
+  width: 300px;
+  max-width: 76vw;
   height: auto;
   opacity: 0;
-  filter: drop-shadow(0 0 0 rgba(124, 77, 255, 0));
+  filter: drop-shadow(0 0 0 rgba(124, 92, 234, 0));
   animation: logoGlowIn 1.4s ease-out forwards;
 }
 
@@ -32,29 +62,31 @@
   0% {
     opacity: 0;
     transform: scale(0.85);
-    filter: drop-shadow(0 0 0 rgba(124, 77, 255, 0));
+    filter: drop-shadow(0 0 0 rgba(124, 92, 234, 0));
   }
   60% {
     opacity: 1;
     transform: scale(1.03);
-    filter: drop-shadow(0 0 28px rgba(124, 77, 255, 0.55));
+    filter: drop-shadow(0 0 22px rgba(124, 92, 234, 0.35));
   }
   100% {
     opacity: 1;
     transform: scale(1);
-    filter: drop-shadow(0 0 14px rgba(124, 77, 255, 0.35));
+    filter: drop-shadow(0 0 12px rgba(124, 92, 234, 0.22));
   }
 }
 
 .landing-tagline {
-  margin-top: 28px;
-  font-size: 22px;
-  font-weight: 600;
-  color: #cdd9f7;
+  margin-top: 30px;
+  font-size: 24px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: #1c1a2e;
   display: flex;
   flex-wrap: wrap;
   justify-content: center;
   gap: 0.4em;
+  line-height: 1.45;
 }
 
 .landing-word {
@@ -71,19 +103,30 @@
   }
 }
 
+.landing-sub {
+  margin-top: 14px;
+  max-width: 34em;
+  font-size: 14.5px;
+  color: #5b5770;
+  line-height: 1.65;
+  opacity: 0;
+  animation: wordFadeUp 0.8s ease-out forwards;
+  animation-delay: 2s;
+}
+
 .landing-cta {
-  margin-top: 40px;
-  padding: 14px 40px;
-  border-radius: 999px;
-  border: 1px solid rgba(124, 77, 255, 0.45);
-  background: rgba(124, 77, 255, 0.2);
-  color: #eaf0ff;
+  margin-top: 36px;
+  padding: 14px 44px;
+  border-radius: 14px;
+  border: none;
+  background: linear-gradient(135deg, #7c5cea, #8b6ef0);
+  color: #ffffff;
   font-size: 15px;
   font-weight: 700;
   letter-spacing: 0.02em;
+  font-family: inherit;
   cursor: pointer;
-  backdrop-filter: blur(8px);
-  box-shadow: 0 0 0 rgba(124, 77, 255, 0);
+  box-shadow: 0 0 0 rgba(124, 92, 234, 0);
   opacity: 0;
   animation: ctaFadeIn 0.8s ease-out forwards, ctaPulse 3s ease-in-out infinite;
   animation-delay: 2.2s, 3s;
@@ -100,6 +143,30 @@
 }
 
 @keyframes ctaPulse {
-  0%, 100% { box-shadow: 0 0 12px rgba(124, 77, 255, 0.3); }
-  50% { box-shadow: 0 0 26px rgba(124, 77, 255, 0.6); }
+  0%, 100% { box-shadow: 0 6px 16px rgba(124, 92, 234, 0.3); }
+  50% { box-shadow: 0 6px 28px rgba(124, 92, 234, 0.55); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .landing-logo,
+  .landing-word,
+  .landing-sub,
+  .landing-cta {
+    animation: none;
+    opacity: 1;
+    transform: none;
+  }
+  .landing-stars i {
+    animation: none;
+    opacity: 0.4;
+  }
+  .landing-cta {
+    box-shadow: 0 6px 16px rgba(124, 92, 234, 0.3);
+  }
+}
+
+@media (max-width: 640px) {
+  .landing-tagline {
+    font-size: 19px;
+  }
 }

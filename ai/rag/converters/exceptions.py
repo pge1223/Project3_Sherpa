@@ -41,13 +41,23 @@ class ConversionTimeoutError(DocumentConversionError):
 class ConversionProcessError(DocumentConversionError):
     """변환 프로세스가 0이 아닌 종료 코드로 끝난 경우."""
 
-    user_message = "HWP/HWPX 문서를 PDF로 변환하지 못했습니다. 파일이 손상되었거나 지원하지 않는 문서 버전일 수 있습니다."
+    # 가은/Claude(2026-07-22): 일부 HWP는 파일 자체가 변환 필터(H2Orestart)와 호환되지 않아
+    # 서버 환경이 정상이어도 항상 실패한다(실측: 특정 공모전 신청양식 HWP가 0xC0000409로
+    # 크래시). 사용자가 스스로 해결할 수 있는 유일한 방법이 "한글에서 PDF로 저장 후 업로드"
+    # 이므로 안내 문구에 그 우회로를 포함한다.
+    user_message = (
+        "HWP/HWPX 문서를 PDF로 변환하지 못했습니다. 파일이 손상되었거나 지원하지 않는 문서 버전일 수 "
+        "있습니다. 한글(HWP) 프로그램에서 PDF로 저장한 뒤 그 PDF를 업로드하면 이용할 수 있어요."
+    )
 
 
 class ConvertedFileNotFoundError(DocumentConversionError):
     """변환 프로세스는 성공했지만 출력 PDF가 생성되지 않은 경우."""
 
-    user_message = "HWP/HWPX 문서를 PDF로 변환하지 못했습니다. 파일이 손상되었거나 지원하지 않는 문서 버전일 수 있습니다."
+    user_message = (
+        "HWP/HWPX 문서를 PDF로 변환하지 못했습니다. 파일이 손상되었거나 지원하지 않는 문서 버전일 수 "
+        "있습니다. 한글(HWP) 프로그램에서 PDF로 저장한 뒤 그 PDF를 업로드하면 이용할 수 있어요."
+    )
 
 
 class InvalidConvertedPdfError(DocumentConversionError):
