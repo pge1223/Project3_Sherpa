@@ -182,8 +182,7 @@ function Shell({ children, active, mode, onNavigate, showNav }) {
         .rb-root .rb-menu-item:hover{ background:var(--bg-2); color:var(--text-0); }
         .rb-root .rb-entry-actions{ display:flex; justify-content:flex-end; margin-bottom:10px; }
         .rb-root .rb-inline-projects{ display:inline-flex; align-items:center; gap:6px; padding:8px 12px; font-size:14px; font-family:inherit; font-weight:400; letter-spacing:0; }
-        .rb-root .rb-back-title{ display:flex; align-items:center; gap:8px; }
-        .rb-root .rb-back-button{ width:26px; height:26px; display:inline-flex; align-items:center; justify-content:center; border:none; background:transparent; color:var(--text-1); border-radius:8px; cursor:pointer; font-size:22px; line-height:1; padding:0; flex-shrink:0; }
+        .rb-root .rb-back-button{ width:26px; height:26px; display:inline-flex; align-items:center; justify-content:center; border:none; background:transparent; color:#000; border-radius:8px; cursor:pointer; font-size:13px; font-weight:300; line-height:1; padding:0; flex-shrink:0; }
         .rb-root .rb-back-button:hover{ background:var(--bg-2); color:var(--text-0); }
         .rb-root .rb-typing-cursor{ display:inline-block; margin-left:1px; animation: rb-blink 0.9s steps(1) infinite; }
         @keyframes rb-blink{ 0%,49%{ opacity:1; } 50%,100%{ opacity:0; } }
@@ -238,20 +237,6 @@ function Shell({ children, active, mode, onNavigate, showNav }) {
         </div>
       )}
       <div className="main">{children}</div>
-    </div>
-  );
-}
-
-function BackTitle({ children, onBack, level = 2, style }) {
-  const Heading = level === 1 ? 'h1' : 'h2';
-  return (
-    <div className="rb-back-title" style={style}>
-      <button type="button" className="rb-back-button" onClick={onBack} aria-label="이전 화면으로 이동">
-        &lt;
-      </button>
-      <Heading style={{ margin: 0, fontSize: level === 1 ? 26 : 22, fontWeight: 700 }}>
-        {children}
-      </Heading>
     </div>
   );
 }
@@ -668,10 +653,15 @@ function AnalysisScreen({ mode, onNext, onBack, projectId }) {
   return (
     <>
     <div style={{ maxWidth: 820 }}>
-      <div className="badge purple mono">{hasAnnouncement ? "공고문 분석 결과" : "공고문 미등록"}</div>
-      <BackTitle level={1} onBack={onBack} style={{ margin: "12px 0 24px" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+        <button type="button" className="rb-back-button" onClick={onBack} aria-label="이전 화면으로 이동">
+          {'←'}
+        </button>
+        <div className="badge purple mono">{hasAnnouncement ? "공고문 분석 결과" : "공고문 미등록"}</div>
+      </div>
+      <h1 style={{ margin: "12px 0 24px", fontSize: 26, fontWeight: 700 }}>
         {hasAnnouncement ? (analysis?.announcement_title || "등록한 공고문을 확인하세요") : "등록된 공고문이 없어요"}
-      </BackTitle>
+      </h1>
 
       {error && <p style={{ color: "var(--coral)", fontSize: 13, marginBottom: 16 }}>{error}</p>}
 
@@ -976,10 +966,15 @@ function UploadAndAnalyzeScreen({ projectId, onFeedbackReady, onBack, initialDoc
 
   return (
     <div style={{ maxWidth: 720 }}>
-      <div className="badge coral mono" style={{ marginBottom: 12 }}>기획서 업로드 · 분석</div>
-      <BackTitle onBack={onBack} style={{ marginBottom: 20 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 12 }}>
+        <button type="button" className="rb-back-button" onClick={onBack} aria-label="이전 화면으로 이동">
+          {'←'}
+        </button>
+        <div className="badge coral mono">기획서 업로드 · 분석</div>
+      </div>
+      <h2 style={{ margin: '0 0 20px', fontSize: 22, fontWeight: 700 }}>
         {analyzing ? '평가 대상 문서를 분석중이에요' : '평가 대상 문서를 업로드하세요'}
-      </BackTitle>
+      </h2>
 
       {!analyzing && (
         <>

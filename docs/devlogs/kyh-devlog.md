@@ -1,3 +1,17 @@
+### 7/21 — 스키마 fix + 다수 PR 배포
+
+- **로컬 최신화 + NCP 배포 (오전)** — dev 머지 (민경이 LangGraph + 가은님 프론트 대거 반영)
+- **경이님 분류기 계약 스펙 스키마 반영 작업**
+  - `backend/app/schemas/user.py` 수정: `degree` Literal enum, `graduation_status` 신설, `experience` 필드명 변경(`internship_months`/`competition_count`/`award_count`), `github` 조회불가 필드 제거(`has_backend_experience`/`relevant_projects`/`total_commits`) → `public_repos`/`followers`/`total_stars` 신설
+  - `ai/meeting/tests/fixtures/user_profile_samples.json` 갱신
+  - PR #119 — Files changed 0으로 빈 PR 머지됨 (Claude Code 커밋 누락 버그)
+  - PR #120 — 실제 파일 변경 재반영, 머지 완료 + NCP 배포
+  - 경이님 `feature/mky` (#118) — `personalization.py` 새 필드명으로 가중치 로직 수정, 동시 머지
+- **다수 PR 머지 + 배포**
+  - PR #121~#123 머지 대응 NCP 배포 (워크벤치 라우트, PDF 미리보기, LangGraph transform 등 대규모 반영)
+- **NCP 크레딧 20만원 재문의** — 7/16 문의(W20260716365374) 미처리로 재접수(W20260721366071)
+- **트러블슈팅**: PR #119 빈 PR 문제 — Claude Code가 파일 수정 후 커밋에 미포함, 로컬 직접 확인 후 수동 커밋으로 해결
+
 ### 7/20 — 소통혁신24 IT 공모전 데이터 수집 완료
 
 - AJAX 직접 호출 방식으로 소통혁신24 크롤링 (Selenium → requests 전환)

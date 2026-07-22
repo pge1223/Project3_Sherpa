@@ -11,6 +11,8 @@
 from __future__ import annotations
 
 import operator
+import uuid
+from datetime import datetime, timezone
 from typing import Annotated, Literal, TypedDict
 
 # 대화 진행 단계. "실패"는 기존 IdeationStage와 통일해 한국어 대신 영문 slug를 쓴다 —
@@ -42,7 +44,11 @@ ConvPhase = Literal[
     "finalizing",
 ]
 
-MessageType = Literal["question", "answer", "opinion", "agreement", "disagreement", "summary"]
+# 용준/Claude(2026-07-21, 요청: 전문가 라운드테이블 전환): "interjection"은 사용자가 진행자의
+# 직접 질문(pending_question)에 답한 게 아니라, 라운드 사이에 자발적으로 끼어든 발언이다 —
+# reply_ideation_conversation이 previous_state.get("pending_question") 존재 여부로 "answer"와
+# "interjection"을 구분한다(요청 6번: "user_interjection으로 기록").
+MessageType = Literal["question", "answer", "interjection", "opinion", "agreement", "disagreement", "summary"]
 
 _TERMINAL_ENTRY_PHASES = {
     "candidate_generation",
@@ -147,6 +153,22 @@ def active_stage_for(phase: str) -> ActiveStage | Literal["failed"]:
     return _PHASE_TO_ACTIVE_STAGE.get(phase, "refinement")
 
 
+class DiscussionRoundRecord(TypedDict):
+    """용준/Claude(2026-07-21, 요청: 위원 간 실제 회의로 개편): expert_discussion 라운드
+    1회가 만든 발언들의 텍스트 스냅샷. messages(원본 발언 전체)와 별도로 이 요약을 두는
+    이유는, 다음 단계(synthesis 등)가 "이번 라운드에 정확히 무슨 입장 변화가 있었는지"를
+    messages 전체를 다시 훑지 않고 바로 참조할 수 있게 하기 위함이다 — content는 messages와
+    중복 저장되지만(참조가 아니라 텍스트 스냅샷), 그래야 이후 다른 세션 필드처럼 dict로
+    바로 직렬화해 API 응답/프롬프트에 넘기기 쉽다."""
+
+    round: int
+    planning_position: str
+    development_review: str
+    revised_proposal: str | None
+    facilitator_summary: str
+    needs_user_decision: bool
+
+
 class ConvMessage(TypedDict):
     message_id: str
     speaker_id: str
@@ -230,7 +252,7 @@ class IdeationConvState(TypedDict):
     original_idea_candidates: list[dict]
     selected_idea: dict | None
     selection_reason: str | None
-    # "다시 추천" 요청 횟수 — ideation_conv_discovery.py::_MAX_CANDIDATE_REGENERATIONS에
+    # "다시 추천" 요청 횟수 — ideation_conv_discovery.py::MAX_CANDIDATE_REGENERATIONS에
     # 도달하면 더 이상 LLM을 호출해 후보를 재생성하지 않는다(요청: 무한 반복/LLM 호출 제한
     # 우회 방지).
     candidate_regeneration_count: int
@@ -253,6 +275,38 @@ class IdeationConvState(TypedDict):
     # 공통 가치/결합 적합도/주 기능/보조 기능/충돌 지점/미확정 사항). combine이 아니면 None.
     merge_analysis: dict | None
 
+    # 용준/Claude(2026-07-21, 요청: 위원 간 실제 회의로 개편): expert_discussion phase가
+    # 실행될 때마다(라운드마다) 1건씩 쌓인다(리듀서 operator.add — messages와 같은 원칙).
+    # 구버전 저장 state에는 이 키가 없을 수 있으므로 읽는 쪽은 항상
+    # `.get("discussion_rounds", [])`로 접근한다(하위 호환).
+    discussion_rounds: Annotated[list[DiscussionRoundRecord], operator.add]
+
+    # 용준/Claude(2026-07-21, 요청: 위원 간 실제 회의로 개편): 이번 라운드의 discussion 서브
+    # 그래프(planning_expert_discussion -> dev_expert_discussion -> [선택적 revision] ->
+    # discussion_facilitator)가 노드 사이에서 주고받는 임시 값들. Annotated(operator.add)가
+    # 아니므로 매 라운드 노드가 반환하면 그대로 덮어써진다(messages처럼 누적하지 않는다) —
+    # discussion_facilitator가 이번 라운드 값만 읽으면 되기 때문이다. 구버전 저장 state에는
+    # 이 키들이 없을 수 있으므로 읽는 쪽은 항상 `.get(...)`로 접근한다(하위 호환).
+    discussion_planning_position: dict | None
+    discussion_development_review: dict | None
+    discussion_revised_proposal: dict | None
+    # dev_expert_discussion(review 단계)가 정한 다음 행동("continue_round"/
+    # "await_user_decision") — 이 값 자체는 discussion_facilitator가 절대 바꾸지 않는다
+    # (요청: 기존에 검증된 라운드 진행/max_rounds 강제 로직을 그대로 재사용).
+    discussion_next_action: str | None
+    # dev_expert_discussion(review 단계)가 고른 stance — planning_expert_revision을 실행할지
+    # 결정하는 조건부 엣지(ideation_conv_build.py::_route_after_review)가 참조한다.
+    discussion_review_stance: str | None
+
+    # 가은/Claude(2026-07-22, 요청: 아이디어 기획 캔버스 자동 갱신 — 경이 협의 완료): 프론트
+    # 오른쪽 패널 '아이디어 기획 캔버스'의 최신 값(problem/target_user/core_value/solution/
+    # differentiation/feasibility/risks/contest_fit — selected_idea와 같은 키 이름을 써서
+    # 프론트가 idea_canvas ?? selected_idea 폴백만으로 그릴 수 있게 한다). 매 라운드가 끝날
+    # 때 canvas_update 노드(ideation_conv_nodes.py::make_canvas_update_node)가 덮어쓴다.
+    # 갱신 실패 시에는 직전 값이 그대로 유지된다(비치명적). 구버전 저장 state에는 이 키가
+    # 없을 수 있으므로 읽는 쪽은 항상 `.get("idea_canvas")`로 접근한다(하위 호환).
+    idea_canvas: dict | None
+
 
 def _extract_initial_idea_text(user_idea: dict | str | None) -> str:
     """user_idea에서 trim된 초기 아이디어 텍스트를 뽑아낸다. dict({"description": ...})와
@@ -266,26 +320,54 @@ def _extract_initial_idea_text(user_idea: dict | str | None) -> str:
     return ""
 
 
+def build_roundtable_opening_message(idea_text: str, round_number: int = 1) -> ConvMessage:
+    """용준/Claude(2026-07-21, 요청: 전문가 라운드테이블 전환): 라운드테이블 진입 직전
+    진행자의 안건 제시 메시지를 만든다. LLM을 부르지 않는다 — 사용자가 이미 입력한 텍스트를
+    그대로 인용해 안건으로 재진술할 뿐이라 사실 왜곡 위험이 없고, LLM 호출 상한을 소비하지
+    않는다. speaker_name/role은 페르소나 카드 조회 없이 고정값을 쓴다
+    (ideation_conv_run.py::_new_facilitator_message와 동일한 기존 관례)."""
+    idea = (idea_text or "").strip() or "제출하신 아이디어"
+    content = f"오늘은 '{idea}'에 대한 문제와 구현 범위를 논의하겠습니다."
+    return ConvMessage(
+        message_id=f"MSG-{uuid.uuid4().hex[:10]}",
+        speaker_id="ideation_facilitator",
+        speaker_name="회의 진행자",
+        role="진행자",
+        round=round_number,
+        message_type="summary",
+        content=content,
+        referenced_message_ids=[],
+        evidence=[],
+        created_at=datetime.now(timezone.utc).isoformat(),
+        structured=None,
+    )
+
+
 def initial_conv_state(
     session_id: str,
     notice_and_criteria: dict,
     user_idea: dict,
     max_rounds: int = 3,
 ) -> IdeationConvState:
-    """준비 상태. user_idea(trim 결과)가 있으면 refinement로 시작해 기획 전문가의 첫 질문
-    하나만 만들고 즉시 멈춘다(기존 동작 그대로). 비어 있으면 discovery로 시작해 후보 생성
-    단계(candidate_generation)부터 진행한다(요청 1~2번). ideation_mode는 여기서 딱 한 번
-    결정되어 이후 그래프 전체가 이 값을 그대로 읽는다."""
+    """준비 상태. user_idea(trim 결과)가 있으면 refinement로 시작한다 — 용준/Claude(2026-07-21,
+    요청: 전문가 라운드테이블 전환) 진행자의 안건 제시 메시지(LLM 호출 없음, 위
+    build_roundtable_opening_message 참고)를 messages에 먼저 넣고, phase는 더 이상
+    "planning_question"(1:1 인터뷰 진입점)이 아니라 "expert_discussion"(라운드테이블
+    진입점)이다 — 기획/개발 위원이 서로를 상대로 먼저 토론하고, 사용자에게 직접 질문하는
+    것은 진행자만 한다. 비어 있으면 discovery로 시작해 후보 생성 단계(candidate_generation)
+    부터 진행한다(요청 1~2번, 변경 없음). ideation_mode는 여기서 딱 한 번 결정되어 이후
+    그래프 전체가 이 값을 그대로 읽는다."""
     initial_idea = _extract_initial_idea_text(user_idea)
     mode: IdeationMode = "refinement" if initial_idea else "discovery"
+    opening_messages = [build_roundtable_opening_message(initial_idea, round_number=1)] if mode == "refinement" else []
     return IdeationConvState(
         session_id=session_id,
         notice_and_criteria=notice_and_criteria,
         user_idea={"description": initial_idea} if initial_idea else {},
         round=1,
         max_rounds=max_rounds,
-        messages=[],
-        phase="planning_question" if mode == "refinement" else "candidate_generation",
+        messages=opening_messages,
+        phase="expert_discussion" if mode == "refinement" else "candidate_generation",
         pending_question=None,
         pending_expected_answer_type=None,
         pending_question_topic=None,
@@ -308,6 +390,13 @@ def initial_conv_state(
         user_selection_message=None,
         source_candidates=[],
         merge_analysis=None,
+        discussion_rounds=[],
+        discussion_planning_position=None,
+        discussion_development_review=None,
+        discussion_revised_proposal=None,
+        discussion_next_action=None,
+        discussion_review_stance=None,
+        idea_canvas=None,
     )
 
 

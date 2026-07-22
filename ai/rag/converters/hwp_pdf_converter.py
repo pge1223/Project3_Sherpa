@@ -14,9 +14,9 @@ subprocess timeout이 모두 가능해 요건에 맞는다. 다만 HWP(바이너
 """
 
 import logging
-import os
 import shutil
 import subprocess
+import threading
 import time
 import uuid
 import zipfile
@@ -39,22 +39,6 @@ from ai.rag.converters.schemas import DocumentConversionResult
 logger = logging.getLogger(__name__)
 
 SUPPORTED_EXTENSIONS: frozenset[str] = frozenset({".hwp", ".hwpx"})
-
-# 재인/Claude(2026-07-21, 실측 확인 — 용준님 파일이라 확인 필요): 콘다 환경(review-board)에서
-# 백엔드를 띄운 채 LibreOffice를 서브프로세스로 부르면 "Could not find platform independent
-# libraries <prefix> / Error: source file could not be loaded"로 매번 실패하는 걸 실제
-# 업로드 로그로 확인했다. subprocess.run()이 기본적으로 부모 프로세스(우리 파이썬)의 환경변수를
-# 그대로 물려주는데, 그중 PYTHONHOME/PYTHONPATH가 LibreOffice에 내장된 자체 파이썬 인터프리터
-# 초기화를 방해한다(LibreOffice 스크립팅용 내장 파이썬이 콘다 쪽 경로를 잘못 참조하게 됨) -
-# LibreOffice를 부를 때만 이 값들을 제거한 환경을 넘겨서 격리한다.
-_PYTHON_ENV_VARS_TO_STRIP: tuple[str, ...] = ("PYTHONHOME", "PYTHONPATH", "PYTHONEXECUTABLE")
-
-
-def _subprocess_env_for_libreoffice() -> dict[str, str]:
-    env = dict(os.environ)
-    for key in _PYTHON_ENV_VARS_TO_STRIP:
-        env.pop(key, None)
-    return env
 
 _CANDIDATE_EXECUTABLE_NAMES: tuple[str, ...] = ("soffice", "libreoffice", "soffice.exe")
 
@@ -79,6 +63,25 @@ _HWP_OLE_SIGNATURE: bytes = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 _ZIP_SIGNATURE: bytes = b"PK\x03\x04"
 
 _PDF_MAGIC: bytes = b"%PDF-"
+
+# 가은/Claude(2026-07-22, 용준 협의 — 동시 변환 실패 대응, 실측 재설계): HWP/HWPX 변환은
+# 반드시 "기본 사용자 프로필"로 실행해야 한다 — HWP 필터(H2Orestart 확장)가 사용자
+# 프로필 안에만 설치돼 있어서(`unopkg list --shared`는 비어 있음, 실측 2026-07-22),
+# -env:UserInstallation으로 빈 격리 프로필을 주면 확장이 없어 soffice가 0xC0000409로
+# 크래시한다(기본 프로필로는 같은 파일이 정상 변환되는 것을 4조합 매트릭스로 확인).
+# 기존 사용자 프로필을 임시 복사하는 방식도 Windows MAX_PATH(260자) 제한에 걸려 기각.
+#
+# 대신 기본 프로필을 쓰는 soffice 호출은 "동시에 하나만" 실행되도록 이 락으로 직렬화한다
+# — LibreOffice headless는 같은 프로필을 두 프로세스가 쓰면 나중 프로세스가 실패하기
+# 때문이다(preview_pdf_converter.py의 재인 실측과 동일). 격리 프로필을 쓰는 호출(docx
+# 미리보기, 기동 진단의 txt 프로브)은 프로필이 서로 달라 이 락과 무관하게 병렬로 돌 수
+# 있다. preview_pdf_converter.py가 HWP/HWPX 미리보기를 변환할 때도 이 락을 함께 쓴다.
+#
+# 한계: ① 프로세스 내 락이라 uvicorn 워커가 여러 개면 서로를 못 막는다(현재 dev/배포
+# 모두 단일 워커). ② 사용자가 LibreOffice 창을 열어두면(GUI도 기본 프로필 사용) HWP
+# 변환이 실패할 수 있다. 근본 해결은 H2Orestart를 shared로 설치(`unopkg add --shared`,
+# 관리자 권한 필요)한 뒤 격리 프로필로 되돌리는 것 — 팀 논의 필요.
+SOFFICE_DEFAULT_PROFILE_LOCK = threading.Lock()
 
 
 def looks_like_hwp(path: Path) -> bool:
@@ -218,6 +221,9 @@ class HwpPdfConverter:
         staged_source = work_dir / f"{safe_stem}{extension}"
         shutil.copyfile(source_path, staged_source)
 
+        # 기본 프로필로 실행한다(-env:UserInstallation 격리 금지 — H2Orestart가 사용자
+        # 프로필에만 있어 격리 프로필에서는 크래시, SOFFICE_DEFAULT_PROFILE_LOCK 주석 참고).
+        # 대신 아래 subprocess 호출을 락으로 직렬화해 기본 프로필 동시 사용을 막는다.
         command = [
             executable,
             "--headless",
@@ -238,15 +244,15 @@ class HwpPdfConverter:
 
         start = time.monotonic()
         try:
-            completed = subprocess.run(
-                command,
-                shell=False,
-                check=False,
-                timeout=self._config.timeout_seconds,
-                capture_output=True,
-                text=True,
-                env=_subprocess_env_for_libreoffice(),
-            )
+            with SOFFICE_DEFAULT_PROFILE_LOCK:
+                completed = subprocess.run(
+                    command,
+                    shell=False,
+                    check=False,
+                    timeout=self._config.timeout_seconds,
+                    capture_output=True,
+                    text=True,
+                )
         except subprocess.TimeoutExpired as exc:
             duration_ms = int((time.monotonic() - start) * 1000)
             self._cleanup(staged_source)
@@ -351,6 +357,7 @@ class HwpPdfConverter:
                     path.unlink()
             except OSError as exc:
                 logger.warning("[DOCUMENT_CONVERSION_CLEANUP_FAILED] path_name=%s error=%s", path.name, exc)
+
 
 
 __all__ = [

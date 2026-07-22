@@ -39,26 +39,25 @@ class ConversionTimeoutError(DocumentConversionError):
 
 
 class ConversionProcessError(DocumentConversionError):
-    """변환 프로세스가 0이 아닌 종료 코드로 끝난 경우.
+    """변환 프로세스가 0이 아닌 종료 코드로 끝난 경우."""
 
-    실측(2026-07-21, 재인/Claude): 이 경로로 떨어지는 HWP 실패는 대부분 파일 손상이
-    아니라, 서버가 쓰는 LibreOffice의 HWP 가져오기 필터가 최신 한글(2002 이후) 문서
-    형식을 구조적으로 지원하지 못하는 것이 원인이다(한글 자체 프로그램에서는 정상
-    열림). user_message를 "파일이 손상되었을 수 있다"는 오해를 주는 문구 대신,
-    한글에서 PDF로 내보낸 뒤 다시 업로드하라는 실행 가능한 안내로 바꿨다.
-    """
-
+    # 가은/Claude(2026-07-22): 일부 HWP는 파일 자체가 변환 필터(H2Orestart)와 호환되지 않아
+    # 서버 환경이 정상이어도 항상 실패한다(실측: 특정 공모전 신청양식 HWP가 0xC0000409로
+    # 크래시). 사용자가 스스로 해결할 수 있는 유일한 방법이 "한글에서 PDF로 저장 후 업로드"
+    # 이므로 안내 문구에 그 우회로를 포함한다.
     user_message = (
-        "HWP/HWPX 문서를 PDF로 변환하지 못했습니다. 서버 변환기가 최신 버전의 한글 "
-        "문서 형식을 지원하지 못해 발생하는 문제일 수 있습니다 — 한글에서 파일을 열고 "
-        "'다른 이름으로 저장 > PDF'로 저장한 뒤 다시 업로드해 주세요."
+        "HWP/HWPX 문서를 PDF로 변환하지 못했습니다. 파일이 손상되었거나 지원하지 않는 문서 버전일 수 "
+        "있습니다. 한글(HWP) 프로그램에서 PDF로 저장한 뒤 그 PDF를 업로드하면 이용할 수 있어요."
     )
 
 
 class ConvertedFileNotFoundError(DocumentConversionError):
     """변환 프로세스는 성공했지만 출력 PDF가 생성되지 않은 경우."""
 
-    user_message = "HWP/HWPX 문서를 PDF로 변환하지 못했습니다. 파일이 손상되었거나 지원하지 않는 문서 버전일 수 있습니다."
+    user_message = (
+        "HWP/HWPX 문서를 PDF로 변환하지 못했습니다. 파일이 손상되었거나 지원하지 않는 문서 버전일 수 "
+        "있습니다. 한글(HWP) 프로그램에서 PDF로 저장한 뒤 그 PDF를 업로드하면 이용할 수 있어요."
+    )
 
 
 class InvalidConvertedPdfError(DocumentConversionError):

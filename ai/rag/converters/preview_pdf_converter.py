@@ -24,7 +24,7 @@ from ai.rag.converters.exceptions import (
     InvalidConvertedPdfError,
     InvalidSourceFileError,
 )
-from ai.rag.converters.hwp_pdf_converter import find_executable, _subprocess_env_for_libreoffice
+from ai.rag.converters.hwp_pdf_converter import SOFFICE_DEFAULT_PROFILE_LOCK, find_executable
 
 logger = logging.getLogger(__name__)
 
@@ -76,22 +76,38 @@ def convert_to_preview_pdf(
     # 있는 걸 보고 종료 코드 1로 실패한다(워크벤치 진입 시 React 18 StrictMode가 effect를
     # 두 번 실행해서 실제로 재현됨). -env:UserInstallation로 요청마다 완전히 독립된 임시
     # 프로필을 주면 동시 실행이 서로 안 부딪힌다.
-    profile_dir = output_dir / f"{safe_stem}_profile"
-    profile_dir.mkdir(parents=True, exist_ok=True)
+    #
+    # 가은/Claude(2026-07-22, 용준 협의 — 동시 변환 실패 대응, 재인님 확인 필요): 단,
+    # HWP/HWPX만은 격리 프로필을 쓰면 안 된다는 것이 실측으로 확인됐다 — HWP 필터
+    # (H2Orestart 확장)가 사용자 기본 프로필 안에만 설치돼 있어서, 빈 격리 프로필로 HWP를
+    # 변환하면 확장이 없어 soffice가 0xC0000409로 크래시한다(즉 HWP 미리보기는 이 격리가
+    # 들어간 뒤로 항상 실패하고 있었다). 그래서 HWP/HWPX는 기본 프로필 +
+    # SOFFICE_DEFAULT_PROFILE_LOCK(hwp_pdf_converter.py와 공유, 기본 프로필 동시 사용
+    # 직렬화)으로 변환하고, docx/pptx 등 확장이 필요 없는 형식은 기존 격리 방식을 그대로
+    # 유지한다(StrictMode 동시 요청 병렬 처리도 그대로 유지됨).
+    is_hwp_family = source_path.suffix.lower() in {".hwp", ".hwpx"}
+    profile_dir: Optional[Path] = None
 
-    command = [
-        executable, "--headless", "--norestore",
-        f"-env:UserInstallation={profile_dir.resolve().as_uri()}",
-        "--convert-to", "pdf", "--outdir", str(output_dir), str(staged_source),
-    ]
+    command = [executable, "--headless", "--norestore"]
+    if not is_hwp_family:
+        profile_dir = output_dir / f"{safe_stem}_profile"
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        command.append(f"-env:UserInstallation={profile_dir.resolve().as_uri()}")
+    command += ["--convert-to", "pdf", "--outdir", str(output_dir), str(staged_source)]
 
     start = time.monotonic()
     try:
-        completed = subprocess.run(
-            command, shell=False, check=False,
-            timeout=effective_config.timeout_seconds, capture_output=True, text=True,
-            env=_subprocess_env_for_libreoffice(),
-        )
+        if is_hwp_family:
+            with SOFFICE_DEFAULT_PROFILE_LOCK:
+                completed = subprocess.run(
+                    command, shell=False, check=False,
+                    timeout=effective_config.timeout_seconds, capture_output=True, text=True,
+                )
+        else:
+            completed = subprocess.run(
+                command, shell=False, check=False,
+                timeout=effective_config.timeout_seconds, capture_output=True, text=True,
+            )
     except subprocess.TimeoutExpired as exc:
         _cleanup(staged_source)
         _cleanup_dir(profile_dir)
@@ -135,7 +151,10 @@ def _cleanup(*paths: Path) -> None:
             logger.warning("[PREVIEW_PDF_CLEANUP_FAILED] path_name=%s error=%s", path.name, exc)
 
 
-def _cleanup_dir(path: Path) -> None:
+def _cleanup_dir(path: Optional[Path]) -> None:
+    # HWP/HWPX 경로는 격리 프로필을 만들지 않으므로(None) 정리할 것도 없다.
+    if path is None:
+        return
     try:
         if path.exists():
             shutil.rmtree(path)

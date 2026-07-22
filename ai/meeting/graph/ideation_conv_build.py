@@ -30,7 +30,14 @@ from .ideation_conv_discovery import (
     make_candidate_planning_node,
     make_candidate_selection_node,
 )
-from .ideation_conv_nodes import make_conv_discussion_node, make_conv_question_node, make_conv_synthesis_node
+from .ideation_conv_nodes import (
+    REVISION_TRIGGER_STANCES,
+    make_canvas_update_node,
+    make_conv_discussion_node,
+    make_conv_question_node,
+    make_conv_synthesis_node,
+    make_discussion_facilitator_node,
+)
 from .ideation_conv_state import IdeationConvState
 from .llm import LLMCall
 
@@ -64,7 +71,43 @@ def _route_after_first_discussion(state: IdeationConvState) -> str:
     return "failed" if state.get("phase") == "failed" else "ok"
 
 
-def _route_after_second_discussion(state: IdeationConvState) -> str:
+def _route_after_review(state: IdeationConvState) -> str:
+    """용준/Claude(2026-07-21, 요청: 위원 간 실제 회의로 개편): dev_expert_discussion(review
+    단계) 직후 라우팅. dev의 stance가 REVISION_TRIGGER_STANCES에 속할 때만
+    planning_expert_revision을 거친다 — "동의"/"보완"처럼 원래 제안을 바꿀 필요가 없는
+    반응이면 곧바로 진행자 정리로 건너뛴다(요청 6번 "필요할 때만 수정 의견 1회", 비용 절감).
+    """
+    if state.get("phase") == "failed":
+        return "failed"
+    if state.get("discussion_review_stance") in REVISION_TRIGGER_STANCES:
+        return "revise"
+    return "summarize"
+
+
+def _route_after_revision(state: IdeationConvState) -> str:
+    return "failed" if state.get("phase") == "failed" else "summarize"
+
+
+def _route_after_facilitator_summary(state: IdeationConvState) -> str:
+    """가은/Claude(2026-07-22, 요청: 아이디어 기획 캔버스 자동 갱신 — 경이 협의 완료):
+    discussion_facilitator 직후에는 라운드 진행 라우팅 전에 canvas_update를 한 번 거친다 —
+    "매 라운드 후 캔버스 필드 갱신". 진행자 정리가 실패했으면(phase="failed") 캔버스 갱신도
+    건너뛰고 즉시 멈춘다."""
+    return "failed" if state.get("phase") == "failed" else "update_canvas"
+
+
+def _route_after_facilitator(state: IdeationConvState) -> str:
+    """discussion_facilitator는 phase를 절대 바꾸지 않으므로(dev_expert_discussion이 이미
+    정한 값을 그대로 둔다), 여기서 보는 phase는 review 단계가 결정한 값 그대로다.
+    canvas_update도 phase를 절대 바꾸지 않는다(비치명적 노드 — ideation_conv_nodes.py::
+    make_canvas_update_node 참고)라서, canvas_update 뒤에 이 라우팅을 그대로 옮겨 써도
+    보는 phase 값은 기존과 동일하다.
+
+    용준/Claude(2026-07-21, 요청: 전문가 라운드테이블 전환): dev_expert_discussion이
+    다음 라운드로 이어가기로 판단하면(phase="planning_question") 그 phase 값은 그대로
+    "다음 라운드 시작" 신호로만 쓰고, 실제로는 1:1 인터뷰(planning_question 노드)가 아니라
+    라운드테이블(planning_expert_discussion)로 돌아간다 — phase 문자열 자체는 최소 변경
+    원칙에 따라 바꾸지 않고 라우팅 목적지만 바꾼다."""
     phase = state.get("phase")
     if phase == "failed":
         return "failed"
@@ -123,11 +166,25 @@ def assemble_ideation_conversation_graph(
         "dev_expert", "awaiting_developer_answer", llm_call, evidence_lookup
     )
     planning_discussion_node = make_conv_discussion_node(
-        "planning_expert", speaks_second=False, llm_call=llm_call, evidence_lookup=evidence_lookup
+        "planning_expert", speaks_second=False, llm_call=llm_call, evidence_lookup=evidence_lookup,
+        discussion_stage="initial_position",
     )
     dev_discussion_node = make_conv_discussion_node(
-        "dev_expert", speaks_second=True, llm_call=llm_call, evidence_lookup=evidence_lookup
+        "dev_expert", speaks_second=True, llm_call=llm_call, evidence_lookup=evidence_lookup,
+        discussion_stage="review",
     )
+    # 용준/Claude(2026-07-21, 요청: 위원 간 실제 회의로 개편) — planning_expert가 dev_expert의
+    # 구체적 우려에 수정/유지로 응답하는 조건부 노드(REVISION_TRIGGER_STANCES일 때만 실행,
+    # _route_after_review 참고). speaks_second=False로 만든다 — 라운드를 끝낼지 여부는 이미
+    # review 단계가 결정했으므로 이 노드는 phase를 건드리지 않는다.
+    planning_revision_node = make_conv_discussion_node(
+        "planning_expert", speaks_second=False, llm_call=llm_call, evidence_lookup=evidence_lookup,
+        discussion_stage="revision",
+    )
+    discussion_facilitator_node = make_discussion_facilitator_node(llm_call)
+    # 가은/Claude(2026-07-22, 요청: 아이디어 기획 캔버스 자동 갱신 — 경이 협의 완료) — 매
+    # 라운드 진행자 정리 직후 캔버스(state["idea_canvas"])를 갱신하는 비치명적 노드.
+    canvas_update_node = make_canvas_update_node(llm_call)
     synthesis_node = make_conv_synthesis_node(llm_call)
 
     # 용준/Claude(2026-07-21): discovery(아이디어 발굴) 모드 노드 3종.
@@ -139,6 +196,9 @@ def assemble_ideation_conversation_graph(
     graph.add_node("developer_question", developer_question_node)
     graph.add_node("planning_expert_discussion", planning_discussion_node)
     graph.add_node("dev_expert_discussion", dev_discussion_node)
+    graph.add_node("planning_expert_revision", planning_revision_node)
+    graph.add_node("discussion_facilitator", discussion_facilitator_node)
+    graph.add_node("canvas_update", canvas_update_node)
     graph.add_node("synthesis", synthesis_node)
     graph.add_node("candidate_planning", candidate_planning_node)
     graph.add_node("candidate_feasibility", candidate_feasibility_node)
@@ -166,9 +226,35 @@ def assemble_ideation_conversation_graph(
     )
     graph.add_conditional_edges(
         "dev_expert_discussion",
-        _route_after_second_discussion,
+        _route_after_review,
         {
-            "continue_round": "planning_question",
+            "revise": "planning_expert_revision",
+            "summarize": "discussion_facilitator",
+            "failed": END,
+        },
+    )
+    graph.add_conditional_edges(
+        "planning_expert_revision",
+        _route_after_revision,
+        {"summarize": "discussion_facilitator", "failed": END},
+    )
+    # 가은/Claude(2026-07-22, 요청: 아이디어 기획 캔버스 자동 갱신 — 경이 협의 완료) —
+    # 라운드 종료 라우팅 앞에 canvas_update를 끼워 넣는다: discussion_facilitator ->
+    # canvas_update -> (기존 라우팅 그대로). canvas_update는 phase를 바꾸지 않으므로
+    # _route_after_facilitator가 보는 값은 이 변경 전과 동일하다.
+    graph.add_conditional_edges(
+        "discussion_facilitator",
+        _route_after_facilitator_summary,
+        {"update_canvas": "canvas_update", "failed": END},
+    )
+    graph.add_conditional_edges(
+        "canvas_update",
+        _route_after_facilitator,
+        {
+            # 용준/Claude(2026-07-21, 요청: 전문가 라운드테이블 전환) — 다음 라운드도 1:1
+            # 인터뷰(planning_question)가 아니라 라운드테이블(planning_expert_discussion)로
+            # 곧바로 이어간다.
+            "continue_round": "planning_expert_discussion",
             "await_user_decision": END,
             "failed": END,
         },
@@ -189,7 +275,11 @@ def assemble_ideation_conversation_graph(
         "candidate_selection",
         _route_after_candidate_selection,
         {
-            "to_refinement": "planning_question",
+            # 용준/Claude(2026-07-21, 요청: 전문가 라운드테이블 전환) — 후보 확정 직후에도
+            # 1:1 인터뷰가 아니라 라운드테이블로 바로 들어간다(refinement 시작과 동일한
+            # 원칙). 안건 제시 메시지는 ideation_conv_discovery.py의 후보 확정 지점이
+            # build_roundtable_opening_message로 미리 붙여 둔다.
+            "to_refinement": "planning_expert_discussion",
             "regenerate": "candidate_planning",
             "await_selection": END,
             "failed": END,

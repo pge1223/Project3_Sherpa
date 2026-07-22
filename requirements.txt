@@ -61,3 +61,4 @@ openai
 #      `unopkg add H2Orestart.oxt`로 설치 (Java 런타임 필요 - Java 기반 확장).
 #      둘 중 하나라도 없으면 업로드는 성공하되 conversion_status=failed로 남는다
 #      (ai/rag/converters/INTEGRATION.md 참고).
+accelerate
