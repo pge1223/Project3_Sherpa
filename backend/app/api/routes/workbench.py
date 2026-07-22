@@ -512,11 +512,21 @@ async def get_context_check(
 # 공고문에서 요구 분량(페이지)을 뽑을 때 LLM에 넣는 원문 최대 길이. 분량 기준은 보통
 # 제출/작성 안내 근처에 있어 앞부분으로 충분하지만, 넉넉히 준다.
 _PAGE_REQ_MAX_CHARS = 12000
-# 이 비율 미만이면 "여백 많음"으로 본다. 재인/Claude(2026-07-22) 실측(구간 병합 지표
-# 기준): 빽빽한 실제 문서(BioFitRAG·WageGuard)는 평균 52~55%, 보통 문서(리스킬·
-# 도서관리커넥트·톡스탠드)는 39~40%로 나뉘어, 45%는 "보통도 걸리고 빽빽해야 통과"하는
-# 까다로운 기준이다 - 사용자 확인(2026-07-22) "45로 해"로 확정.
+# 이 비율 미만이면 그 "개별 페이지"가 여백 많음으로 본다. 재인/Claude(2026-07-22)
+# 실측(벡터 도형 포함 전, 구간 병합 지표 기준): 빽빽한 실제 문서(BioFitRAG·WageGuard)는
+# 평균 52~55%, 보통 문서(리스킬·도서관리커넥트·톡스탠드)는 39~40%로 나뉘어, 45%는
+# "보통도 걸리고 빽빽해야 통과"하는 까다로운 기준이다 - 사용자 확인(2026-07-22) "45로 해"로
+# 확정. 이후 벡터 도형(색깔박스·표·다이어그램)을 커버리지에 포함하도록 지표를 고친 뒤에도
+# 이 값은 그대로 유효했다(실제 대상 수상작 SchoolBridge 최저 페이지 41.5%가 45% 바로
+# 아래라 딱 하나만 걸리고, 평범한 문서의 진짜 빈 페이지 10~30%대는 확실히 걸러짐).
 _DENSITY_SPARSE_THRESHOLD = 0.45
+
+# 이 비율 미만이면 "문서 전체"가 전반적으로 여백이 많다고 본다(개별 페이지가 아니라
+# 평균 채움률 기준). 재인/Claude(2026-07-22) 실측(벡터 도형 포함 지표): 실제 대상
+# 수상작(SchoolBridge) 평균 66.8% vs 평범한 실제 사업계획서(WageGuard) 평균 52.7% -
+# 데이터 2건뿐이라 정확한 경계는 불확실하나, 사용자 확인(2026-07-22) "63%로, 수상작에
+# 근접하게 까다롭게"로 확정. 평범한 문서는 확실히 걸리고 수상작 수준이어야 통과한다.
+_DENSITY_OVERALL_THRESHOLD = 0.63
 
 
 class PageRequirement(BaseModel):
@@ -539,6 +549,7 @@ class FormatCheckResponse(BaseModel):
     page_verdict: Optional[str] = None  # "부족"/"충족"/"초과"/None(기준 없음)
     page_message: Optional[str] = None
     overall_coverage: Optional[float] = None  # 전체 평균 밀도(0~1)
+    overall_verdict: Optional[str] = None  # "양호"/"부족"/None(판정 대상 없음)
     sparse_pages: list[int] = []
     density_message: Optional[str] = None
 
@@ -603,21 +614,36 @@ def _extract_required_pages(criteria_text: str) -> PageRequirement:
 def _analyze_pdf_format(pdf_path: Path) -> tuple[int, list[PageDensity]]:
     """PDF의 페이지 수와 페이지별 세로 커버리지(밀도)를 계산한다.
 
-    커버리지 = "내용(텍스트+이미지)이 세로로 차지한 구간"의 길이 / 페이지 높이.
-    블록 높이를 단순 합산하지 않고 겹치는 세로 구간을 병합해서 재는 이유:
-    (1) 표·다단 레이아웃은 블록이 세로로 겹쳐 단순 합산 시 100%를 넘어버린다,
-    (2) 차트·다이어그램으로 꽉 찬 페이지는 텍스트만 세면 '스카스카'로 오판되므로
-    이미지 블록도 내용으로 포함해야 한다(재인/Claude 2026-07-22 실측 대응)."""
+    커버리지 = "내용(텍스트+이미지+색깔박스·표 등 벡터 도형)이 세로로 차지한 구간"의
+    길이 / 페이지 높이. 블록 높이를 단순 합산하지 않고 겹치는 세로 구간을 병합해서
+    재는 이유: (1) 표·다단 레이아웃은 블록이 세로로 겹쳐 단순 합산 시 100%를 넘어버린다,
+    (2) 차트·다이어그램으로 꽉 찬 페이지는 텍스트만 세면 '스카스카'로 오판되므로 이미지
+    블록도 내용으로 포함해야 한다(재인/Claude 2026-07-22 실측 대응).
+
+    벡터 도형(색깔 박스·표 배경·테두리)도 포함하는 이유: 실측(2026-07-22)으로 확인한
+    실제 대상 수상작(SchoolBridge)에서, 텍스트+이미지만 셌을 때 색깔 박스·표·다이어그램이
+    많은 페이지(도형 40~66개)가 오히려 '스카스카'로 잘못 판정됐다 - 디자인 요소가 많은
+    페이지일수록 불리해지는 정반대 결과였다. get_drawings()로 사각형/선 등 채워진 도형의
+    세로 범위도 같은 방식으로 병합해 넣는다."""
     doc = fitz.open(pdf_path)
     try:
         densities: list[PageDensity] = []
         for i, page in enumerate(doc):
             page_height = page.rect.height or 1.0
-            # 텍스트(type 0)와 이미지(type 1) 모두 '내용'으로 보고 세로 구간을 모은다.
+            # 텍스트(type 0)·이미지(type 1)·벡터 도형(색깔박스·표 등) 모두 '내용'으로 보고
+            # 세로 구간을 모은다.
+            drawing_intervals = [
+                (d["rect"].y0, d["rect"].y1)
+                for d in page.get_drawings()
+                if d.get("rect") and d["rect"].y1 > d["rect"].y0
+            ]
             intervals = sorted(
-                (b["bbox"][1], b["bbox"][3])
-                for b in page.get_text("dict").get("blocks", [])
-                if b.get("bbox") and b["bbox"][3] > b["bbox"][1]
+                [
+                    (b["bbox"][1], b["bbox"][3])
+                    for b in page.get_text("dict").get("blocks", [])
+                    if b.get("bbox") and b["bbox"][3] > b["bbox"][1]
+                ]
+                + drawing_intervals
             )
             filled = 0.0
             cur_start = cur_end = None
@@ -716,18 +742,23 @@ async def get_format_check(
             page_verdict = "충족"
             page_message = f"공고문 기준 {req_label}에 맞게 충분히 작성되었습니다."
 
-    # 밀도 판정 - 마지막 페이지는 원래 짧게 끝나는 게 정상이라 스카스카 판정에서 제외
+    # 밀도 판정 - 마지막 페이지는 원래 짧게 끝나는 게 정상이라 판정에서 제외한다.
+    # 두 기준을 같이 본다: (1) 개별 페이지가 너무 비었는지(sparse_pages, 45%), (2) 문서
+    # 전체 평균이 실제 수상작 수준으로 빽빽한지(overall_verdict, 63% - 사용자 확인
+    # 2026-07-22 "평균을 봐야 하지 않나" 요청으로 추가).
     judged = densities[:-1] if len(densities) > 1 else densities
     sparse_pages = [d.page for d in judged if d.coverage < _DENSITY_SPARSE_THRESHOLD]
     overall = round(sum(d.coverage for d in judged) / len(judged), 3) if judged else None
+    overall_verdict = None
     density_message = None
     if overall is not None:
+        overall_verdict = "양호" if overall >= _DENSITY_OVERALL_THRESHOLD else "부족"
+        parts = [f"문서 전체 평균 채움률은 {round(overall * 100)}%입니다({overall_verdict})."]
+        if overall_verdict == "부족":
+            parts.append("실제 수상작 수준(약 65~70%)보다 여백이 많은 편이라, 내용을 더 채우는 게 좋습니다.")
         if sparse_pages:
-            density_message = (f"전체 페이지 채움 정도는 평균 {round(overall * 100)}%이고, "
-                               f"{', '.join(map(str, sparse_pages))}페이지가 절반 넘게 비어 있습니다. "
-                               f"여백·줄바꿈을 줄이고 내용을 더 채우면 좋습니다.")
-        else:
-            density_message = f"페이지를 평균 {round(overall * 100)}% 채워 밀도가 양호합니다."
+            parts.append(f"그중 {', '.join(map(str, sparse_pages))}페이지는 특히 절반 넘게 비어 있습니다.")
+        density_message = " ".join(parts)
 
     return await _cache_and_return(FormatCheckResponse(
         required_min=page_req.required_min,
@@ -737,6 +768,7 @@ async def get_format_check(
         page_verdict=page_verdict,
         page_message=page_message,
         overall_coverage=overall,
+        overall_verdict=overall_verdict,
         sparse_pages=sparse_pages,
         density_message=density_message,
     ))
