@@ -96,8 +96,14 @@ def _check_soffice_can_convert(soffice_path: str, config: HwpConversionConfig) -
     probe_name = uuid.uuid4().hex
     probe_source = probe_dir / f"{probe_name}.txt"
     probe_output = probe_dir / f"{probe_name}.pdf"
+    # 가은/Claude(2026-07-22, 용준 협의 — 동시 변환 실패 대응): 진단 프로브도 실제 변환기
+    # (hwp_pdf_converter.py)와 동일하게 독립 임시 프로필을 쓴다 — 기본 프로필을 쓰면 서버
+    # 기동 진단이 그 순간의 실제 업로드 변환이나 사용자가 열어 둔 LibreOffice와 부딪혀
+    # 오탐(available=False)을 만들거나 반대로 실제 변환을 깨뜨릴 수 있다.
+    probe_profile_dir = probe_dir / f"{probe_name}_profile"
     try:
         probe_dir.mkdir(parents=True, exist_ok=True)
+        probe_profile_dir.mkdir(parents=True, exist_ok=True)
         probe_source.write_text("HWP conversion diagnostics probe", encoding="utf-8")
 
         completed = subprocess.run(
@@ -105,6 +111,7 @@ def _check_soffice_can_convert(soffice_path: str, config: HwpConversionConfig) -
                 soffice_path,
                 "--headless",
                 "--norestore",
+                f"-env:UserInstallation={probe_profile_dir.resolve().as_uri()}",
                 "--convert-to",
                 "pdf",
                 "--outdir",
@@ -130,6 +137,11 @@ def _check_soffice_can_convert(soffice_path: str, config: HwpConversionConfig) -
                     path.unlink()
             except OSError:
                 pass
+        try:
+            if probe_profile_dir.exists():
+                shutil.rmtree(probe_profile_dir)
+        except OSError:
+            pass
         try:
             probe_dir.rmdir()
         except OSError:

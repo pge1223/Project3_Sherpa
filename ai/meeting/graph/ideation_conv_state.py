@@ -298,6 +298,15 @@ class IdeationConvState(TypedDict):
     # 결정하는 조건부 엣지(ideation_conv_build.py::_route_after_review)가 참조한다.
     discussion_review_stance: str | None
 
+    # 가은/Claude(2026-07-22, 요청: 아이디어 기획 캔버스 자동 갱신 — 경이 협의 완료): 프론트
+    # 오른쪽 패널 '아이디어 기획 캔버스'의 최신 값(problem/target_user/core_value/solution/
+    # differentiation/feasibility/risks/contest_fit — selected_idea와 같은 키 이름을 써서
+    # 프론트가 idea_canvas ?? selected_idea 폴백만으로 그릴 수 있게 한다). 매 라운드가 끝날
+    # 때 canvas_update 노드(ideation_conv_nodes.py::make_canvas_update_node)가 덮어쓴다.
+    # 갱신 실패 시에는 직전 값이 그대로 유지된다(비치명적). 구버전 저장 state에는 이 키가
+    # 없을 수 있으므로 읽는 쪽은 항상 `.get("idea_canvas")`로 접근한다(하위 호환).
+    idea_canvas: dict | None
+
 
 def _extract_initial_idea_text(user_idea: dict | str | None) -> str:
     """user_idea에서 trim된 초기 아이디어 텍스트를 뽑아낸다. dict({"description": ...})와
@@ -387,6 +396,7 @@ def initial_conv_state(
         discussion_revised_proposal=None,
         discussion_next_action=None,
         discussion_review_stance=None,
+        idea_canvas=None,
     )
 
 

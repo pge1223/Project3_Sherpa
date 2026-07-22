@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
-import { AlertCircle, AlertTriangle, Lightbulb, MessageSquare, Sparkles } from 'lucide-react'
+import { AlertCircle, AlertTriangle, Lightbulb, MessageSquare, PenLine, Sparkles } from 'lucide-react'
 import { getDocuments } from '../../api/documentApi'
-import { getQuoteMatches, getContextCheck } from '../../api/workbenchApi'
+import { getQuoteMatches, getContextCheck, getTypoCheck, getFormatCheck } from '../../api/workbenchApi'
 import { getProjectReport } from '../../api/projectApi'
 import { API_BASE_URL } from '../../api/client'
 import PdfDocumentView from './PdfDocumentView'
@@ -157,10 +157,25 @@ function extractContextFeedbackItems(contextFindings) {
   }))
 }
 
+// 재인/Claude(2026-07-22): "오탈자 검사" 결과도 맥락 이상 감지와 마찬가지로 PDF
+// 하이라이트(클릭하면 아래 공용 상세 패널에 표시)까지는 같은 방식을 쓴다 - 대신
+// 사용자 요청으로 화면 오른쪽엔 맥락 이상 감지와 섞이지 않는 별도의 "오탈자 의심"
+// 요약 카드(평가되지 않은 항목 카드와 같은 패턴)를 하나 더 둔다.
+function extractTypoFeedbackItems(typoFindings) {
+  return (typoFindings || []).map((f) => ({
+    id: f.id,
+    kind: 'typo',
+    text: `'${f.quote}' → '${f.corrected}'${f.message ? ` (${f.message})` : ''}`,
+    criterionName: '오탈자',
+    reviewerName: 'AI 검토',
+  }))
+}
+
 const KIND_BADGE = {
   issue: { label: '지적사항', bg: 'var(--coral-dim)', fg: 'var(--coral)', icon: <AlertCircle size={12} /> },
   suggestion: { label: '제안', bg: 'var(--green-dim)', fg: 'var(--green)', icon: <Lightbulb size={12} /> },
   context: { label: '맥락 이상', bg: 'var(--amber-dim)', fg: 'var(--amber)', icon: <AlertTriangle size={12} /> },
+  typo: { label: '오탈자', bg: 'var(--rose-dim)', fg: 'var(--rose)', icon: <PenLine size={12} /> },
 }
 
 export default function WorkbenchScreen({ projectId }) {
@@ -177,6 +192,10 @@ export default function WorkbenchScreen({ projectId }) {
   // 그래서 reviewOutput을 기다리지 않고 프로젝트가 정해지는 즉시 따로 불러온다. 실패해도
   // 위원 피드백 화면 자체는 정상 동작해야 하므로 조용히 콘솔에만 남긴다(치명적이지 않음).
   const [contextFindings, setContextFindings] = useState(null)
+  // 오탈자 검사도 같은 이유로(문서만 있으면 됨, 위원 회의와 무관) 독립적으로 불러온다.
+  const [typoFindings, setTypoFindings] = useState(null)
+  // 분량·밀도 체크도 문서만 있으면 되므로 독립적으로 불러온다.
+  const [formatCheck, setFormatCheck] = useState(null)
 
   useEffect(() => {
     if (!projectId) return
@@ -227,11 +246,30 @@ export default function WorkbenchScreen({ projectId }) {
     return () => { cancelled = true }
   }, [projectId])
 
+  useEffect(() => {
+    if (!projectId) return
+    let cancelled = false
+    getTypoCheck(projectId)
+      .then((findings) => { if (!cancelled) setTypoFindings(findings) })
+      .catch((err) => { console.error('[WorkbenchScreen] 오탈자 검사 실패', err) })
+    return () => { cancelled = true }
+  }, [projectId])
+
+  useEffect(() => {
+    if (!projectId) return
+    let cancelled = false
+    getFormatCheck(projectId)
+      .then((data) => { if (!cancelled) setFormatCheck(data) })
+      .catch((err) => { console.error('[WorkbenchScreen] 분량·밀도 검사 실패', err) })
+    return () => { cancelled = true }
+  }, [projectId])
+
   const feedbackItems = useMemo(() => extractFeedbackItems(reviewOutput), [reviewOutput])
   const contextFeedbackItems = useMemo(() => extractContextFeedbackItems(contextFindings), [contextFindings])
+  const typoFeedbackItems = useMemo(() => extractTypoFeedbackItems(typoFindings), [typoFindings])
   const allFeedbackItems = useMemo(
-    () => [...feedbackItems, ...contextFeedbackItems],
-    [feedbackItems, contextFeedbackItems],
+    () => [...feedbackItems, ...contextFeedbackItems, ...typoFeedbackItems],
+    [feedbackItems, contextFeedbackItems, typoFeedbackItems],
   )
   const feedbackById = useMemo(() => new Map(allFeedbackItems.map((f) => [f.id, f])), [allFeedbackItems])
 
@@ -257,9 +295,10 @@ export default function WorkbenchScreen({ projectId }) {
   // 보존한다(빈 배열은 truthy라 null과 구분해야 함).
   const combinedQuoteMatches = useMemo(() => {
     const contextQuoteMatches = (contextFindings || []).map((f) => ({ id: f.id, quote: f.quote, found: true }))
-    if (quoteMatches === null && contextQuoteMatches.length === 0) return null
-    return [...(quoteMatches || []), ...contextQuoteMatches]
-  }, [quoteMatches, contextFindings])
+    const typoQuoteMatches = (typoFindings || []).map((f) => ({ id: f.id, quote: f.quote, found: true }))
+    if (quoteMatches === null && contextQuoteMatches.length === 0 && typoQuoteMatches.length === 0) return null
+    return [...(quoteMatches || []), ...contextQuoteMatches, ...typoQuoteMatches]
+  }, [quoteMatches, contextFindings, typoFindings])
 
   const selectedFeedbackItems = selectedFeedbackIds
     .map((id) => feedbackById.get(id))
@@ -279,6 +318,7 @@ export default function WorkbenchScreen({ projectId }) {
         .wb-pdf-highlight-issue { background: var(--coral-dim); }
         .wb-pdf-highlight-suggestion { background: var(--green-dim); }
         .wb-pdf-highlight-context { background: var(--amber-dim); }
+        .wb-pdf-highlight-typo { background: var(--rose-dim); }
         /* "선택됨" 표시는 조각(span)마다 칠하지 않고, PdfDocumentView.jsx가 줄 단위로
            묶어 계산한 통짜 사각형을 이 레이어 위에 그린다(Google Docs/Notion 댓글
            표시 느낌) - pointer-events:none이라 클릭은 그대로 아래 textLayer가 받는다. */
@@ -333,6 +373,51 @@ export default function WorkbenchScreen({ projectId }) {
           팀 논의로 이 화면에서 빼기로 함 - committee_video_streaming_architecture.md
           쪽 스트리밍 연동은 이 워크벤치가 아닌 다른 화면에서 다룰 예정) */}
       <div style={{ flex: 1, minWidth: 280, display: 'flex', flexDirection: 'column', gap: 16 }}>
+        {/* 재인/Claude(2026-07-22): 분량(공고문 요구 페이지 vs 실제) + 밀도(빽빽함) 요약.
+            문서 전체 단위 체크라 맨 위에 둔다. 문제 있을 때만 눈에 띄게 색을 준다. */}
+        {formatCheck && (formatCheck.page_message || formatCheck.density_message) && (
+          <div
+            className="card glass"
+            style={{
+              flex: '0 0 auto', padding: 14,
+              border: `1px solid ${(formatCheck.page_verdict === '부족' || formatCheck.sparse_pages?.length)
+                ? 'var(--coral-dim)' : 'var(--green-dim)'}`,
+            }}
+          >
+            <div className="badge mono" style={{ marginBottom: 10, background: 'var(--bg-2)', color: 'var(--text-1)' }}>
+              📄 분량 · 밀도 체크
+            </div>
+            {formatCheck.page_message && (
+              <div style={{ marginBottom: formatCheck.density_message ? 10 : 0 }}>
+                <div style={{
+                  fontSize: 12.5, fontWeight: 600, marginBottom: 3,
+                  color: formatCheck.page_verdict === '부족' ? 'var(--coral)'
+                    : formatCheck.page_verdict === '충족' ? 'var(--green)' : 'var(--text-1)',
+                }}>
+                  분량: {formatCheck.actual_pages}p
+                  {formatCheck.required_max
+                    ? ` / 기준 ${formatCheck.required_min !== formatCheck.required_max
+                        ? `${formatCheck.required_min}~${formatCheck.required_max}` : formatCheck.required_max}p`
+                    : ''}
+                  {formatCheck.page_verdict ? ` (${formatCheck.page_verdict})` : ''}
+                </div>
+                <p style={{ fontSize: 12, lineHeight: 1.6, color: 'var(--text-2)' }}>{formatCheck.page_message}</p>
+              </div>
+            )}
+            {formatCheck.density_message && (
+              <div>
+                <div style={{
+                  fontSize: 12.5, fontWeight: 600, marginBottom: 3,
+                  color: formatCheck.sparse_pages?.length ? 'var(--coral)' : 'var(--green)',
+                }}>
+                  밀도: 평균 {Math.round((formatCheck.overall_coverage || 0) * 100)}% 채움
+                </div>
+                <p style={{ fontSize: 12, lineHeight: 1.6, color: 'var(--text-2)' }}>{formatCheck.density_message}</p>
+              </div>
+            )}
+          </div>
+        )}
+
         {unscoredItems.length > 0 && (
           <div
             className="card glass"
@@ -358,6 +443,35 @@ export default function WorkbenchScreen({ projectId }) {
           </div>
         )}
 
+        {/* 재인/Claude(2026-07-22): 사용자 요청으로 맥락 이상 감지와 섞이지 않는 별도
+            "오탈자 의심" 카드 - 위 "평가되지 않은 항목" 카드와 같은 패턴(항상 노출되는
+            요약 목록). 항목을 클릭하면 원문 하이라이트를 클릭한 것과 동일하게 선택되어
+            아래 상세 패널과 PDF 하이라이트에 반영된다. */}
+        {typoFindings && typoFindings.length > 0 && (
+          <div
+            className="card glass"
+            style={{ flex: '0 0 auto', maxHeight: '40%', overflowY: 'auto', padding: 14, border: '1px solid var(--rose-dim)' }}
+          >
+            <div className="badge mono" style={{ marginBottom: 10, background: 'var(--rose-dim)', color: 'var(--rose)' }}>
+              <PenLine size={12} /> 오탈자 의심 {typoFindings.length}건
+            </div>
+            {typoFindings.map((f) => (
+              <div
+                key={f.id}
+                onClick={() => setSelectedFeedbackIds([f.id])}
+                style={{ marginBottom: 10, paddingBottom: 10, borderBottom: '1px solid var(--border, #eee)', cursor: 'pointer' }}
+              >
+                <div style={{ fontSize: 12.5, fontWeight: 600, marginBottom: 4 }}>
+                  '{f.quote}' → '{f.corrected}'
+                </div>
+                {f.message && (
+                  <p style={{ fontSize: 12, lineHeight: 1.6, color: 'var(--text-1)' }}>{f.message}</p>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+
         <div className="card glass" style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: 18, display: 'flex', flexDirection: 'column', gap: 14 }}>
           {selectedFeedbackItems.length === 0 && (
             <div style={{ color: 'var(--text-2)', fontSize: 13, display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -368,13 +482,13 @@ export default function WorkbenchScreen({ projectId }) {
             const badge = KIND_BADGE[item.kind] || KIND_BADGE.issue
             return (
             <div key={item.id} style={{ paddingBottom: 14, borderBottom: '1px solid var(--border, #eee)' }}>
-              <div className="badge mono" style={{
-                marginBottom: 10,
-                background: badge.bg,
-                color: badge.fg,
-              }}>
+              <div className="badge mono" style={{ marginBottom: 10, background: badge.bg, color: badge.fg }}>
                 {badge.icon}
-                {badge.label} · {item.criterionName}
+                {/* criterionName이 배지 이름과 같으면(오탈자/맥락 이상처럼) 중복이라 생략하고,
+                    지적사항/제안처럼 실제 평가기준명일 때만 뒤에 붙인다. */}
+                {item.criterionName && item.criterionName !== badge.label
+                  ? `${badge.label} · ${item.criterionName}`
+                  : badge.label}
               </div>
               <p style={{ fontSize: 13.5, lineHeight: 1.6, marginBottom: 12 }}>{item.text}</p>
               <div style={{ fontSize: 11.5, color: 'var(--text-2)', display: 'flex', alignItems: 'center', gap: 6 }}>

@@ -368,6 +368,39 @@ def build_ideation_conv_discussion_prompt(
 
 
 IDEATION_CONV_DISCUSSION_FACILITATOR_TEMPLATE = "ideation_conv_discussion_facilitator.txt"
+IDEATION_CONV_CANVAS_UPDATE_TEMPLATE = "ideation_conv_canvas_update.txt"
+
+
+def build_ideation_conv_canvas_update_prompt(
+    current_canvas: Any,
+    selected_idea: Any,
+    initial_idea: str | None,
+    planning_position: Any,
+    development_review: Any,
+    revised_proposal: Any,
+    consensus_so_far: Any,
+    unresolved_issues: Any,
+    notice_and_criteria: Any,
+) -> str:
+    """가은/Claude(2026-07-22, 요청: 아이디어 기획 캔버스 자동 갱신 — 경이 협의 완료): 라운드테이블
+    한 라운드가 끝난 직후 캔버스(문제/타깃/해결 방식/차별점/구현 가능성·리스크/심사기준 대응)를
+    이번 라운드 발언으로 갱신하는 프롬프트를 조립한다. 페르소나 카드를 쓰지 않는다 — 이 노드는
+    화면에 보이는 발언을 만들지 않는 기록용 노드이기 때문이다."""
+    template = _read_text(IDEATION_CONV_CANVAS_UPDATE_TEMPLATE)
+    replacements = {
+        "<<CURRENT_CANVAS_JSON>>": _as_text(current_canvas if current_canvas is not None else None),
+        "<<SELECTED_IDEA_JSON>>": _as_text(selected_idea if selected_idea is not None else None),
+        "<<INITIAL_IDEA>>": (initial_idea or "").strip() or "null",
+        "<<PLANNING_POSITION_JSON>>": _as_text(planning_position),
+        "<<DEVELOPMENT_REVIEW_JSON>>": _as_text(development_review),
+        "<<REVISED_PROPOSAL_JSON>>": _as_text(revised_proposal if revised_proposal is not None else None),
+        "<<CONSENSUS_SO_FAR_JSON>>": _as_text(consensus_so_far if consensus_so_far is not None else []),
+        "<<UNRESOLVED_ISSUES_JSON>>": _as_text(unresolved_issues if unresolved_issues is not None else []),
+        "<<NOTICE_AND_CRITERIA_JSON>>": _as_text(notice_and_criteria),
+    }
+    for token, value in replacements.items():
+        template = template.replace(token, value)
+    return template
 
 
 def build_ideation_conv_discussion_facilitator_prompt(
