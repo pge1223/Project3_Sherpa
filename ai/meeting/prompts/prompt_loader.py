@@ -278,6 +278,9 @@ IDEATION_CONV_QUESTION_TEMPLATE = "ideation_conv_question.txt"
 IDEATION_CONV_DISCUSSION_TEMPLATE = "ideation_conv_discussion.txt"
 IDEATION_CONV_SYNTHESIS_TEMPLATE = "ideation_conv_synthesis.txt"
 IDEATION_CONV_SUFFICIENCY_TEMPLATE = "ideation_conv_sufficiency.txt"
+# 용준/Claude(2026-07-21, 요청: "모르겠다" UX 개선): 사용자가 질문에 답하는 대신 전문가
+# 판단에 위임했을 때(answer_type="expert_delegation") 담당 전문가가 제안을 만드는 템플릿.
+IDEATION_CONV_EXPERT_DELEGATION_TEMPLATE = "ideation_conv_expert_delegation.txt"
 
 # 용준/Claude(2026-07-21): discovery(아이디어 발굴) 모드 전용 템플릿 3종. refinement 전용
 # 템플릿(위 IDEATION_CONV_QUESTION_TEMPLATE 등)은 하나도 건드리지 않는다.
@@ -337,11 +340,17 @@ def build_ideation_conv_discussion_prompt(
     retrieved_evidence: Any,
     conversation_context: Any,
     speaks_second: bool,
+    discussion_stage: str = "initial_position",
 ) -> str:
     """기획/개발 전문가의 "보완 의견 턴" 실행 프롬프트를 조립한다. speaks_second=True인
     쪽(라운드의 두 번째 발언자)만 다음 행동(continue_round/await_user_decision)을
     판단한다 — "finalize"는 이 스키마에 아예 존재하지 않아, 전문가가 회의를 임의로
-    확정할 수 없다(요청 9~10항)."""
+    확정할 수 없다(요청 9~10항).
+
+    discussion_stage(용준/Claude(2026-07-21, 요청: 위원 간 실제 회의로 개편)는
+    "initial_position"(최초 의견, 기본값 — 기존 호출부 하위 호환) / "review"(상대 의견을
+    검토) / "revision"(검토를 반영해 수정하거나 유지) 중 하나다. 어느 값이든 스키마는
+    동일하고(호출부가 항상 같은 필드를 읽을 수 있다), 프롬프트 안내문만 달라진다."""
     card = get_persona_card(persona_id)
     template = _read_text(IDEATION_CONV_DISCUSSION_TEMPLATE)
     replacements = {
@@ -351,6 +360,45 @@ def build_ideation_conv_discussion_prompt(
         "<<RETRIEVED_EVIDENCE_JSON>>": _as_text(retrieved_evidence),
         "<<CONVERSATION_CONTEXT_JSON>>": _as_text(conversation_context),
         "<<SPEAKS_SECOND>>": "true" if speaks_second else "false",
+        "<<DISCUSSION_STAGE>>": discussion_stage,
+    }
+    for token, value in replacements.items():
+        template = template.replace(token, value)
+    return template
+
+
+IDEATION_CONV_DISCUSSION_FACILITATOR_TEMPLATE = "ideation_conv_discussion_facilitator.txt"
+
+
+def build_ideation_conv_discussion_facilitator_prompt(
+    notice_and_criteria: Any,
+    planning_position: Any,
+    development_review: Any,
+    revised_proposal: Any,
+    consensus_so_far: Any,
+    unresolved_issues: Any,
+    decided_next_action: str,
+    round_number: int,
+    max_rounds: int,
+) -> str:
+    """용준/Claude(2026-07-21, 요청: 위원 간 실제 회의로 개편): 기획/개발 두 전문가의 이번
+    라운드 보완 의견(및 수정 의견)이 끝난 직후, 진행자가 합의·이견을 정리하고 사용자 질문이
+    꼭 필요한지 판단하는 프롬프트를 조립한다. decided_next_action은 이미 dev_expert의 검토
+    턴이 정한 값을 그대로 받는다 — 이 프롬프트가 그 결정 자체를 바꾸지 않는다(요청: 기존
+    라운드 진행/max_rounds 강제 로직 재사용)."""
+    card = get_persona_card("ideation_facilitator")
+    template = _read_text(IDEATION_CONV_DISCUSSION_FACILITATOR_TEMPLATE)
+    replacements = {
+        "<<PERSONA_BLOCK>>": render_persona_block(card),
+        "<<NOTICE_AND_CRITERIA_JSON>>": _as_text(notice_and_criteria),
+        "<<PLANNING_POSITION_JSON>>": _as_text(planning_position),
+        "<<DEVELOPMENT_REVIEW_JSON>>": _as_text(development_review),
+        "<<REVISED_PROPOSAL_JSON>>": _as_text(revised_proposal if revised_proposal is not None else None),
+        "<<CONSENSUS_SO_FAR_JSON>>": _as_text(consensus_so_far if consensus_so_far is not None else []),
+        "<<UNRESOLVED_ISSUES_JSON>>": _as_text(unresolved_issues if unresolved_issues is not None else []),
+        "<<DECIDED_NEXT_ACTION>>": decided_next_action,
+        "<<ROUND_NUMBER>>": str(round_number),
+        "<<MAX_ROUNDS>>": str(max_rounds),
     }
     for token, value in replacements.items():
         template = template.replace(token, value)
@@ -391,6 +439,98 @@ def build_ideation_conv_sufficiency_prompt(
         "<<EXPECTED_ANSWER_TYPE>>": expected_answer_type or "미상(알 수 없음)",
         "<<USER_IDEA_JSON>>": _as_text(user_idea if user_idea is not None else {}),
         "<<IDEA_CANDIDATES_JSON>>": _as_text(idea_candidates if idea_candidates is not None else []),
+    }
+    for token, value in replacements.items():
+        template = template.replace(token, value)
+    return template
+
+
+def build_ideation_conv_expert_delegation_prompt(
+    persona_id: str,
+    notice_and_criteria: Any,
+    user_idea: Any,
+    retrieved_evidence: Any,
+    conversation_context: Any,
+    pending_question: str,
+    stage: str = "initial",
+    counterpart_review: Any = None,
+) -> str:
+    """용준/Claude(2026-07-21, 요청: "모르겠다" UX 개선): 사용자가 pending_question에 답하는
+    대신 전문가 판단에 위임했을 때(answer_type="expert_delegation") 담당 전문가가 자신의
+    평가 범위 안에서 임시 가정을 제안하는 프롬프트를 조립한다.
+
+    stage/counterpart_review(용준/Claude(2026-07-21, 요청: expert_delegation도 위원 간
+    상호 검토로 확장)는 이 제안이 상대 전문가의 검토를 반영해 수정하는 두 번째 발언인지
+    나타낸다 — stage="initial"(기본값, 기존 호출부 하위 호환)이면 counterpart_review는
+    무시되고 프롬프트에 "검토 없음"으로 표시된다."""
+    card = get_persona_card(persona_id)
+    template = _read_text(IDEATION_CONV_EXPERT_DELEGATION_TEMPLATE)
+    replacements = {
+        "<<PERSONA_BLOCK>>": render_persona_block(card),
+        "<<NOTICE_AND_CRITERIA_JSON>>": _as_text(notice_and_criteria),
+        "<<USER_IDEA_JSON>>": _as_text(user_idea),
+        "<<RETRIEVED_EVIDENCE_JSON>>": _as_text(retrieved_evidence),
+        "<<CONVERSATION_CONTEXT_JSON>>": _as_text(conversation_context),
+        "<<PENDING_QUESTION>>": _as_text(pending_question),
+        "<<STAGE>>": stage,
+        "<<COUNTERPART_REVIEW_JSON>>": _as_text(counterpart_review if counterpart_review is not None else None),
+    }
+    for token, value in replacements.items():
+        template = template.replace(token, value)
+    return template
+
+
+IDEATION_CONV_EXPERT_DELEGATION_REVIEW_TEMPLATE = "ideation_conv_expert_delegation_review.txt"
+IDEATION_CONV_EXPERT_DELEGATION_FACILITATOR_TEMPLATE = "ideation_conv_expert_delegation_facilitator.txt"
+
+
+def build_ideation_conv_expert_delegation_review_prompt(
+    persona_id: str,
+    notice_and_criteria: Any,
+    user_idea: Any,
+    retrieved_evidence: Any,
+    conversation_context: Any,
+    pending_question: str,
+    proposal_under_review: Any,
+) -> str:
+    """용준/Claude(2026-07-21, 요청: expert_delegation도 위원 간 상호 검토로 확장): 담당
+    전문가의 임시 제안을 반대 역할 전문가(persona_id)가 검토하는 프롬프트를 조립한다."""
+    card = get_persona_card(persona_id)
+    template = _read_text(IDEATION_CONV_EXPERT_DELEGATION_REVIEW_TEMPLATE)
+    replacements = {
+        "<<PERSONA_BLOCK>>": render_persona_block(card),
+        "<<NOTICE_AND_CRITERIA_JSON>>": _as_text(notice_and_criteria),
+        "<<USER_IDEA_JSON>>": _as_text(user_idea),
+        "<<RETRIEVED_EVIDENCE_JSON>>": _as_text(retrieved_evidence),
+        "<<CONVERSATION_CONTEXT_JSON>>": _as_text(conversation_context),
+        "<<PENDING_QUESTION>>": _as_text(pending_question),
+        "<<PROPOSAL_UNDER_REVIEW_JSON>>": _as_text(proposal_under_review),
+    }
+    for token, value in replacements.items():
+        template = template.replace(token, value)
+    return template
+
+
+def build_ideation_conv_expert_delegation_facilitator_prompt(
+    notice_and_criteria: Any,
+    pending_question: str,
+    proposal: Any,
+    review: Any,
+    revision: Any,
+) -> str:
+    """용준/Claude(2026-07-21, 요청: expert_delegation도 위원 간 상호 검토로 확장): 제안 ->
+    검토 -> (있다면) 수정까지 끝난 뒤, 진행자가 최종 권고안 하나로 정리하는 프롬프트를
+    조립한다. 출력 스키마에 사용자 재질문 필드가 없어 구조적으로 같은 질문을 반복할 수
+    없다(요청: "다시 사용자에게 같은 질문을 넘기면 안 됩니다")."""
+    card = get_persona_card("ideation_facilitator")
+    template = _read_text(IDEATION_CONV_EXPERT_DELEGATION_FACILITATOR_TEMPLATE)
+    replacements = {
+        "<<PERSONA_BLOCK>>": render_persona_block(card),
+        "<<NOTICE_AND_CRITERIA_JSON>>": _as_text(notice_and_criteria),
+        "<<PENDING_QUESTION>>": _as_text(pending_question),
+        "<<PROPOSAL_JSON>>": _as_text(proposal),
+        "<<REVIEW_JSON>>": _as_text(review),
+        "<<REVISION_JSON>>": _as_text(revision if revision is not None else None),
     }
     for token, value in replacements.items():
         template = template.replace(token, value)
