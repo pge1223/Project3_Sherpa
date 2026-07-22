@@ -34,6 +34,7 @@ from .ideation_conv_nodes import (
     MIN_EXPERT_TURNS_PER_ROUND,
     QUESTION_STREAM_FIELDS,
     REVISION_TRIGGER_STANCES,
+    make_canvas_update_node,
 )
 from .ideation_conv_run import (
     finalize_ideation_conversation,
@@ -113,6 +114,7 @@ __all__ = [
     "DELEGATION_REVIEW_STREAM_FIELDS",
     "DELEGATION_FACILITATOR_STREAM_FIELDS",
     "REVISION_TRIGGER_STANCES",
+    "make_canvas_update_node",
     "DiscussionRoundRecord",
     "JSONFieldStreamer",
     "decode_partial_json_string",

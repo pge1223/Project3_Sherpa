@@ -13,6 +13,8 @@ class FileType(str, Enum):
     PDF = "pdf"
     DOCX = "docx"
     PPTX = "pptx"
+    HWP = "hwp"
+    HWPX = "hwpx"
 
 
 class LocationType(str, Enum):

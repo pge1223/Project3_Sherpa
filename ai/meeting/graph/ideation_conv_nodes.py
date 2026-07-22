@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from prompts import (
+    build_ideation_conv_canvas_update_prompt,
     build_ideation_conv_discussion_facilitator_prompt,
     build_ideation_conv_discussion_prompt,
     build_ideation_conv_expert_delegation_facilitator_prompt,
@@ -35,6 +36,7 @@ from .ideation_conv_state import (
     TOPIC_PRIORITY,
     ConvMessage,
     DiscussionRoundRecord,
+    IdeationCancelled,
     IdeationConvState,
     remaining_topics_for,
 )
@@ -43,6 +45,10 @@ from .ideation_trace import sanitize_preview, trace_event
 from .llm import LLMCall, parse_json_response
 
 logger = logging.getLogger(__name__)
+
+_CANVAS_TEXT_FIELDS = ("problem", "target_user", "core_value", "solution", "differentiation", "contest_fit")
+_VALID_CANVAS_FEASIBILITY = {"high", "medium", "low", ""}
+_MAX_CANVAS_RISKS = 4
 
 _VALID_DISCUSSION_STANCES = {"동의", "조건부_동의", "반박", "보완", "대안_제시"}
 _EXPERT_ROLE_LABELS = {
@@ -1808,6 +1814,57 @@ def make_discussion_facilitator_node(llm_call: LLMCall) -> Callable[[IdeationCon
             update["pending_question"] = None
             update["pending_question_topic"] = None
         return update
+
+    return node
+
+
+def _validate_canvas_response(raw: dict) -> str | None:
+    """캔버스 응답의 키와 타입을 검증한다. 논의 전 빈 문자열은 허용한다."""
+    for key in _CANVAS_TEXT_FIELDS:
+        if not isinstance(raw.get(key), str):
+            return f"missing_or_not_string:{key}"
+    feasibility = raw.get("feasibility")
+    if not isinstance(feasibility, str) or feasibility.strip() not in _VALID_CANVAS_FEASIBILITY:
+        return "invalid_feasibility"
+    if not isinstance(raw.get("risks"), list):
+        return "risks_not_a_list"
+    return None
+
+
+def make_canvas_update_node(llm_call: LLMCall) -> Callable[[IdeationConvState], dict]:
+    """라운드 종료 뒤 캔버스를 갱신한다. 실패해도 회의 상태는 실패로 바꾸지 않는다."""
+
+    def node(state: IdeationConvState) -> dict:
+        prompt = build_ideation_conv_canvas_update_prompt(
+            state.get("idea_canvas"),
+            state.get("selected_idea"),
+            state.get("initial_idea"),
+            state.get("discussion_planning_position"),
+            state.get("discussion_development_review"),
+            state.get("discussion_revised_proposal"),
+            state["consensus"],
+            state["unresolved_issues"],
+            state["notice_and_criteria"],
+        )
+        try:
+            raw, ok, attempts = _safe_call_structured_json(
+                llm_call, prompt, _validate_canvas_response, "canvas_update"
+            )
+        except IdeationCancelled:
+            raise
+        except Exception:
+            # 캔버스는 보조 표시 계층이다. 공급자 오류나 테스트용 LLM의 미지원 응답 때문에
+            # 이미 완료된 전문가 회의까지 실패시키지 않는다. 취소 신호만은 반드시 전파한다.
+            logger.warning("아이디어 캔버스 갱신 호출에 실패해 직전 값을 유지합니다", exc_info=True)
+            return {"llm_calls_used": state.get("llm_calls_used", 0) + 1}
+        used = state.get("llm_calls_used", 0) + attempts
+        if not ok:
+            return {"llm_calls_used": used}
+
+        canvas: dict[str, Any] = {key: raw[key].strip() for key in _CANVAS_TEXT_FIELDS}
+        canvas["feasibility"] = raw["feasibility"].strip()
+        canvas["risks"] = _as_string_list(raw.get("risks"))[:_MAX_CANVAS_RISKS]
+        return {"idea_canvas": canvas, "llm_calls_used": used}
 
     return node
 

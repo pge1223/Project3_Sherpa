@@ -68,11 +68,12 @@ class Settings(BaseSettings):
 
     # 용준/Claude(2026-07-21, 요청: 실시간 스트리밍): 대화형 아이디어 회의의 NDJSON 스트리밍
     # 응답(POST /ideation-conversation/{session_id}/reply/stream)을 켤지 여부. 기본값
-    # False — ENABLE_IDEATION_PREVIEW와 별개 플래그로 둔 이유는, 프리뷰 라우터 자체는 켜져
+    # True — 프리뷰 라우터를 활성화하면 현재 기본 UI의 실시간 응답도 함께 동작하게 한다.
+    # ENABLE_IDEATION_PREVIEW와 별개 플래그로 둔 이유는, 프리뷰 라우터 자체는 켜져
     # 있어도(기존 동기식 API는 계속 쓰고 싶은 경우) 스트리밍은 아직 검증 전이라 끄고 싶을 수
     # 있어서다. 이 값이 False이면 /reply/stream 라우트는 (라우터 자체는 등록돼 있어도)
     # 404를 반환한다 — 기존 동기식 /reply는 이 플래그와 무관하게 항상 동작한다.
-    ENABLE_IDEATION_STREAMING: bool = False
+    ENABLE_IDEATION_STREAMING: bool = True
 
     # 아이디어 회의 화자·응답 대상·라우팅을 터미널에서 확인하는 개발 전용 로그. 사용자
     # 발언이 포함될 수 있어 운영 기본값은 항상 False다. delta 단위 로그는 별도 플래그를

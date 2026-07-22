@@ -35,6 +35,20 @@ _REMAINING_TOPICS_RE = re.compile(
 # 후보 제목·핵심 내용이 실제로 들어갔는지(요청 9번 배선)를 검증하는 데 쓴다.
 _SELECTION_CONTEXT_RE = re.compile(r"\[선택 컨텍스트 selection_context\]\n(.*?)\n\n", re.S)
 
+CANVAS_STUB_RESPONSE = json.dumps(
+    {
+        "problem": "문제 상황",
+        "target_user": "목표 사용자",
+        "core_value": "핵심 가치",
+        "solution": "핵심 해결 방식",
+        "differentiation": "차별점",
+        "feasibility": "medium",
+        "risks": ["구현 위험"],
+        "contest_fit": "공모전 기준 대응",
+    },
+    ensure_ascii=False,
+)
+
 
 def _selection_context_from_prompt(prompt: str) -> dict:
     match = _SELECTION_CONTEXT_RE.search(prompt)
@@ -270,6 +284,9 @@ class DiscoveryScriptedLLM:
                 },
                 ensure_ascii=False,
             )
+
+        if "[캔버스 갱신 규칙]" in prompt:
+            return CANVAS_STUB_RESPONSE
 
         raise AssertionError(f"예상하지 못한 프롬프트입니다: {prompt[:200]}")
 

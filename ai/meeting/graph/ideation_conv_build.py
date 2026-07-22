@@ -33,6 +33,7 @@ from .ideation_conv_discovery import (
 )
 from .ideation_conv_nodes import (
     _route_next_expert_turn,
+    make_canvas_update_node,
     make_conv_discussion_node,
     make_conv_question_node,
     make_conv_synthesis_node,
@@ -169,6 +170,7 @@ def assemble_ideation_conversation_graph(
         "dev_expert", llm_call=llm_call, evidence_lookup=evidence_lookup
     )
     discussion_facilitator_node = make_discussion_facilitator_node(llm_call)
+    canvas_update_node = make_canvas_update_node(llm_call)
     synthesis_node = make_conv_synthesis_node(llm_call)
 
     # 용준/Claude(2026-07-21): discovery(아이디어 발굴) 모드 노드 3종.
@@ -181,6 +183,7 @@ def assemble_ideation_conversation_graph(
     graph.add_node("planning_expert_discussion", planning_discussion_node)
     graph.add_node("dev_expert_discussion", dev_discussion_node)
     graph.add_node("discussion_facilitator", discussion_facilitator_node)
+    graph.add_node("canvas_update", canvas_update_node)
     graph.add_node("synthesis", synthesis_node)
     graph.add_node("candidate_planning", candidate_planning_node)
     graph.add_node("candidate_feasibility", candidate_feasibility_node)
@@ -219,6 +222,14 @@ def assemble_ideation_conversation_graph(
     )
     graph.add_conditional_edges(
         "discussion_facilitator",
+        lambda state: "failed" if state.get("phase") == "failed" else "update_canvas",
+        {
+            "update_canvas": "canvas_update",
+            "failed": END,
+        },
+    )
+    graph.add_conditional_edges(
+        "canvas_update",
         _route_after_facilitator,
         {
             "continue_round": "planning_expert_discussion",

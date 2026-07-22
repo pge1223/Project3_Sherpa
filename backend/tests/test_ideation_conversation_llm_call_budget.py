@@ -230,6 +230,20 @@ def _comprehensive_responder(*, dev_review_stance: str, discussion_review_stance
                 },
                 ensure_ascii=False,
             )
+        if "[캔버스 갱신 규칙]" in prompt:
+            return json.dumps(
+                {
+                    "problem": "문의 응대 부담",
+                    "target_user": "소상공인",
+                    "core_value": "응대 시간 절감",
+                    "solution": "FAQ 자동 응답",
+                    "differentiation": "저비용 구축",
+                    "feasibility": "medium",
+                    "risks": ["오답 위험"],
+                    "contest_fit": "실현가능성 기준 대응",
+                },
+                ensure_ascii=False,
+            )
         raise AssertionError(f"예상하지 못한 프롬프트: {prompt[:150]}")
 
     return llm_call
@@ -292,8 +306,8 @@ def test_realistic_max_cascade_stays_comfortably_under_the_cap(client: TestClien
     sufficiency 생략) -> expert_delegation(제안 1 + 반대 위원 검토 1 + [반박이므로] 수정
     1 + 진행자 권고안 1 = 4) -> 같은 요청 안에서 곧바로 expert_discussion 라운드까지
     이어짐(기획 최초 1 + 개발 검토 1 + [반박이므로] 기획 수정 1 + 진행자 정리 1 = 4,
-    next_action="await_user_decision"이라 다음 라운드로는 이어지지 않는다) = 이번 reply
-    요청에서만 8회.
+    next_action="await_user_decision"이라 다음 라운드로는 이어지지 않는다) + 아이디어 캔버스
+    갱신 1회 = 이번 reply 요청에서만 9회.
 
     이 값이 실제 호출 수와 정확히 일치하고, 상한(_MAX_LLM_CALLS_PER_REQUEST)보다 여유 있게
     낮은지 확인한다 — 요청 사항 그대로, 현실적인(재시도 없는) 최대 경로에서 상한이 조기에
@@ -324,8 +338,8 @@ def test_realistic_max_cascade_stays_comfortably_under_the_cap(client: TestClien
     assert reply_resp.status_code == 200
     body = reply_resp.json()
 
-    assert call_counter[0] == 8, (
-        f"위임 4회 + 회의 라운드 4회 = 8회가 아니라 {call_counter[0]}회가 호출됐습니다"
+    assert call_counter[0] == 9, (
+        f"위임 4회 + 회의 라운드 4회 + 캔버스 갱신 1회 = 9회가 아니라 {call_counter[0]}회가 호출됐습니다"
     )
     assert call_counter[0] < conv_route._MAX_LLM_CALLS_PER_REQUEST, "현실적인 최대 경로가 상한을 초과하면 안 된다"
 

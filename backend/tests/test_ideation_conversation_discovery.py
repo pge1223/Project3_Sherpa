@@ -231,6 +231,20 @@ def _stub_llm_call(session_id: str, model: str):
                 },
                 ensure_ascii=False,
             )
+        if "[캔버스 갱신 규칙]" in prompt:
+            return json.dumps(
+                {
+                    "problem": "문의 응대 부담",
+                    "target_user": "소상공인",
+                    "core_value": "응대 시간 절감",
+                    "solution": "FAQ 자동 응답",
+                    "differentiation": "저비용 구축",
+                    "feasibility": "medium",
+                    "risks": ["오답 위험"],
+                    "contest_fit": "실현가능성 기준 대응",
+                },
+                ensure_ascii=False,
+            )
         if "[해석 규칙]" in prompt:
             # 용준/Claude(2026-07-21, /board 실 연동): 후보 결합(combine) 응답 — 이번
             # 확장(원본 후보/결합 분석을 API 응답에 노출)을 검증하는 테스트에서만 실제로
@@ -453,6 +467,22 @@ def test_start_response_includes_original_candidates_field(client: TestClient):
     assert body["selection_intent"] is None
     assert body["source_candidates"] == []
     assert body["merge_analysis"] is None
+
+
+def test_start_response_exposes_updated_idea_canvas(client: TestClient):
+    resp = client.post(
+        "/ideation-conversation/start",
+        json={
+            "competition_name": "데모 공모전",
+            "competition_document": "실현가능성을 평가한다.",
+            "user_idea": "소상공인 문의를 자동화하고 싶습니다.",
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["phase"] == "awaiting_user_decision"
+    assert body["idea_canvas"]["problem"] == "문의 응대 부담"
+    assert body["idea_canvas"]["feasibility"] == "medium"
 
 
 def test_reply_response_includes_merge_context_fields_after_combine(client: TestClient):

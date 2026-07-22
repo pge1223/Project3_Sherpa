@@ -385,6 +385,36 @@ def build_ideation_conv_discussion_prompt(
 
 
 IDEATION_CONV_DISCUSSION_FACILITATOR_TEMPLATE = "ideation_conv_discussion_facilitator.txt"
+IDEATION_CONV_CANVAS_UPDATE_TEMPLATE = "ideation_conv_canvas_update.txt"
+
+
+def build_ideation_conv_canvas_update_prompt(
+    current_canvas: Any,
+    selected_idea: Any,
+    initial_idea: str | None,
+    planning_position: Any,
+    development_review: Any,
+    revised_proposal: Any,
+    consensus_so_far: Any,
+    unresolved_issues: Any,
+    notice_and_criteria: Any,
+) -> str:
+    """한 라운드의 발언을 바탕으로 아이디어 캔버스 갱신 프롬프트를 조립한다."""
+    template = _read_text(IDEATION_CONV_CANVAS_UPDATE_TEMPLATE)
+    replacements = {
+        "<<CURRENT_CANVAS_JSON>>": _as_text(current_canvas if current_canvas is not None else None),
+        "<<SELECTED_IDEA_JSON>>": _as_text(selected_idea if selected_idea is not None else None),
+        "<<INITIAL_IDEA>>": (initial_idea or "").strip() or "null",
+        "<<PLANNING_POSITION_JSON>>": _as_text(planning_position),
+        "<<DEVELOPMENT_REVIEW_JSON>>": _as_text(development_review),
+        "<<REVISED_PROPOSAL_JSON>>": _as_text(revised_proposal if revised_proposal is not None else None),
+        "<<CONSENSUS_SO_FAR_JSON>>": _as_text(consensus_so_far if consensus_so_far is not None else []),
+        "<<UNRESOLVED_ISSUES_JSON>>": _as_text(unresolved_issues if unresolved_issues is not None else []),
+        "<<NOTICE_AND_CRITERIA_JSON>>": _as_text(notice_and_criteria),
+    }
+    for token, value in replacements.items():
+        template = template.replace(token, value)
+    return template
 
 
 def build_ideation_conv_discussion_facilitator_prompt(

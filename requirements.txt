@@ -27,6 +27,7 @@ langchain-text-splitters
 pymupdf
 python-docx
 python-pptx
+olefile  # hwp(구버전 OLE 바이너리) 파서(hwpx_parser.py)의 BodyText 스트림 읽기용
 beautifulsoup4
 lxml
 pillow

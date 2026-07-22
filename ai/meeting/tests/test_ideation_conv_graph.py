@@ -35,6 +35,20 @@ NOTICE_AND_CRITERIA = {
 }
 USER_IDEA = {"description": "소상공인이 손님 문의에 자동으로 답하는 챗봇"}
 
+CANVAS_STUB_RESPONSE = json.dumps(
+    {
+        "problem": "손님 문의 응대 부담",
+        "target_user": "동네 소상공인",
+        "core_value": "응대 시간 절감",
+        "solution": "FAQ 자동 응답 챗봇",
+        "differentiation": "저비용 구축",
+        "feasibility": "medium",
+        "risks": ["오답 응대 위험"],
+        "contest_fit": "실현가능성·차별성 기준에 대응",
+    },
+    ensure_ascii=False,
+)
+
 _REMAINING_TOPICS_RE = re.compile(
     r"\[아직 확인되지 않은 주제\(우선순위 순\) remaining_topics\]\n(.*?)\n\n", re.S
 )
@@ -244,6 +258,9 @@ class ScriptedLLM:
                 ensure_ascii=False,
             )
 
+        if "[캔버스 갱신 규칙]" in prompt:
+            return CANVAS_STUB_RESPONSE
+
         raise AssertionError(f"예상하지 못한 프롬프트입니다: {prompt[:200]}")
 
 
@@ -307,6 +324,18 @@ def test_start_runs_roundtable_immediately_without_interview_question():
     assert not any(m["message_type"] == "question" for m in state["messages"])
     dev_prompts = [p for p in llm.captured_prompts if "당신은 AI Review Board의 개발 전문가입니다" in p]
     assert dev_prompts, "라운드테이블에서는 사용자 답변을 기다리지 않고 개발 위원도 곧바로 실행돼야 한다"
+
+
+def test_roundtable_updates_idea_canvas_without_changing_meeting_phase():
+    """진행자 정리 뒤 캔버스가 갱신되고 기존 회의 종료 phase는 그대로 유지된다."""
+    llm = ScriptedLLM()
+    state = _start(llm)
+
+    assert state["phase"] == "awaiting_user_decision"
+    assert state["idea_canvas"] == json.loads(CANVAS_STUB_RESPONSE)
+    canvas_prompts = [prompt for prompt in llm.captured_prompts if "[캔버스 갱신 규칙]" in prompt]
+    assert len(canvas_prompts) == 1
+    assert "[기획 전문가 최초 의견 planning_position]" in canvas_prompts[0]
 
 
 # ---------------------------------------------------------------------------

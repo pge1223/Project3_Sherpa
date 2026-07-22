@@ -245,6 +245,7 @@ class IdeationConvState(TypedDict):
     consensus: list[str]
     unresolved_issues: list[str]
     idea_proposal: dict | None
+    idea_canvas: dict | None
     failed_node: str | None
     llm_calls_used: int
     # 용준/Claude(2026-07-20): 같은 쟁점(pending_question)으로 재질문한 횟수. 사용자가
@@ -440,6 +441,7 @@ def initial_conv_state(
         consensus=[],
         unresolved_issues=[],
         idea_proposal=None,
+        idea_canvas=None,
         failed_node=None,
         llm_calls_used=0,
         answer_retry_count=0,

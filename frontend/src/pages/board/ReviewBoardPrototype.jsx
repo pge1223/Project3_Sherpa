@@ -20,6 +20,11 @@ import { analyzeProject, getAnalyzeProgress, getMentorCandidates } from "../../a
 import { isAcceptedDocument, formatFileSize, ACCEPTED_DOCUMENT_EXTENSIONS } from "../../utils/file";
 import { assessCriteriaContent } from "../../utils/criteriaAssessment";
 import WorkbenchScreen from "./WorkbenchScreen";
+// 경이/Claude(2026-07-22): "AI 피드백" 다음 "완성 리포트" 단계 — 경이가 설계한 버전 추적형
+// 리포트(VersionTrackerTestPage, 애니메이션/버전추적/프로필 토글/이전·현재 비교 포함)를
+// 흐름 안에 embedded 모드로 끼워 넣는다. 이 파일(가은님 소유)의 변경은 워크벤치와 같은
+// 방식으로 라벨/흐름/렌더 3곳만 최소화했다.
+import VersionTrackerTestPage from "../VersionTrackerTestPage";
 import { IdeationScreen, IdeationResultScreen } from "./IdeationConversationScreen";
 
 // 가은/Claude(2026-07-20, INF-007): fetch-url이 색인을 백그라운드로 넘기면서
@@ -49,6 +54,7 @@ const STAGE_LABELS = {
   // WorkbenchScreen.jsx(신규 파일)에 분리해서, 이 파일(가은님 소유)의 변경은
   // 이 라벨/흐름 추가 정도로 최소화했다.
   workbench: "AI 피드백",
+  report: "완성 리포트",
 };
 
 const FLOW_BY_MODE = {
@@ -57,7 +63,7 @@ const FLOW_BY_MODE = {
   // 화면 없이 바로 기획서 업로드·분석으로 간다. 공모전 분석은 주제를 정하기 전(작성 전)
   // 에나 필요한 단계라서다. entry에서 등록한 공고문(criteria)은 화면만 안 거칠 뿐,
   // 색인은 그대로 되어 피드백 때 심사기준 근거로 쓰인다.
-  post: ["entry", "upload", "workbench"],
+  post: ["entry", "upload", "workbench", "report"],
 };
 
 // 가은/Claude(2026-07-21): "작성 전" 흐름에서 확정한 아이디어 프로젝트를 표시하는 마커.
@@ -138,6 +144,7 @@ function Shell({ children, active, mode, onNavigate, showNav }) {
           --coral:#e0603d; --coral-dim: rgba(224,96,61,0.12);
           --green:#16a37a; --green-dim: rgba(22,163,122,0.12);
           --amber:#b8830b; --amber-dim: rgba(184,131,11,0.14);
+          --rose:#c23a6b; --rose-dim: rgba(194,58,107,0.12);
           --text-0:#1c1a2e; --text-1:#5b5770; --text-2:#918d9f;
           --cream:#f4efe2; --cream-line:#e7ddc4;
           --mono: 'JetBrains Mono', ui-monospace, monospace;
@@ -181,8 +188,7 @@ function Shell({ children, active, mode, onNavigate, showNav }) {
         .rb-root .rb-menu-item:hover{ background:var(--bg-2); color:var(--text-0); }
         .rb-root .rb-entry-actions{ display:flex; justify-content:flex-end; margin-bottom:10px; }
         .rb-root .rb-inline-projects{ display:inline-flex; align-items:center; gap:6px; padding:8px 12px; font-size:14px; font-family:inherit; font-weight:400; letter-spacing:0; }
-        .rb-root .rb-back-title{ display:flex; align-items:center; gap:8px; }
-        .rb-root .rb-back-button{ width:26px; height:26px; display:inline-flex; align-items:center; justify-content:center; border:none; background:transparent; color:var(--text-1); border-radius:8px; cursor:pointer; font-size:22px; line-height:1; padding:0; flex-shrink:0; }
+        .rb-root .rb-back-button{ width:26px; height:26px; display:inline-flex; align-items:center; justify-content:center; border:none; background:transparent; color:#000; border-radius:8px; cursor:pointer; font-size:13px; font-weight:300; line-height:1; padding:0; flex-shrink:0; }
         .rb-root .rb-back-button:hover{ background:var(--bg-2); color:var(--text-0); }
         .rb-root .rb-typing-cursor{ display:inline-block; margin-left:1px; animation: rb-blink 0.9s steps(1) infinite; }
         @keyframes rb-blink{ 0%,49%{ opacity:1; } 50%,100%{ opacity:0; } }
@@ -237,20 +243,6 @@ function Shell({ children, active, mode, onNavigate, showNav }) {
         </div>
       )}
       <div className="main">{children}</div>
-    </div>
-  );
-}
-
-function BackTitle({ children, onBack, level = 2, style }) {
-  const Heading = level === 1 ? 'h1' : 'h2';
-  return (
-    <div className="rb-back-title" style={style}>
-      <button type="button" className="rb-back-button" onClick={onBack} aria-label="이전 화면으로 이동">
-        &lt;
-      </button>
-      <Heading style={{ margin: 0, fontSize: level === 1 ? 26 : 22, fontWeight: 700 }}>
-        {children}
-      </Heading>
     </div>
   );
 }
@@ -684,10 +676,15 @@ function AnalysisScreen({ mode, onNext, onBack, projectId }) {
   return (
     <>
     <div style={{ maxWidth: 820 }}>
-      <div className="badge purple mono">{hasAnnouncement ? "공고문 분석 결과" : "공고문 미등록"}</div>
-      <BackTitle level={1} onBack={onBack} style={{ margin: "12px 0 24px" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+        <button type="button" className="rb-back-button" onClick={onBack} aria-label="이전 화면으로 이동">
+          {'←'}
+        </button>
+        <div className="badge purple mono">{hasAnnouncement ? "공고문 분석 결과" : "공고문 미등록"}</div>
+      </div>
+      <h1 style={{ margin: "12px 0 24px", fontSize: 26, fontWeight: 700 }}>
         {hasAnnouncement ? (analysis?.announcement_title || "등록한 공고문을 확인하세요") : "등록된 공고문이 없어요"}
-      </BackTitle>
+      </h1>
 
       {error && <p style={{ color: "var(--coral)", fontSize: 13, marginBottom: 16 }}>{error}</p>}
 
@@ -1008,10 +1005,15 @@ function UploadAndAnalyzeScreen({ projectId, onFeedbackReady, onBack, initialDoc
 
   return (
     <div style={{ maxWidth: 720 }}>
-      <div className="badge coral mono" style={{ marginBottom: 12 }}>기획서 업로드 · 분석</div>
-      <BackTitle onBack={onBack} style={{ marginBottom: 20 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 12 }}>
+        <button type="button" className="rb-back-button" onClick={onBack} aria-label="이전 화면으로 이동">
+          {'←'}
+        </button>
+        <div className="badge coral mono">기획서 업로드 · 분석</div>
+      </div>
+      <h2 style={{ margin: '0 0 20px', fontSize: 22, fontWeight: 700 }}>
         {analyzing ? '평가 대상 문서를 분석중이에요' : '평가 대상 문서를 업로드하세요'}
-      </BackTitle>
+      </h2>
 
       {!analyzing && (
         <>
@@ -1325,6 +1327,7 @@ export default function ReviewBoardPrototype() {
         <UploadAndAnalyzeScreen projectId={projectId} onFeedbackReady={handleFeedbackReady} onBack={goPrev} initialDocuments={targetDocuments} />
       )}
       {stage === "workbench" && <WorkbenchScreen projectId={projectId} />}
+      {stage === "report" && <VersionTrackerTestPage embedded />}
     </Shell>
   );
 }

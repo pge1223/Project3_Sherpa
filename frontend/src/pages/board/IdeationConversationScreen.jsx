@@ -9,6 +9,7 @@ import {
   startIdeationConversation,
 } from '../../api/ideationConversationApi'
 import { getAnnouncementAnalysis } from '../../api/documentApi'
+import IdeaCanvasPanel from './IdeaCanvasPanel'
 import {
   EXPERT_RECOMMEND_MESSAGE,
   FEASIBILITY_LABEL,
@@ -433,6 +434,7 @@ export function IdeationScreen({
   // 미완성 발언이므로 ideationConv(canonical)에는 절대 섞이지 않는다(요청: "검증되지 않은
   // structured JSON은 저장하지 않는다").
   const [interruptedMessages, setInterruptedMessages] = useState([])
+  const [announcementAnalysis, setAnnouncementAnalysis] = useState(null)
 
   const startedRef = useRef(false)
   const chatEndRef = useRef(null)
@@ -523,6 +525,7 @@ export function IdeationScreen({
       if (projectId) {
         analysis = await getAnnouncementAnalysis(projectId)
       }
+      setAnnouncementAnalysis(analysis)
       const data = await startIdeationConversation({
         competitionName: competitionNameFrom(analysis),
         competitionDocument: buildCompetitionDocumentText(analysis),
@@ -555,6 +558,9 @@ export function IdeationScreen({
       return
     }
     setStarting(true)
+    if (projectId) {
+      getAnnouncementAnalysis(projectId).then(setAnnouncementAnalysis).catch(() => {})
+    }
     getIdeationConversation(savedSessionId)
       .then((data) => setIdeationConv(data))
       .catch(() => {
@@ -921,6 +927,8 @@ export function IdeationScreen({
           sourceCandidates={ideationConv?.source_candidates}
           userSelectionMessage={ideationConv?.user_selection_message}
         />
+
+        <IdeaCanvasPanel ideationConv={ideationConv} analysis={announcementAnalysis} />
 
         {hasSelected ? (
           <div className="card glass" style={{ marginBottom: 12, padding: 14 }}>

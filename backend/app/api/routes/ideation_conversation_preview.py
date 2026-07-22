@@ -489,6 +489,7 @@ def _serialize_state(state: IdeationConvState) -> dict:
         "consensus": state["consensus"],
         "unresolved_issues": state["unresolved_issues"],
         "idea_proposal": state.get("idea_proposal"),
+        "idea_canvas": state.get("idea_canvas"),
         "ideation_mode": state.get("ideation_mode", "refinement"),
         "active_stage": active_stage_for(state["phase"]),
         "idea_candidates": state.get("idea_candidates", []),
