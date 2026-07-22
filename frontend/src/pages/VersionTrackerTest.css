@@ -62,6 +62,10 @@
 
 .vt-dotg { cursor: pointer; }
 
+/* 수정본 업로드+재분석 진행 표시용 회전 아이콘(C-2). */
+.vt-spin { animation: vtSpin 1s linear infinite; }
+@keyframes vtSpin { to { transform: rotate(360deg); } }
+
 /* "자세히 보기" 단계 카드 — 펼칠 때 왼쪽에서 하나씩 슬라이드-인(animationDelay로 스태거). */
 .vt-step { opacity: 0; animation: vtStepIn 0.42s cubic-bezier(0.22, 0.8, 0.28, 1) forwards; }
 @keyframes vtStepIn { from { opacity: 0; transform: translateX(-12px); } to { opacity: 1; transform: none; } }

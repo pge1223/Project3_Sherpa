@@ -111,7 +111,7 @@ from jose import jwt, JWTError
 from openai import OpenAI
 from starlette.concurrency import run_in_threadpool
 
-from ai.meeting.scoring import attach_impl_guides, is_technical_persona
+from ai.meeting.scoring import attach_impl_guides, build_revision_comparison, is_technical_persona
 from ai.rag.evidence_linking.service import EvidenceLinkingService
 from ai.rag.evidence_sufficiency.service import EvidenceSufficiencyService
 from ai.rag.orchestration import MeetingEvidenceOrchestrationService
@@ -371,9 +371,12 @@ def _build_rubric_extraction_prompt(
     persona_cards: dict[str, dict],
 ) -> str:
     committee = base_mapping["committee"]
+    # 경이/Claude(2026-07-23, 가은님 위임): criterion_id를 여기 노출하면 LLM이 그대로 복사해
+    # 여러 항목이 같은 criterion_id를 갖게 되어(중복) build_dynamic_rubric_mapping이 거부 →
+    # 정적 폴백된다. 그래서 이 참고 목록은 "어떤 성격의 평가축을 어느 위원이 보는지"만 보여주고
+    # criterion_id는 노출하지 않는다(criterion_id는 항목마다 새로 고유하게 만들도록 규칙에서 지시).
     default_axis_lines = "\n".join(
-        f'- criterion_id: "{item["criterion_id"]}" ({item["criterion_name"]}) -> 기본 담당 위원: '
-        f'"{item["primary_persona_id"]}"'
+        f'- "{item["criterion_name"]}" 성격 → 기본 담당 위원: "{item["primary_persona_id"]}"'
         for item in base_mapping["rubric"]
     )
     persona_lines = "\n".join(
@@ -390,18 +393,23 @@ def _build_rubric_extraction_prompt(
 - 공고문에 명시된 평가항목을 최우선으로 사용하세요. 배점(가중치)이 공고문에 있으면 그대로
   쓰고, 없으면 전체 100점을 항목 수로 균등 배분하세요(모든 항목의 max_score 합은 반드시
   100이어야 합니다).
-- 아래 [기본 4범주]에 자연스럽게 대응되면 criterion_id를 새로 만들지 말고 그 criterion_id를
-  그대로 재사용하세요.
-- 기본 4범주 어디에도 안 맞는 공고문만의 고유 평가축(예: 팀 구성, 지속가능성, 파급효과)이
-  있을 때만 새 criterion_id(영문 snake_case)를 만드세요.
+- 배점(max_score)이 실제로 매겨진 채점 항목만 추출하세요. max_score는 반드시 1 이상이어야
+  합니다. 배점이 0이거나 없는 항목(예: 배점 없이 이름만 나열된 2차 발표심사 항목, 참고용
+  안내 문구)은 criteria에 절대 넣지 마세요 — 배점표(100점 만점)에 실린 항목만 대상입니다.
+- criterion_id는 공고문의 각 평가항목마다 서로 다른 고유한 값이어야 합니다(영문 snake_case,
+  공고문 항목명에서 유래. 예: ai_innovation, data_utilization, feasibility,
+  creativity_differentiation, expected_effect). criterion_id는 "평가항목"의 식별자이지
+  "담당 위원(persona)"의 식별자가 아닙니다 — 절대 두 항목이 같은 criterion_id를 쓰지 마세요.
 - 반드시 아래 [참여 위원 목록]에 있는 persona_id 중 하나에만 primary_persona_id를
-  배정하세요. 새 위원을 만들지 마세요.
+  배정하세요. 새 위원을 만들지 마세요. 서로 다른 평가항목이 같은 위원(primary_persona_id)에
+  배정되는 것은 정상입니다(위원 한 명이 여러 항목을 볼 수 있음) — 이때도 criterion_id는
+  반드시 서로 달라야 합니다.
 - primary_perspective_id는 반드시 그 위원의 평가관점(perspective_id) 목록 중 하나를
   그대로 쓰세요. 목록에 없는 값을 지어내지 마세요.
 - 필요하면 secondary_persona_id를 다른 위원 한 명으로 추가할 수 있습니다(선택, 없으면 null).
 - 공고문에서 평가항목 자체를 찾을 수 없으면 "criteria": []로 응답하세요.
 
-[기본 4범주 — 참고용, 그대로 재사용 가능]
+[기본 4범주 — 위원 배정 참고용(criterion_id 복사 금지, 위원 배정만 참고)]
 {default_axis_lines}
 
 [참여 위원 목록]
@@ -1417,6 +1425,36 @@ async def get_project_report(
         "evidence": meeting.get("evidence"),
         "created_at": meeting.get("created_at"),
         "impl_guides": impl_guides,
+    }
+
+
+# 경이/Claude(2026-07-23): RPT-004 버전 비교 엔드포인트 — "다음 수정본 제출"(C)로 수정본을
+# 재분석하면 프로젝트에 meeting이 하나 더 쌓인다(analyze는 매번 meeting_repo.create). 최근
+# 2개 meeting(after=최신 v1.n, before=직전 v1.n-1)을 build_revision_comparison(ai/meeting/
+# scoring/comparison.py, 순수 비교 로직)에 넘겨 항목별 점수 증감·해결/신규/잔존 지적을 돌려준다.
+# 회의가 1개뿐이면(첫 제출) available=false로, 프론트는 단일 버전만 그린다.
+@router.get("/{project_id}/comparison")
+async def get_project_comparison(
+    project_id: str,
+    authorization: Optional[str] = Header(None, alias="authorization"),
+):
+    get_current_user(authorization)
+
+    project = await project_repo.find_by_id(project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없습니다.")
+
+    meetings = await meeting_repo.find_by_project_id(project_id)  # created_at 내림차순
+    if len(meetings) < 2:
+        return {"available": False, "meeting_count": len(meetings)}
+
+    after_doc = meetings[0]   # 최신 = 이번 수정본
+    before_doc = meetings[1]  # 직전 = 이전 버전
+    comparison = await run_in_threadpool(build_revision_comparison, before_doc, after_doc)
+    return {
+        "available": True,
+        "meeting_count": len(meetings),
+        "comparison": comparison,
     }
 
 
