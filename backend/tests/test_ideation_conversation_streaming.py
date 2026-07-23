@@ -338,7 +338,7 @@ def test_start_stream_refinement_streams_roundtable_messages(client: TestClient,
     assert "message_start" in types
     assert "message_delta" in types
     assert types[-1] == "state"
-    assert events[-1]["state"]["phase"] == "awaiting_user_decision"
+    assert events[-1]["state"]["phase"] == "discussion_complete"
 
 
 def test_stream_event_order_message_start_delta_end_state(client: TestClient, monkeypatch):
@@ -452,7 +452,7 @@ def test_streaming_final_state_matches_sync_reply_semantically(client: TestClien
     # 상태에서 사용자가 자유 발언을 남기면 새 라운드(기획 -> 개발 -> 진행자)가 실행되고,
     # dev 스텁이 next_action="await_user_decision"을 반환하므로 다시 "awaiting_user_decision"
     # 으로 멈춘다.
-    assert stream_state["phase"] == sync_state["phase"] == "awaiting_user_decision"
+    assert stream_state["phase"] == sync_state["phase"] == "discussion_complete"
     stream_last = stream_state["messages"][-1]
     sync_last = sync_state["messages"][-1]
     assert stream_last["speaker_id"] == sync_last["speaker_id"]
@@ -500,8 +500,20 @@ def test_retry_emits_message_reset_before_new_message_start(client: TestClient, 
     assert types.count("message_start") == 4
     assert types.count("message_end") == 4
     reset_event = next(e for e in events if e["type"] == "message_reset")
-    first_start = [e for e in events if e["type"] == "message_start"][0]
+    starts = [e for e in events if e["type"] == "message_start"]
+    first_start, retry_start = starts[0], starts[1]
     assert reset_event["message_id"] == first_start["message_id"]
+    # 용준/Claude(2026-07-23, 요청: 스트리밍 UX 버그 수정) — reset은 이유/재시도 여부를
+    # 함께 실어야 프런트가 "검토 중" 표시와 "곧 fallback" 표시를 구분할 수 있다. 그리고
+    # 바로 다음 message_start는 이 reset된 말풍선의 자리를 이어받는다는 것을
+    # supersedes_message_id로 명시해야, speaker_id만으로 추정하지 않고도 같은 자리에서
+    # 교체할 수 있다.
+    assert reset_event.get("reason") == "missing_or_empty_field:judgment_or_reason"
+    assert reset_event.get("will_retry") is True
+    assert retry_start.get("supersedes_message_id") == first_start["message_id"]
+    # 재시도가 아닌 정상적인 다음 발언(개발 위원, 진행자)에는 supersedes_message_id가
+    # 없어야 한다 — 다른 위원의 정상 발언을 재시도로 오인해서는 안 된다.
+    assert all("supersedes_message_id" not in s for s in starts[2:])
     assert fake.call_counts["discussion"] == 3  # 기획(최초 실패 1 + 재시도 1) + 개발(1)
     assert fake.call_counts["facilitator_summary"] == 1
 
@@ -556,14 +568,14 @@ def test_session_state_not_corrupted_after_stream_and_llm_failure(client: TestCl
     # 라운드테이블 한 라운드를 마치고 "awaiting_user_decision"으로 멈춰 있었다.
     get_resp = client.get(f"/ideation-conversation/{session_id}")
     assert get_resp.status_code == 200
-    assert get_resp.json()["phase"] == "awaiting_user_decision"
+    assert get_resp.json()["phase"] == "discussion_complete"
 
     # 락도 정상적으로 풀려서 다음 요청(정상 스텁)이 처리된다.
     fake = _FakeStreamState(chunk_size=4)
     monkeypatch.setattr(conv_route, "_build_streaming_backends", lambda sid, m: fake.build())
     resp2 = client.post(f"/ideation-conversation/{session_id}/reply", json={"message": "답변1"})
     assert resp2.status_code == 200
-    assert resp2.json()["phase"] == "awaiting_user_decision"
+    assert resp2.json()["phase"] == "discussion_complete"
 
 
 def test_concurrent_reply_to_same_session_returns_409(client: TestClient, monkeypatch):
@@ -838,6 +850,8 @@ def test_reply_stream_with_target_speaker_id_routes_to_interjection(client: Test
         json={
             "message": "대학생 예비 창업자도 목표 사용자에 포함할 수 있나요?",
             "target_speaker_id": "planning_expert",
+            "opinion_target_speaker_id": "dev_expert",
+            "interrupted_speaker_id": "dev_expert",
             "active_issue_id": "target_user",
         },
     ) as resp:
@@ -848,6 +862,8 @@ def test_reply_stream_with_target_speaker_id_routes_to_interjection(client: Test
     messages = state_events[-1]["state"]["messages"]
     interjection = next(m for m in messages if m["message_type"] == "interjection")
     assert interjection["structured"]["target_speaker_id"] == "planning_expert"
+    assert interjection["structured"]["opinion_target_speaker_id"] == "dev_expert"
+    assert interjection["structured"]["interrupted_speaker_id"] == "dev_expert"
     following = [
         m["speaker_id"] for m in messages[messages.index(interjection) + 1 :]
         if m["speaker_id"] in ("planning_expert", "dev_expert")
