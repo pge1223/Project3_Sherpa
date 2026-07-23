@@ -215,13 +215,9 @@ def _progress(snapshot: IdeationConvState) -> dict:
 IdeationConvSnapshotCallback = Callable[[IdeationConvState], None]
 
 # 재인/Claude(2026-07-23, 아바타 페이싱 연동): stop_after_expert_turn=True일 때, 이 화자의
-# 발언이 하나 추가되는 즉시 _drive_graph를 멈춘다. ideation_facilitator(진행자 정리)와
-# canvas_update(캔버스 갱신)는 이번 범위에서 제외했다 — 그 구간까지 개별로 끊으려면
-# facilitator 이후 이어지는 canvas_update를 그래프 밖에서 다시 불러야 해서(그래프 노드를
-# 직접 호출하고 state를 수동 병합해야 함) 상태 병합 방식을 더 신중히 설계해야 한다. 지금은
-# 기획/개발 위원이 번갈아 발언하는 구간만 한 턴씩 끊는다 — _route_next_expert_turn 등 "누가
-# 다음에 말할지" 판단 로직 자체는 전혀 건드리지 않았다(아래 continue_ideation_expert_turn이
-# 그 함수를 그대로 재사용한다).
+# 발언이 하나 추가되는 즉시 _drive_graph를 멈춘다. _route_next_expert_turn 등 "누가 다음에
+# 말할지" 판단 로직 자체는 전혀 건드리지 않았다(아래 continue_ideation_expert_turn이 그
+# 함수를 그대로 재사용한다).
 _SINGLE_TURN_STOP_SPEAKERS = frozenset({"planning_expert", "dev_expert"})
 
 # 재인/Claude(2026-07-23, 아바타 페이싱 연동): _route_next_expert_turn이 반환할 수 있는 값
@@ -258,15 +254,34 @@ def _drive_graph(
     같은 호출 안에서 이어져버린다. 그래서 "한 스냅샷에서 새 메시지가 2개 이상 추가됐고
     전부 ideation_facilitator"인 경우도 정지 지점으로 취급한다 — 코드 전체에서
     _resolve_selection이 메시지를 2개 이상 묶어 반환하는 유일한 곳이라(grep으로 확인),
-    이 조건이 다른 정상 흐름을 잘못 멈추게 할 위험은 없다."""
+    이 조건이 다른 정상 흐름을 잘못 멈추게 할 위험은 없다.
+
+    재인/Claude(2026-07-24, 실측: "진행자 라운드 정리 발언 + 다음 라운드 기획위원 첫
+    발언이 완전히 동시에 나옴"): 진행자가 "정리" 발언을 혼자 하나만 만드는 경우(위 2개
+    묶음 케이스와 다름)는 이 시점에 바로 멈추면 안 된다 — discussion_facilitator 바로
+    다음 노드인 canvas_update(화면에 안 보이는 캔버스 갱신)가 아직 안 끝난 상태라, 여기서
+    끊으면 캔버스 갱신이 통째로 스킵돼버린다. 그렇다고 원래처럼 끝까지 흘려보내면
+    continue_round인 경우 다음 라운드 기획위원 발언까지 같은 호출에 묶여버려 원래 문제가
+    재현된다. 그래서 "진행자 단독 발언을 봤다"는 사실만 기억해뒀다가, 그 다음 스냅샷
+    (canvas_update의 결과 — 새 메시지 유무와 무관하게)에서 멈춘다. continue_round가 아니면
+    canvas_update 다음에 그래프가 자연스럽게 끝나므로(END) 이 예약이 발동하기 전에 루프가
+    이미 끝나 있는 경우도 있는데, 그때도 결과는 동일하게 올바르다(캔버스까지 반영된 최종
+    상태). continue_round인 경우, 다음 라운드 기획위원 발언은 이 호출에 안 끼고, 아바타가
+    진행자 발언을 다 재생한 뒤 별도의 continue_ideation_expert_turn 호출로 자연스럽게
+    이어받는다(그 함수의 "직전 발언자가 planning/dev가 아니면 라운드 첫 턴이므로
+    planning_expert부터"라는 기존 부트스트랩 분기가 그대로 처리해준다 — 아래
+    continue_ideation_expert_turn 참고)."""
     final_state: IdeationConvState = state
     previous_message_count = len(state.get("messages") or [])
+    stop_after_next_snapshot = False
     try:
         for snapshot in graph.stream(state, stream_mode="values"):
             final_state = snapshot
             if on_progress is not None:
                 on_progress(_progress(snapshot))
             if stop_after_expert_turn:
+                if stop_after_next_snapshot:
+                    break
                 messages = snapshot.get("messages") or []
                 new_count = len(messages) - previous_message_count
                 if new_count > 0:
@@ -279,6 +294,8 @@ def _drive_graph(
                         m.get("speaker_id") == "ideation_facilitator" for m in new_messages
                     ):
                         break
+                    if new_count == 1 and last_speaker == "ideation_facilitator":
+                        stop_after_next_snapshot = True
     except IdeationCancelled as exc:
         exc.partial_state = final_state if final_state is not state else None
         raise
@@ -836,10 +853,14 @@ def continue_ideation_expert_turn(
 
     다음 화자가 기획/개발 위원이면 그 발언 1건에서 정확히 멈춘다(_drive_graph의
     stop_after_expert_turn). 다음 화자가 진행자(facilitator)면 forced_next_speaker="facilitator"로
-    강제 진입시켜 진행자 발언 + 캔버스 갱신까지는 한 번에 진행하되(캔버스 갱신은 화면에
-    보이는 발언이 없으므로 별도로 멈출 이유가 없다), 그 뒤 다음 라운드가 자동으로 이어지면
-    (continue_round) 거기서 다시 첫 위원 발언에 멈춘다 — 결과적으로 어느 경우든 "화면에 보일
-    발언 하나"에서 멈추게 된다.
+    강제 진입시켜 진행자 발언 + 캔버스 갱신까지만 진행하고 멈춘다(캔버스 갱신은 화면에
+    보이는 발언이 없으므로 조용히 같이 반영되지만, 다음 라운드 첫 위원 발언까지 이어서
+    만들지는 않는다 — 재인/Claude(2026-07-24, 실측: "진행자 정리 발언과 다음 라운드
+    기획위원 발언이 동시에 나옴") _drive_graph 쪽 stop_after_next_snapshot 참고). 다음
+    라운드가 자동으로 이어지는 경우(continue_round)에도 그 첫 위원 발언은 이 호출에 안
+    끼고, 아바타가 방금 반환된 진행자 발언을 다 재생한 뒤 이 함수가 다시 호출될 때
+    아래 "라운드 첫 턴" 부트스트랩 분기가 처리한다 — 결과적으로 어느 경우든 "화면에 보일
+    발언 하나"씩 딱딱 끊어서 멈추게 된다.
 
     previous_state["phase"]가 "expert_discussion"이 아니면 호출할 수 없다(라운드가 이미
     끝났거나 사용자 입력을 기다리는 중이라는 뜻 — 호출부가 먼저 걸러야 한다).

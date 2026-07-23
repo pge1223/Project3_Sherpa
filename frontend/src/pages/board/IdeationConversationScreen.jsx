@@ -1150,7 +1150,7 @@ export function IdeationScreen({
   }
 
   return (
-    <div className="rb-grid-2" style={{ maxWidth: 1410, display: 'grid', gridTemplateColumns: '1fr 320px 468px', gap: 20 }}>
+    <div className="rb-grid-2" style={{ maxWidth: 1570, display: 'grid', gridTemplateColumns: '1fr 80px 468px 80px 320px', gap: 20 }}>
       <div>
         <div className="badge coral mono" style={{ marginBottom: 10 }}>주제 아이디어 회의</div>
         {onBack && (
@@ -1346,6 +1346,19 @@ export function IdeationScreen({
         )}
       </div>
 
+      {/* 재인/Claude(2026-07-24, 실측: "아바타가 채팅 쪽에 쏠려 보임"): 처음엔 아바타-캔버스
+          사이에만 스페이서(160px)를 뒀더니 채팅-아바타 간격(그리드 기본 gap 20px)보다
+          아바타-캔버스 간격이 훨씬 넓어서 아바타 블록이 왼쪽(채팅 쪽)으로 쏠려 보였다.
+          스페이서를 양쪽에 80px씩 나눠서 아바타 블록이 채팅-캔버스 사이에서 가운데
+          오도록 했다(위 gridTemplateColumns '1fr 80px 468px 80px 320px'). */}
+      <div aria-hidden="true" />
+
+      <IdeationAvatarStage
+        playQueue={avatarPlayQueue}
+        onNeedNextSpeaker={handleAvatarNeedNextSpeaker}
+      />
+
+      <div aria-hidden="true" />
       <div>
         <MergeAnalysisPanel
           mergeAnalysis={ideationConv?.merge_analysis}
@@ -1389,11 +1402,6 @@ export function IdeationScreen({
           <p style={{ fontSize: 11.5, color: 'var(--text-2)', marginTop: 8 }}>{nextActionGuideFor(phase)}</p>
         )}
       </div>
-
-      <IdeationAvatarStage
-        playQueue={avatarPlayQueue}
-        onNeedNextSpeaker={handleAvatarNeedNextSpeaker}
-      />
     </div>
   )
 }
