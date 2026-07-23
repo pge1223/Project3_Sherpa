@@ -1,0 +1,29 @@
+{
+  "dataset_name": "ideation_multi_document_quality_v1",
+  "instructions": "서로 다른 실제 프로젝트 3~5개에서 프로젝트당 최소 5개 쟁점을 검수하고 human_verified=true로 바꾼다.",
+  "cases": [
+    {
+      "case_id": "replace-project-1-problem-planning",
+      "project_id": "REPLACE_WITH_REAL_PROJECT_ID",
+      "persona_id": "planning_expert",
+      "issue_id": "problem",
+      "query": "REPLACE_WITH_ACTUAL_QUERY",
+      "gold_relevant_chunk_ids": [],
+      "retrieved_chunk_ids": [],
+      "selected_chunk_ids": [],
+      "claims": [
+        {
+          "text": "REPLACE_WITH_ACTUAL_CLAIM",
+          "claim_type": "expert_judgment",
+          "expected_claim_type": "expert_judgment",
+          "supported": false,
+          "linked_chunk_ids": []
+        }
+      ],
+      "issue_match": false,
+      "planner_fallback": false,
+      "human_verified": false,
+      "reviewer_notes": "검색·선택 청크가 현재 쟁점을 직접 뒷받침하는지 사람이 확인"
+    }
+  ]
+}
