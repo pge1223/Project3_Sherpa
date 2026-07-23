@@ -10,7 +10,6 @@ import { createProject, getProject, updateProject, getLatestMeeting } from "../.
 import {
   fetchUrl as fetchCriteriaUrl,
   uploadDocument,
-  getDocumentStatus,
   getAnnouncementAnalysis,
   getApplicationFormAnalysis,
   getContestWorksByTitle,
@@ -20,6 +19,8 @@ import {
 import { analyzeProject, getAnalyzeProgress, getMentorCandidates } from "../../api/projectApi";
 import { isAcceptedDocument, formatFileSize, ACCEPTED_DOCUMENT_EXTENSIONS } from "../../utils/file";
 import { assessCriteriaContent } from "../../utils/criteriaAssessment";
+import { pollDocumentIndexing } from "../../utils/documentIndexingPoll";
+import ProgressBar from "../../components/common/ProgressBar";
 import WorkbenchScreen from "./WorkbenchScreen";
 // 경이/Claude(2026-07-22): "AI 피드백" 다음 "완성 리포트" 단계 — 경이가 설계한 버전 추적형
 // 리포트(VersionTrackerTestPage, 애니메이션/버전추적/프로필 토글/이전·현재 비교 포함)를
@@ -27,11 +28,6 @@ import WorkbenchScreen from "./WorkbenchScreen";
 // 방식으로 라벨/흐름/렌더 3곳만 최소화했다.
 import VersionTrackerTestPage from "../VersionTrackerTestPage";
 import { IdeationScreen, IdeationResultScreen } from "./IdeationConversationScreen";
-
-// 가은/Claude(2026-07-20, INF-007): fetch-url이 색인을 백그라운드로 넘기면서
-// document_status가 "indexing"으로 오면 폴링해야 한다 — DocumentUploadPage.jsx와 동일 값.
-const _DOCUMENT_STATUS_POLL_INTERVAL_MS = 2000
-const _DOCUMENT_STATUS_POLL_MAX_ATTEMPTS = 90 // 2s * 90 = 3분
 
 /* 가은/Claude(2026-07-20): "작성 전(주제 발굴)/작성 후(문서 피드백)" 2-모드
  * 신규 플로우. docs/REVIEW_BOARD_서비스_방향성_정리_20260720.md의 방향을
@@ -85,43 +81,6 @@ function _resumedDocStatus(backendStatus) {
   if (backendStatus === 'indexed_empty') return 'warning'
   if (backendStatus === 'indexing_failed' || backendStatus === 'conversion_failed' || backendStatus === 'indexing_timeout') return 'error'
   return 'done'
-}
-
-// 가은/Claude(2026-07-21): 원래 EntryScreen(공고문 URL) 전용이던 색인 폴링을 모듈 레벨로
-// 올렸다 — 파일 업로드(공고문 파일·평가 대상 기획서)도 색인이 백그라운드로 바뀌면서
-// (백엔드 upload_document, INF-007과 동일 패턴) 같은 폴링이 필요해져서다. updateDoc은
-// 각 화면의 문서 행 갱신 함수를 받는다. conversion_failed(HWP/HWPX 변환 실패)는 폴링
-// 응답의 conversion_metadata.conversion_error(사용자용 한국어 메시지)를 그대로 보여준다.
-function pollDocumentIndexing(pid, documentId, rowId, contentStatus, contentMeta, updateDoc) {
-  let attempts = 0;
-  const timer = setInterval(async () => {
-    attempts += 1;
-    try {
-      const statusResult = await getDocumentStatus(pid, documentId);
-      if (statusResult.status === 'indexing') {
-        if (attempts >= _DOCUMENT_STATUS_POLL_MAX_ATTEMPTS) {
-          clearInterval(timer);
-          updateDoc(rowId, { status: 'error', meta: '색인 상태 확인이 너무 오래 걸리고 있어요 — 새로고침해서 다시 확인해주세요.' });
-        }
-        return;
-      }
-      clearInterval(timer);
-      if (statusResult.status === 'indexing_failed') {
-        updateDoc(rowId, { status: 'error', meta: '문서 색인 중 오류가 발생했습니다.' });
-      } else if (statusResult.status === 'indexing_timeout') {
-        updateDoc(rowId, { status: 'error', meta: '색인이 시간 내에 끝나지 않았습니다 — 다시 시도해주세요.' });
-      } else if (statusResult.status === 'conversion_failed') {
-        updateDoc(rowId, { status: 'error', meta: statusResult.conversion_metadata?.conversion_error || '문서를 변환하지 못했습니다.' });
-      } else if (statusResult.status === 'indexed_empty') {
-        updateDoc(rowId, { status: 'warning', meta: '문서에서 읽을 수 있는 텍스트를 찾지 못했어요 — 파일을 확인해주세요.' });
-      } else {
-        updateDoc(rowId, { status: contentStatus, meta: contentMeta });
-      }
-    } catch (err) {
-      clearInterval(timer);
-      updateDoc(rowId, { status: 'error', meta: err.message });
-    }
-  }, _DOCUMENT_STATUS_POLL_INTERVAL_MS);
 }
 
 function Shell({ children, active, mode, onNavigate, showNav }) {
@@ -317,7 +276,7 @@ function EntryScreen({ onEnter, onModeSelect, loading, error, projectId, ensureP
       // 나왔다. 원문 요약은 "공모전 분석" 화면(AnalysisScreen)이 LLM으로 뽑은 요약을 대신
       // 보여주므로, 여기서는 원문 슬라이스를 더 이상 안 만든다.
       if (result.document_status === 'indexing' && result.document_id) {
-        setDocuments((prev) => [...prev, { id, backendId: result.document_id, name: title, meta: '공고문을 색인하는 중...', status: 'embedding' }]);
+        setDocuments((prev) => [...prev, { id, backendId: result.document_id, name: title, meta: '공고문을 색인하는 중...', status: 'embedding', progress: 50 }]);
         pollDocumentIndexing(pid, result.document_id, id, contentStatus, contentMeta, updateDoc);
       } else {
         setDocuments((prev) => [...prev, { id, backendId: result.document_id, name: title, meta: contentMeta, status: contentStatus }]);
@@ -332,7 +291,7 @@ function EntryScreen({ onEnter, onModeSelect, loading, error, projectId, ensureP
 
   async function uploadCriteriaFile(file) {
     const id = `${file.name}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-    setDocuments((prev) => [...prev, { id, name: file.name, meta: formatFileSize(file.size), status: 'embedding' }]);
+    setDocuments((prev) => [...prev, { id, name: file.name, meta: formatFileSize(file.size), status: 'embedding', progress: 50 }]);
     try {
       const pid = await ensureProject();
       const doc = await uploadDocument(pid, file, 'pdf', 'criteria');
@@ -343,7 +302,7 @@ function EntryScreen({ onEnter, onModeSelect, loading, error, projectId, ensureP
       // 가은/Claude(2026-07-21): 색인이 백그라운드로 바뀌어 업로드 응답이 "indexing"으로
       // 즉시 돌아온다 — 행은 "색인 중" 그대로 두고 폴링으로 완료를 확인한다.
       if (doc.status === 'indexing') {
-        updateDoc(id, { backendId: doc.id });
+        updateDoc(id, { backendId: doc.id, progress: 75 });
         pollDocumentIndexing(pid, doc.id, id, 'done', formatFileSize(file.size), updateDoc);
         return;
       }
@@ -497,7 +456,9 @@ function EntryScreen({ onEnter, onModeSelect, loading, error, projectId, ensureP
                   <div style={{ fontSize: 12, color: 'var(--text-2)' }}>{doc.meta}</div>
                 </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0, marginLeft: 10 }}>
-                  {doc.status === 'embedding' && <span className="badge amber mono">색인 중</span>}
+                  {doc.status === 'embedding' && (
+                    <ProgressBar percent={doc.progress} label="색인 중" color="linear-gradient(135deg, #7c5cea, #8b6ef0)" trackColor="var(--bg-2)" />
+                  )}
                   {doc.status === 'done' && <span className="badge green mono">✓ 완료</span>}
                   {doc.status === 'warning' && <span className="badge amber mono">확인 필요</span>}
                   {doc.status === 'error' && <span className="badge coral mono">실패</span>}
@@ -583,6 +544,10 @@ function AnalysisScreen({ mode, onNext, onBack, projectId }) {
   // 리스트에 뒤섞여 나온 사례). getApplicationFormAnalysis는 이미 아이디어 회의 시작 시
   // 내부적으로 쓰던 것과 같은 함수 — 여기서는 화면에 직접 보여주는 용도로 별도 호출한다.
   const [formAnalysis, setFormAnalysis] = useState(null);
+  // 가은/Claude(2026-07-23, 요청: 로딩 프로그레스바) — getAnnouncementAnalysis는 단발
+  // LLM 호출(+누락 감지 시 최대 1회 재검증)이라 실제 진행률을 알 방법이 없다. 대기
+  // 시간에 막대가 멈춰 보이지 않도록 서서히 채우다가, 완료되는 순간에만 100%로 마무리한다.
+  const [progressPercent, setProgressPercent] = useState(8);
   const [detailOpen, setDetailOpen] = useState(false);
   const [ideaTopic, setIdeaTopic] = useState(null);
   const [workDetail, setWorkDetail] = useState(null); // { contestTitle, works } | null
@@ -622,16 +587,23 @@ function AnalysisScreen({ mode, onNext, onBack, projectId }) {
     let cancelled = false;
     setLoading(true);
     setError('');
+    setProgressPercent(8);
+    const progressTimer = setInterval(() => {
+      setProgressPercent((prev) => Math.min(92, prev + 2));
+    }, 500);
     getAnnouncementAnalysis(projectId)
       .then((data) => { if (!cancelled) setAnalysis(data); })
       .catch((err) => { if (!cancelled) setError(err.message); })
-      .finally(() => { if (!cancelled) setLoading(false); });
+      .finally(() => {
+        clearInterval(progressTimer);
+        if (!cancelled) { setProgressPercent(100); setLoading(false); }
+      });
     // 신청양식 항목은 "선택 정보"라 실패해도 공고문 분석 자체를 막지 않는다 — 조용히
     // null로 두면 아래 카드가 그냥 안 나타난다.
     getApplicationFormAnalysis(projectId)
       .then((data) => { if (!cancelled) setFormAnalysis(data); })
       .catch(() => { if (!cancelled) setFormAnalysis(null); });
-    return () => { cancelled = true; };
+    return () => { cancelled = true; clearInterval(progressTimer); };
   }, [projectId]);
 
   // 가은/Claude(2026-07-21): 실측 요청 — "내 프로젝트"에서 아이디어 프로젝트를 불러오면
@@ -674,7 +646,17 @@ function AnalysisScreen({ mode, onNext, onBack, projectId }) {
       <div style={{ maxWidth: 820 }}>
         <div className="badge purple mono">공고문 분석 중</div>
         <h1 style={{ fontSize: 26, fontWeight: 700, margin: "12px 0 24px" }}>등록한 공고문을 읽고 있어요...</h1>
-        <div className="card glass" style={{ color: "var(--text-2)", fontSize: 13 }}>잠시만 기다려주세요.</div>
+        <div className="card glass" style={{ padding: 20 }}>
+          <ProgressBar
+            percent={progressPercent}
+            label={`${Math.round(progressPercent)}%`}
+            color="linear-gradient(135deg, #7c5cea, #8b6ef0)"
+            trackColor="var(--bg-2)"
+            fill
+            height={8}
+          />
+          <div style={{ color: "var(--text-2)", fontSize: 13, marginTop: 10 }}>잠시만 기다려주세요.</div>
+        </div>
       </div>
     );
   }
@@ -1012,7 +994,7 @@ function UploadAndAnalyzeScreen({ projectId, onFeedbackReady, onBack, initialDoc
 
   async function uploadOne(file) {
     const id = `${file.name}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
-    setDocuments((prev) => [...prev, { id, name: file.name, meta: formatFileSize(file.size), status: 'uploading' }])
+    setDocuments((prev) => [...prev, { id, name: file.name, meta: formatFileSize(file.size), status: 'uploading', progress: 30 }])
     try {
       const doc = await uploadDocument(projectId, file, 'pdf', 'target')
       if (doc.status === 'conversion_failed') {
@@ -1024,11 +1006,11 @@ function UploadAndAnalyzeScreen({ projectId, onFeedbackReady, onBack, initialDoc
       // 완료를 확인한다. "분석 시작" 버튼은 계속 status==='done'(색인 완료)에만 열린다 —
       // 분석(멘토 추천·리뷰)이 색인된 청크를 근거로 쓰기 때문이다.
       if (doc.status === 'indexing') {
-        updateDoc(id, { backendId: doc.id, status: 'embedding', meta: '문서를 색인하는 중...' })
+        updateDoc(id, { backendId: doc.id, status: 'embedding', meta: '문서를 색인하는 중...', progress: 75 })
         pollDocumentIndexing(projectId, doc.id, id, 'done', formatFileSize(file.size), updateDoc)
         return
       }
-      updateDoc(id, { status: 'done' })
+      updateDoc(id, { status: 'done', progress: 100 })
     } catch (err) {
       updateDoc(id, { status: 'error', meta: err.message })
     }
@@ -1153,8 +1135,14 @@ function UploadAndAnalyzeScreen({ projectId, onFeedbackReady, onBack, initialDoc
                     <div style={{ fontSize: 13.5, fontWeight: 600 }}>{doc.name}</div>
                     <div style={{ fontSize: 12, color: 'var(--text-2)' }}>{doc.meta}</div>
                   </div>
-                  {doc.status === 'uploading' && <span className="badge amber mono">업로드 중</span>}
-                  {doc.status === 'embedding' && <span className="badge amber mono">색인 중</span>}
+                  {(doc.status === 'uploading' || doc.status === 'embedding') && (
+                    <ProgressBar
+                      percent={doc.progress}
+                      label={doc.status === 'uploading' ? '업로드 중' : '색인 중'}
+                      color="linear-gradient(135deg, #7c5cea, #8b6ef0)"
+                      trackColor="var(--bg-2)"
+                    />
+                  )}
                   {doc.status === 'done' && <span className="badge green mono">✓ 완료</span>}
                   {doc.status === 'warning' && <span className="badge amber mono">확인 필요</span>}
                   {doc.status === 'error' && <span className="badge coral mono">실패</span>}

@@ -96,6 +96,7 @@ def load_from_url(url: str) -> UrlExtractionResult:
         TooManyRedirectsError: 원본 URL 리다이렉트 초과
     """
     validate_url_or_raise(url)
+    logger.info("[url-load-start] url=%s", url)
 
     origin_ext = extension_from_url(url)
     fetched_at = datetime.now(timezone.utc)
@@ -103,6 +104,7 @@ def load_from_url(url: str) -> UrlExtractionResult:
 
     # HWP/HWPX를 가리키는 URL은 네트워크 요청 없이 즉시 미지원 처리
     if origin_ext in ("hwp", "hwpx"):
+        logger.info("[url-load-skip] url=%s reason=hwp_hwpx_unsupported", url)
         return UrlExtractionResult(
             origin_url=url,
             fetch_target_type=FetchTargetType.DIRECT_FILE,
@@ -133,7 +135,13 @@ def load_from_url(url: str) -> UrlExtractionResult:
 
             content_type = fetched.headers.get("Content-Type", "").split(";")[0].strip().lower()
 
-            if _looks_like_direct_file(content_type, origin_ext, peeked.first_chunk):
+            is_direct_file = _looks_like_direct_file(content_type, origin_ext, peeked.first_chunk)
+            logger.info(
+                "[url-load-classify] url=%s content_type=%s origin_ext=%s classified_as=%s",
+                url, content_type or "(none)", origin_ext or "(none)",
+                "direct_file" if is_direct_file else "html_page",
+            )
+            if is_direct_file:
                 return _handle_direct_file(
                     origin_url=url,
                     fetched=fetched,
@@ -220,19 +228,27 @@ def _handle_direct_file(
         discovery_reasons=["origin_url"],
     )
 
-    attachment_result, unsupported, failed = _finalize_download(
-        candidate=candidate,
-        source_page_url=origin_url,
-        fetched=fetched,
-        peeked=peeked,
-        budget=budget,
-        tmp_dir=tmp_dir,
+    attachment_result, unsupported, failed = _log_attachment_outcome(
+        candidate,
+        *_finalize_download(
+            candidate=candidate,
+            source_page_url=origin_url,
+            fetched=fetched,
+            peeked=peeked,
+            budget=budget,
+            tmp_dir=tmp_dir,
+        ),
     )
 
     warnings: list[str] = []
     if unsupported is not None:
         warnings.append(unsupported.reason)
 
+    logger.info(
+        "[url-load-done] url=%s target_type=direct_file outcome=%s",
+        origin_url,
+        "extracted" if attachment_result else ("unsupported" if unsupported else "failed"),
+    )
     return UrlExtractionResult(
         origin_url=origin_url,
         fetch_target_type=FetchTargetType.DIRECT_FILE,
@@ -260,6 +276,10 @@ def _handle_html_page(
     budget.commit(len(text.encode(encoding, errors="replace")))
 
     outcome = parse_html(text)
+    logger.info(
+        "[url-load-parse] url=%s title=%s text_length=%d js_rendered_suspected=%s",
+        final_url, outcome.title or "(none)", len(outcome.text), outcome.is_js_rendered_suspected,
+    )
 
     warnings: list[str] = []
     # 가은/Claude(2026-07-18): 정적 fetch가 JS/AJAX 렌더링 의심으로 판정되면(html_parser.py
@@ -274,6 +294,10 @@ def _handle_html_page(
             rendered_outcome = parse_html(rendered_html)
             text = rendered_html
             outcome = rendered_outcome
+            logger.info(
+                "[url-load-headless] url=%s rendered_text_length=%d",
+                final_url, len(rendered_outcome.text),
+            )
             # 가은/Claude(2026-07-18): rendered_outcome.is_js_rendered_suspected를 그대로
             # "재판정"에 재사용하지 않는다 — 메인 콘텐츠는 다 채워졌는데 페이지 하단의
             # 별개 위젯("관련 글 더보기" 등)이 계속 "로딩 중..."이라 이 휴리스틱이 계속
@@ -344,6 +368,12 @@ def _handle_html_page(
     if unsupported_attachments:
         warnings.append(_UNSUPPORTED_REASON)
 
+    logger.info(
+        "[url-load-done] url=%s target_type=html_page title=%s text_length=%d "
+        "attachment_candidates=%d attachments_extracted=%d unsupported=%d failed=%d",
+        origin_url, page_content.title or "(none)", page_content.text_length,
+        len(candidates), len(attachments), len(unsupported_attachments), len(failed_attachments),
+    )
     return UrlExtractionResult(
         origin_url=origin_url,
         fetch_target_type=FetchTargetType.HTML_PAGE,
@@ -366,28 +396,28 @@ def _download_and_process_attachment(
     tmp_dir: Path,
 ) -> tuple[AttachmentExtractionResult | None, UnsupportedAttachment | None, FailedAttachment | None]:
     if budget.remaining <= 0:
-        return None, None, FailedAttachment(
+        return _log_attachment_outcome(candidate, None, None, FailedAttachment(
             url=candidate.url,
             file_name=candidate.file_name,
             error_code="TOTAL_SIZE_BUDGET_EXCEEDED",
             message="URL 1건 처리의 전체 다운로드 예산을 초과하여 건너뜁니다.",
-        )
+        ))
 
     try:
         fetched = open_stream(session, candidate.url, referer=referer)
         peeked = peek_stream(fetched, max_size_bytes=min(MAX_ATTACHMENT_SIZE_BYTES, budget.remaining))
     except InvalidUrlError as exc:
-        return None, None, FailedAttachment(url=candidate.url, file_name=candidate.file_name, error_code="INVALID_URL", message="첨부파일 URL 형식이 유효하지 않습니다.")
+        return _log_attachment_outcome(candidate, None, None, FailedAttachment(url=candidate.url, file_name=candidate.file_name, error_code="INVALID_URL", message="첨부파일 URL 형식이 유효하지 않습니다."))
     except BlockedUrlError:
-        return None, None, FailedAttachment(url=candidate.url, file_name=candidate.file_name, error_code="BLOCKED_URL", message="내부/사설 네트워크 대상 URL이라 처리하지 않습니다.")
+        return _log_attachment_outcome(candidate, None, None, FailedAttachment(url=candidate.url, file_name=candidate.file_name, error_code="BLOCKED_URL", message="내부/사설 네트워크 대상 URL이라 처리하지 않습니다."))
     except TooManyRedirectsError:
-        return None, None, FailedAttachment(url=candidate.url, file_name=candidate.file_name, error_code="TOO_MANY_REDIRECTS", message="리다이렉트 허용 횟수를 초과했습니다.")
+        return _log_attachment_outcome(candidate, None, None, FailedAttachment(url=candidate.url, file_name=candidate.file_name, error_code="TOO_MANY_REDIRECTS", message="리다이렉트 허용 횟수를 초과했습니다."))
     except DownloadSizeLimitExceededError:
-        return None, None, FailedAttachment(url=candidate.url, file_name=candidate.file_name, error_code="SIZE_LIMIT_EXCEEDED", message="파일 크기가 제한을 초과하여 다운로드를 중단했습니다.")
+        return _log_attachment_outcome(candidate, None, None, FailedAttachment(url=candidate.url, file_name=candidate.file_name, error_code="SIZE_LIMIT_EXCEEDED", message="파일 크기가 제한을 초과하여 다운로드를 중단했습니다."))
     except UrlFetchError:
-        return None, None, FailedAttachment(url=candidate.url, file_name=candidate.file_name, error_code="FETCH_FAILED", message="첨부파일을 가져오는 중 네트워크 오류가 발생했습니다.")
+        return _log_attachment_outcome(candidate, None, None, FailedAttachment(url=candidate.url, file_name=candidate.file_name, error_code="FETCH_FAILED", message="첨부파일을 가져오는 중 네트워크 오류가 발생했습니다."))
 
-    return _finalize_download(
+    attachment_result, unsupported, failed = _finalize_download(
         candidate=candidate,
         source_page_url=source_page_url,
         fetched=fetched,
@@ -395,6 +425,31 @@ def _download_and_process_attachment(
         budget=budget,
         tmp_dir=tmp_dir,
     )
+    return _log_attachment_outcome(candidate, attachment_result, unsupported, failed)
+
+
+def _log_attachment_outcome(
+    candidate: AttachmentLinkInfo,
+    attachment_result: "AttachmentExtractionResult | None",
+    unsupported: "UnsupportedAttachment | None",
+    failed: "FailedAttachment | None",
+) -> tuple["AttachmentExtractionResult | None", "UnsupportedAttachment | None", "FailedAttachment | None"]:
+    """데모 파이프라인 점검용 — 발견된 첨부파일 후보가 왜 색인에 포함/누락됐는지(성공/미지원
+    /실패+사유) 항상 한 줄로 남긴다. _download_and_process_attachment의 여러 반환 지점을
+    한 곳에서 통일해 로그 누락을 막는다."""
+    if attachment_result is not None:
+        logger.info(
+            "[url-attachment] url=%s outcome=extracted block_count=%d",
+            candidate.url, attachment_result.extraction.block_count,
+        )
+    elif unsupported is not None:
+        logger.info("[url-attachment] url=%s outcome=unsupported reason=%s", candidate.url, unsupported.reason)
+    elif failed is not None:
+        logger.info(
+            "[url-attachment] url=%s outcome=failed error_code=%s message=%s",
+            candidate.url, failed.error_code, failed.message,
+        )
+    return attachment_result, unsupported, failed
 
 
 # 가은/Claude(2026-07-18): 다운로드한 이미지(포스터 등)를 1페이지 PDF로 감싼다 — 새 OCR

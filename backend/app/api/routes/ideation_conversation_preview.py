@@ -32,6 +32,8 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from openai import OpenAI
+
+from app.core.llm import trace_openai_client
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
@@ -283,7 +285,7 @@ def _build_llm_call(session_id: str, model: str):
     라우팅 버그로 인한 루프·과호출을 방지한다(ideation_preview.py의 동일 안전장치와 같은
     정책). API 키/내부 프롬프트는 절대 응답에 담지 않는다 — 이 함수는 호출 결과 텍스트만
     반환하고, 실패 시에도 프롬프트 원문이 아니라 서버 로그에만 상세를 남긴다."""
-    client = OpenAI(api_key=settings.OPENAI_API_KEY, max_retries=1)
+    client = trace_openai_client(OpenAI(api_key=settings.OPENAI_API_KEY, max_retries=1))
     call_count = {"n": 0}
 
     def llm_call(prompt: str) -> str:
@@ -319,7 +321,7 @@ def _build_streaming_backends(session_id: str, model: str):
     제너레이터(OpenAI stream=True), call_chat_completion(prompt)은 기존 _build_llm_call과
     동일한 블로킹 호출(스트리밍 대상이 아닌 분류·후보 생성 등에 쓴다). 호출 횟수 상한은
     make_streaming_llm_call이 중앙에서 관리하므로 여기서는 세지 않는다."""
-    client = OpenAI(api_key=settings.OPENAI_API_KEY, max_retries=1)
+    client = trace_openai_client(OpenAI(api_key=settings.OPENAI_API_KEY, max_retries=1))
 
     def stream_chat_completion(prompt: str):
         started = time.time()
