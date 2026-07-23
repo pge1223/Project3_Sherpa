@@ -47,6 +47,30 @@ function listOf(value, max) {
   return value.filter((v) => typeof v === 'string' && v.trim()).slice(0, max)
 }
 
+// 가은/Claude(2026-07-23, 요청: 4개로 자르지 말고 전부 보여주되 2단 배치 + 부문명은 한 번만):
+// evaluation_criteria는 "기업 평가 · 혁신성: 20점"처럼 "부문 · 기준명: 배점" 형식이라,
+// 항목마다 부문명을 반복해서 보여주는 대신 부문별로 묶어 부문 라벨을 한 번만 보여주고
+// 그 아래 기준명만 나열한다(2단 그리드로 배치하면 자연히 부문별로 한 칸씩 차지한다).
+// 구분자가 없는 항목은 전부 하나의 "부문 없음" 묶음으로 합쳐 기존처럼 라벨 없이 보여준다.
+function groupByCategory(value) {
+  if (!Array.isArray(value)) return []
+  const items = value.filter((v) => typeof v === 'string' && v.trim())
+  const groups = []
+  const groupIndexByKey = new Map()
+  for (const item of items) {
+    const sepIndex = item.indexOf(' · ')
+    const category = sepIndex >= 0 ? item.slice(0, sepIndex) : null
+    const label = sepIndex >= 0 ? item.slice(sepIndex + 3) : item
+    const key = category || '__no_category__'
+    if (!groupIndexByKey.has(key)) {
+      groupIndexByKey.set(key, groups.length)
+      groups.push({ category, labels: [] })
+    }
+    groups[groupIndexByKey.get(key)].labels.push(label)
+  }
+  return groups
+}
+
 export default function IdeaCanvasPanel({ ideationConv, analysis }) {
   if (!ideationConv) return null
 
@@ -65,7 +89,7 @@ export default function IdeaCanvasPanel({ ideationConv, analysis }) {
   const contestFit = textOf(idea?.contest_fit)
   const feasibility = idea?.feasibility ? FEASIBILITY_LABEL[idea.feasibility] || null : null
   const risks = listOf(idea?.risks, 4)
-  const criteria = listOf(analysis?.official_facts?.evaluation_criteria, 4)
+  const criteriaGroups = groupByCategory(analysis?.official_facts?.evaluation_criteria)
 
   return (
     <div className="card glass" style={{ marginBottom: 12, padding: 14 }}>
@@ -108,15 +132,26 @@ export default function IdeaCanvasPanel({ ideationConv, analysis }) {
       <CanvasRow
         label="심사기준 대응 포인트"
         source={contestFit ? '공모전 분석 + 회의' : '공모전 분석'}
-        filled={criteria.length > 0 || !!contestFit}
+        filled={criteriaGroups.length > 0 || !!contestFit}
       >
-        {criteria.length > 0 && (
-          <ul style={{ margin: 0, paddingLeft: 16, lineHeight: 1.7 }}>
-            {criteria.map((c, i) => <li key={i}>{c}</li>)}
-          </ul>
+        {criteriaGroups.length > 0 && (
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '2px 14px' }}>
+            {criteriaGroups.map((group, gi) => (
+              <div key={gi}>
+                {group.category && (
+                  <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-2)', marginBottom: 2 }}>
+                    {group.category}
+                  </div>
+                )}
+                <ul style={{ margin: 0, paddingLeft: 16, lineHeight: 1.6 }}>
+                  {group.labels.map((label, li) => <li key={li}>{label}</li>)}
+                </ul>
+              </div>
+            ))}
+          </div>
         )}
         {contestFit && (
-          <div style={{ marginTop: criteria.length > 0 ? 4 : 0 }}>
+          <div style={{ marginTop: criteriaGroups.length > 0 ? 6 : 0 }}>
             <strong style={{ color: 'var(--text-2)', fontWeight: 600 }}>대응 · </strong>
             {contestFit}
           </div>

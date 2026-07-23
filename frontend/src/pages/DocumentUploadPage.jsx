@@ -3,10 +3,11 @@ import { useNavigate, useSearchParams } from 'react-router-dom'
 import DocumentRow from '../components/upload/DocumentRow'
 import { isAcceptedDocument, formatFileSize, ACCEPTED_DOCUMENT_EXTENSIONS } from '../utils/file'
 import { createProject, getProject } from '../api/projectApi'
-import { uploadDocument, fetchUrl, getDocuments, getDocumentStatus } from '../api/documentApi'
+import { uploadDocument, fetchUrl, getDocuments } from '../api/documentApi'
 import { DOC_TYPE_OPTIONS } from '../utils/docType'
 import { assessCriteriaContent } from '../utils/criteriaAssessment'
 import StepSidebar from '../components/wizard/StepSidebar'
+import { pollDocumentIndexing } from '../utils/documentIndexingPoll'
 
 // 가은/Claude(2026-07-16): 백엔드 document.status -> 이 화면의 DocumentRow status로 매핑.
 // 인덱싱이 안 끝난 상태('uploaded')는 새로고침 시점엔 이미 끝나 있을 확률이 높지만,
@@ -22,12 +23,6 @@ function toRowStatus(backendStatus) {
   if (backendStatus === 'indexing_failed' || backendStatus === 'conversion_failed') return 'error'
   return 'embedding'
 }
-
-// 가은/Claude(2026-07-19, INF-007): fetch-url이 색인을 백그라운드로 넘기면서
-// document_status가 "indexing"으로 오면 폴링해야 한다 — 서버 타임아웃
-// (_WEBPAGE_INDEXING_TIMEOUT_SECONDS=120s, documents.py)보다 여유 있게 잡는다.
-const _DOCUMENT_STATUS_POLL_INTERVAL_MS = 2000
-const _DOCUMENT_STATUS_POLL_MAX_ATTEMPTS = 90 // 2s * 90 = 3분
 
 function UploadIcon() {
   return (
@@ -153,7 +148,7 @@ export default function DocumentUploadPage() {
       // 똑같이 status 폴링으로 완료를 확인한다.
       if (doc.status === 'indexing') {
         updateDoc(id, { progress: 75 })
-        pollDocumentIndexing(pid, doc.id, id, 'done', formatFileSize(file.size))
+        pollDocumentIndexing(pid, doc.id, id, 'done', formatFileSize(file.size), updateDoc)
         return
       }
       updateDoc(id, { status: 'done', progress: 100 })
@@ -176,54 +171,6 @@ export default function DocumentUploadPage() {
   function handleFileInputChange(e, documentRole) {
     addFiles(e.target.files, documentRole)
     e.target.value = ''
-  }
-
-  // 가은/Claude(2026-07-19, INF-007): document_status가 "indexing"인 동안 짧은 간격으로
-  // GET .../status(DOC-004)를 폴링한다. 색인이 최종적으로 성공(indexed/indexed_empty)하면
-  // 이미 계산해둔 본문 품질 평가(contentStatus/contentMeta)를 그대로 적용하고, 색인
-  // 자체가 실패/타임아웃이면 그걸 우선해서 error로 덮어쓴다 — "본문은 괜찮았는데 색인이
-  // 실패했다"와 "본문 자체가 부실하다"는 서로 다른 문제라 구분해서 보여준다.
-  function pollDocumentIndexing(pid, documentId, rowId, contentStatus, contentMeta) {
-    let attempts = 0
-    const timer = setInterval(async () => {
-      attempts += 1
-      try {
-        const statusResult = await getDocumentStatus(pid, documentId)
-        if (statusResult.status === 'indexing') {
-          if (attempts >= _DOCUMENT_STATUS_POLL_MAX_ATTEMPTS) {
-            clearInterval(timer)
-            updateDoc(rowId, {
-              status: 'error',
-              meta: '색인 상태 확인이 너무 오래 걸리고 있어요 — 새로고침해서 다시 확인해주세요.',
-            })
-          }
-          return
-        }
-        clearInterval(timer)
-        if (statusResult.status === 'indexing_failed') {
-          updateDoc(rowId, { status: 'error', progress: 100, meta: '문서 색인 중 오류가 발생했습니다.' })
-        } else if (statusResult.status === 'indexing_timeout') {
-          updateDoc(rowId, {
-            status: 'error',
-            progress: 100,
-            meta: '색인이 시간 내에 끝나지 않았습니다 — 다시 시도해주세요.',
-          })
-        } else if (statusResult.status === 'conversion_failed') {
-          // 가은/Claude(2026-07-21): 파일 색인 백그라운드화로 HWP/HWPX 변환 실패도 이제
-          // 폴링 응답(conversion_metadata, DOC-004에 추가된 필드)으로 도착한다.
-          updateDoc(rowId, {
-            status: 'error',
-            progress: 100,
-            meta: statusResult.conversion_metadata?.conversion_error || '문서를 변환하지 못했습니다.',
-          })
-        } else {
-          updateDoc(rowId, { status: contentStatus, progress: 100, meta: contentMeta })
-        }
-      } catch (err) {
-        clearInterval(timer)
-        updateDoc(rowId, { status: 'error', meta: err.message })
-      }
-    }, _DOCUMENT_STATUS_POLL_INTERVAL_MS)
   }
 
   async function handleFetchCriteriaUrl() {
@@ -256,7 +203,7 @@ export default function DocumentUploadPage() {
             unsupportedLinks,
           },
         ])
-        pollDocumentIndexing(pid, result.document_id, id, contentStatus, contentMeta)
+        pollDocumentIndexing(pid, result.document_id, id, contentStatus, contentMeta, updateDoc)
       } else {
         setDocuments((prev) => [
           ...prev,

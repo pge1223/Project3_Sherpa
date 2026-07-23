@@ -53,6 +53,16 @@ def make_openai_llm_call(model: str, api_key: str | None = None, client: Any | N
 
         client = OpenAI(api_key=api_key)
 
+        # 가은/Claude(2026-07-23, 요청: LangSmith 트레이싱 연결): 이 모듈은 backend 설정에
+        # 의존하지 않도록 분리돼 있으므로(파일 상단 주석 참고), backend/app/config.py의
+        # LANGSMITH_TRACING 플래그를 직접 읽는 대신 os.environ의 LangSmith 표준 변수
+        # (LANGSMITH_TRACING/LANGSMITH_API_KEY/LANGSMITH_PROJECT)만 확인한다. 값이 없으면
+        # wrap_openai는 아무 API 호출도 추가하지 않는 순수 무동작(no-op) 래퍼다 — 항상
+        # 감싸도 안전하다(실측: langsmith==0.10.4, env 미설정 시 네트워크 호출 없음).
+        from langsmith.wrappers import wrap_openai
+
+        client = wrap_openai(client)
+
     def call(prompt: str) -> str:
         response = client.chat.completions.create(
             model=model,

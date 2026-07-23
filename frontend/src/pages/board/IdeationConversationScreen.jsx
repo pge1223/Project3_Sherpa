@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { Fragment, useEffect, useRef, useState } from 'react'
 import { AlertCircle, ChevronDown, ChevronUp, RefreshCw, Send, Sparkles } from 'lucide-react'
 import {
   cancelIdeationConversation,
@@ -64,6 +64,7 @@ const REPLYABLE_PHASES = new Set([
   'awaiting_planning_answer',
   'awaiting_developer_answer',
   'awaiting_user_decision',
+  'discussion_complete',
 ])
 
 // 재인/Claude(2026-07-23): 아바타 재생 대상 화자 - user는 당연히 제외, 그 외 3명
@@ -125,6 +126,24 @@ function EvidenceToggle({ evidence, linkedEvidenceRefs, claims }) {
     (c) => c && (c.claim_type === 'expert_judgment' || !linkedSet.size)
   )
   if (items.length === 0 && unlinkedClaims.length === 0) return null
+  if (items.length === 0) {
+    return (
+      <div
+        style={{
+          marginTop: 4,
+          fontSize: 11.5,
+          color: 'var(--text-2)',
+          display: 'inline-flex',
+          alignItems: 'center',
+          border: '1px solid var(--glass-border)',
+          borderRadius: 999,
+          padding: '2px 7px',
+        }}
+      >
+        전문가 판단 · 문서 근거 없음
+      </div>
+    )
+  }
   const count = items.length
   return (
     <div style={{ marginTop: 4 }}>
@@ -227,7 +246,12 @@ function MessageBubble({ message, streaming = false, interrupted = false, allMes
   // done(message_end 수신)이 와도 displayedContent가 content를 따라잡기 전까지는
   // 커서를 유지한다 — "message_end가 와도 남은 글자 큐를 끝까지 표시"(요청 사항).
   const caughtUp = (message.displayedContent?.length ?? 0) >= (message.content?.length ?? 0)
-  const showCursor = streaming && !caughtUp
+  // 용준/Claude(2026-07-23, 요청: 스트리밍 UX 버그 수정) — 구조화 응답 검증 실패로
+  // message_reset을 받은 스트리밍 말풍선. ideationStreamReducer.js가 더 이상 이 메시지를
+  // 배열에서 지우지 않고 status:'reviewing'으로만 표시하므로, 여기서는 지우는 대신
+  // 흐리게 보여주고 재검토 중이라는 라벨을 붙인다(요청: "화면이 비지 않게").
+  const isReviewing = streaming && message.status === 'reviewing'
+  const showCursor = streaming && !caughtUp && !isReviewing
 
   if (!hasContent && !streaming) {
     return (
@@ -270,7 +294,7 @@ function MessageBubble({ message, streaming = false, interrupted = false, allMes
             fontSize: 13.5,
             lineHeight: 1.6,
             whiteSpace: 'pre-wrap',
-            opacity: interrupted ? 0.6 : 1,
+            opacity: interrupted || isReviewing ? 0.6 : 1,
           }}
         >
           {text}
@@ -285,6 +309,14 @@ function MessageBubble({ message, streaming = false, interrupted = false, allMes
             [사용자에 의해 발언이 중단됐습니다]
           </div>
         )}
+        {/* 용준/Claude(2026-07-23, 요청: 스트리밍 UX 버그 수정) — 검증 실패로 재검토
+            대기 중임을 알린다. willRetry가 false면(재시도 없이 안전한 fallback을 기다리는
+            중) 곧 회의 진행 자체가 멈추지 않는다는 것을 알 수 있게 문구를 살짝 다르게 준다. */}
+        {isReviewing && (
+          <div style={{ fontSize: 11.5, color: 'var(--text-2)', marginTop: 3, fontStyle: 'italic' }}>
+            {message.willRetry === false ? '더 나은 답변으로 정리하고 있습니다…' : '응답을 다시 검토하고 있습니다…'}
+          </div>
+        )}
         {!streaming && (
           <EvidenceToggle
             evidence={message.evidence}
@@ -295,6 +327,28 @@ function MessageBubble({ message, streaming = false, interrupted = false, allMes
         {isFacilitatorSummary && <FacilitatorSummaryCard structured={message.structured} />}
       </div>
     </div>
+  )
+}
+
+
+const EXPERT_LABELS = {
+  planning_expert: '기획 위원',
+  dev_expert: '개발 위원',
+}
+
+function InterruptionMarker({ speakerId }) {
+  const speakerLabel = EXPERT_LABELS[speakerId]
+  return (
+    <p
+      style={{
+        margin: '4px 0 8px',
+        color: 'var(--text-2)',
+        fontSize: 12,
+        fontStyle: 'italic',
+      }}
+    >
+      [{speakerLabel ? `${speakerLabel}의 ` : ''}발언이 사용자에 의해 중단됐습니다]
+    </p>
   )
 }
 
@@ -482,16 +536,18 @@ export function IdeationScreen({
   // null이면 평소 입력창, 문자열("planning_expert"/"dev_expert"/"both")이면 그 위원에게
   // 보낼 질문을 입력받는 중 — 대상 선택 버튼 대신 안내 문구가 바뀐 입력창을 보여준다.
   const [interjectTarget, setInterjectTarget] = useState(null)
-  // 취소된 스트리밍 말풍선을 로컬 화면 기록으로만 보존한다 — 서버가 애초에 저장하지 않은
-  // 미완성 발언이므로 ideationConv(canonical)에는 절대 섞이지 않는다(요청: "검증되지 않은
-  // structured JSON은 저장하지 않는다").
-  const [interruptedMessages, setInterruptedMessages] = useState([])
+  // 중단된 발언자와 사용자가 의견을 남길 대상은 별개다. 예를 들어 개발 위원 발언 중
+  // 멈춘 뒤에도 기획 위원의 직전 의견을 선택할 수 있으므로 두 값을 각각 보존한다.
+  const [interruptedSpeakerId, setInterruptedSpeakerId] = useState(null)
+  // 취소된 스트리밍 본문은 저장하지 않고 중단 시점 마커만 로컬에 보존한다. 서버가 저장하지
+  // 않은 미완성 발언은 ideationConv(canonical)나 다음 프롬프트에 절대 섞이지 않는다.
+  const [interruptionMarkers, setInterruptionMarkers] = useState([])
   // 재인/Claude(2026-07-23, 실측: "내가 보낸 채팅이 바로 안 올라가고 늦게 올라감"):
   // 사용자가 보낸 메시지는 서버가 canonical state에 echo해서 돌려줄 때(finalizeStream)까지
   // 화면 어디에도 안 보였다 — 그 사이(위원 응답을 실제로 생성하는 몇 초)에는 입력창에
   // 그대로 남아있는 것처럼 보였다. 보내는 즉시 이 로컬 전용 임시 말풍선으로 먼저 보여주고,
   // 진짜 canonical 메시지가 도착하면(finalizeStream/sendNonStreaming) 즉시 지운다 —
-  // interruptedMessages와 같은 원칙: 서버 state에는 절대 안 섞이는 순수 화면 표시용.
+  // interruptionMarkers와 같은 원칙: 서버 state에는 절대 안 섞이는 순수 화면 표시용.
   const [optimisticUserMessage, setOptimisticUserMessage] = useState(null)
   // 가은/Claude(2026-07-22): 아이디어 기획 캔버스(IdeaCanvasPanel)의 "심사기준 대응 포인트"
   // 시드용. runStart는 원래 이 분석을 start API 페이로드를 만드는 데만 쓰고 버렸는데,
@@ -838,21 +894,20 @@ export function IdeationScreen({
     : null
   const canonicalMessages = dedupeMessagesById(ideationConv?.messages)
   // 재인/Claude(2026-07-23, 실측: "메시지가 2개 겹쳐 나옴" — 서버 확인 결과 실제 메시지는
-  // 1건뿐이었다): 이 세 소스는 서로 겹칠 수 있다 — 특히 single_turn 응답처럼 아주 짧은
-  // 메시지는 canonical(finalizeStream)로 넘어가는 순간과 streamState가 비워지는 순간
-  // 사이에 한 프레임이라도 둘 다 남아있으면 같은 message_id가 두 배열에 동시에 존재해
-  // 화면에 두 번 그려진다. dedupeMessagesById로 전체를 한 번 더 걸러 canonical(먼저 오는
-  // 쪽)을 우선하고 나머지에서 같은 id는 제거한다.
-  const visibleMessages = dedupeMessagesById([
-    ...canonicalMessages,
-    ...interruptedMessages,
-    ...streamState.messages,
-  ])
+  // 1건뿐이었다): canonical과 streamState는 서로 겹칠 수 있다 — 특히 single_turn 응답처럼
+  // 아주 짧은 메시지는 canonical(finalizeStream)로 넘어가는 순간과 streamState가 비워지는
+  // 순간 사이에 한 프레임이라도 둘 다 남아있으면 같은 message_id가 두 배열에 동시에 존재해
+  // 화면에 두 번 그려진다. dedupeMessagesById로 한 번 더 걸러 canonical(먼저 오는 쪽)을
+  // 우선하고 streamState 쪽의 같은 id는 제거한다. interruptionMarkers는 메시지가 아니라
+  // 렌더링용 마커라 여기(교차 참조용 allMessages)에는 안 넣는다.
+  const visibleMessages = dedupeMessagesById([...canonicalMessages, ...streamState.messages])
   const busy = starting || sending || finalizing || saving
   // awaiting_user_decision도 입력을 막지 않는다("더 이야기하기") — 백엔드
   // apply_user_answer가 이 경우도 받아 두 전문가 보완 의견으로 이어간다.
   const canReplyOrContinue = !!ideationConv && REPLYABLE_PHASES.has(phase) && !busy
-  const canFinalize = !!ideationConv && phase === 'awaiting_user_decision' && !busy
+  const canFinalize = !!ideationConv
+    && (phase === 'awaiting_user_decision' || phase === 'discussion_complete')
+    && !busy
   const hasCandidates = (ideationConv?.idea_candidates?.length || 0) > 0
   const hasSelected = !!ideationConv?.selected_idea
   // 용준/Claude(2026-07-22, 요청: "잠시만" 버튼) — 실제로 기획/개발 위원이 발언을
@@ -863,11 +918,11 @@ export function IdeationScreen({
   const chosenInterjectTarget = interjectTarget && interjectTarget !== '__choosing__' ? interjectTarget : null
   const interjectPlaceholder =
     chosenInterjectTarget === 'planning_expert'
-      ? '기획 관점에서 궁금한 점을 질문해 주세요.'
+      ? '기획 위원의 의견에 대한 질문이나 의견을 입력해 주세요.'
       : chosenInterjectTarget === 'dev_expert'
-        ? '기술·구현 관점에서 궁금한 점을 질문해 주세요.'
+        ? '개발 위원의 의견에 대한 질문이나 의견을 입력해 주세요.'
         : chosenInterjectTarget === 'both'
-          ? '두 위원이 함께 논의할 의견을 입력해 주세요.'
+          ? '두 위원의 의견을 함께 다룰 질문이나 의견을 입력해 주세요.'
           : null
 
   async function sendNonStreaming(text) {
@@ -920,6 +975,8 @@ export function IdeationScreen({
       await replyIdeationConversationStream(ideationConv.session_id, text, {
         signal: controller.signal,
         targetSpeakerId: target || undefined,
+        opinionTargetSpeakerId: target || undefined,
+        interruptedSpeakerId: target ? interruptedSpeakerId || undefined : undefined,
         // 재인/Claude(2026-07-23): 이 화면은 항상 아바타를 재생하므로, 라운드를 새로 여는
         // reply라도 위원 발언이 한 번에 다 몰려오지 않고 첫 발언부터 페이싱 대상이 되도록
         // 매번 true로 보낸다(handleAvatarNeedNextSpeaker가 나머지 턴을 이어서 요청함).
@@ -970,6 +1027,7 @@ export function IdeationScreen({
     // 요청: "최종 state가 먼저 도착해도 임시 스트림 메시지를 즉시 삭제하지 않음" — 여기서는
     // canonical로 바꾸지 않고 rAF 루프가 화면 타이핑을 다 끝낸 뒤 처리하도록 넘겨둔다.
     pendingFinalRef.current = { finalState, errorEvent: streamErrorEvent }
+    if (target) setInterruptedSpeakerId(null)
   }
 
   // 용준/Claude(2026-07-22, 요청: "잠시만" 버튼) — 위원이 실제로 발언을 스트리밍하는 동안만
@@ -986,15 +1044,12 @@ export function IdeationScreen({
     // canonical state를 다시 덮어써 방금 중단한 발언이 유령처럼 다시 나타날 수 있다.
     avatarTurnAbortRef.current?.abort()
 
-    // 사용자가 이미 읽은 부분 발언을 로컬 기록으로 보존한다(완료된 발언과 구분해서 렌더).
+    // 미완성 스트리밍 본문은 보존하지 않는다. 취소가 끝난 뒤 서버에서 완료된 partial state를
+    // 다시 받아온 다음, 그 마지막 canonical 메시지 뒤에 중단 마커만 배치한다.
     const lastPartial = streamState.messages[streamState.messages.length - 1]
-    if (lastPartial && (lastPartial.content || '').trim()) {
-      setInterruptedMessages((prev) => [
-        ...prev,
-        { ...lastPartial, content: lastPartial.content, status: 'interrupted', interrupted_by: 'user' },
-      ])
-    }
+    const hasInterruptedContent = Boolean(lastPartial && (lastPartial.content || '').trim())
     const requestIdToCancel = streamState.requestId
+    let refreshedState = null
 
     try {
       // ③ 취소 완료(세션 lock 해제)까지 기다린다 — 그래야 곧바로 다음 reply를 보내도
@@ -1004,10 +1059,40 @@ export function IdeationScreen({
       // 취소 API 자체가 실패해도(네트워크 등) 사용자가 다시 입력할 수 있게는 해준다 —
       // 백엔드는 결국 워커 스레드 종료 시 세션 lock을 해제한다.
     } finally {
+      try {
+        // 같은 스트림 요청 안에서 이미 완료된 기획/개발 발언은 서버 partial state에 저장돼
+        // 있다. 이를 다시 조회하지 않으면 프론트의 오래된 canonical 목록에는 보이지 않는다.
+        refreshedState = await getIdeationConversation(ideationConv.session_id)
+        setIdeationConv(refreshedState)
+        // 재인/Claude(2026-07-23): "잠시만"을 누를 수 있는 시점(canInterject는 스트리밍
+        // 메시지가 이미 하나 이상 생긴 뒤에만 true)이면 이번 라운드를 시작한 사용자
+        // 메시지는 이미 서버에 저장돼 있어, 방금 refetch한 목록에도 진짜 버전이 들어있다.
+        // optimisticUserMessage를 안 지우면 그 진짜 버전과 함께 두 번 보인다.
+        setOptimisticUserMessage(null)
+      } catch {
+        // 조회가 실패해도 입력 재개는 보장하고, 현재 canonical 목록을 fallback으로 사용한다.
+      }
+      if (hasInterruptedContent) {
+        const completedMessages = dedupeMessagesById(refreshedState?.messages || canonicalMessages)
+        const afterMessageId = completedMessages[completedMessages.length - 1]?.message_id ?? null
+        setInterruptionMarkers((prev) => [
+          ...prev,
+          {
+            markerId: `interrupted-${lastPartial.message_id || Date.now()}`,
+            afterMessageId,
+            speakerId: lastPartial.speaker_id || null,
+          },
+        ])
+      }
       setStreamState(createEmptyStreamState())
       pendingFinalRef.current = null
       setSending(false)
       setInterrupting(false)
+      setInterruptedSpeakerId(
+        lastPartial?.speaker_id === 'planning_expert' || lastPartial?.speaker_id === 'dev_expert'
+          ? lastPartial.speaker_id
+          : null,
+      )
       // ⑤ 대상 선택 UI를 보여준다(아직 특정 위원을 고르지 않은 상태).
       setInterjectTarget('__choosing__')
       // ④ 입력창 자동 포커스(다음 페인트 이후).
@@ -1036,6 +1121,9 @@ export function IdeationScreen({
     const key = ideationSessionStorageKey(projectId)
     if (key) sessionStorage.removeItem(key)
     setIdeationConv(null)
+    setInterruptionMarkers([])
+    setInterruptedSpeakerId(null)
+    setInterjectTarget(null)
     setError(null)
     startedRef.current = false
     runStart()
@@ -1099,8 +1187,16 @@ export function IdeationScreen({
               {startPhaseLabel ? `${startPhaseLabel}...` : '공모전 분석을 바탕으로 아이디어 후보를 만들고 있어요...'}
             </p>
           )}
+          {interruptionMarkers
+            .filter((marker) => marker.afterMessageId === null)
+            .map((marker) => <InterruptionMarker key={marker.markerId} speakerId={marker.speakerId} />)}
           {canonicalMessages.map((m) => (
-            <MessageBubble key={m.message_id} message={m} allMessages={visibleMessages} />
+            <Fragment key={m.message_id}>
+              <MessageBubble message={m} allMessages={visibleMessages} />
+              {interruptionMarkers
+                .filter((marker) => marker.afterMessageId === m.message_id)
+                .map((marker) => <InterruptionMarker key={marker.markerId} speakerId={marker.speakerId} />)}
+            </Fragment>
           ))}
           {/* 재인/Claude(2026-07-23): 사용자가 방금 보낸 메시지 — 서버 왕복이 끝나
               canonical에 진짜 echo가 도착하기 전까지 임시로 보여준다(handleSend/
@@ -1109,12 +1205,6 @@ export function IdeationScreen({
           {optimisticUserMessage && (
             <MessageBubble message={optimisticUserMessage} allMessages={visibleMessages} />
           )}
-          {/* 용준/Claude(2026-07-22, 요청: 중단된 메시지 처리) — "잠시만"으로 중단된 부분
-              발언. 서버에 저장되지 않는 순수 로컬 기록이므로 ideationConv.messages와 절대
-              섞이지 않는다. */}
-          {interruptedMessages.map((m) => (
-            <MessageBubble key={m.message_id} message={m} interrupted allMessages={visibleMessages} />
-          ))}
           {/* 스트리밍 임시 메시지 — message_start를 받는 즉시 말풍선이 생기고, 실제 LLM
               델타가 도착하는 대로 안에서 텍스트가 자란다(완성 후 재생하는 효과 아님).
               streamState는 최종 state 이벤트가 오면 즉시 비워지므로, 이 목록과 위
@@ -1132,6 +1222,46 @@ export function IdeationScreen({
               {statusLabelFor({ phase, starting, sending, finalizing })}...
             </p>
           )}
+          {/* 가은/Claude(2026-07-23, 요청: 후보 패널을 대화창 안으로) — 진행자가 선택을
+              요청하는 첫 버블("제안된 후보 중... 답할 수 있습니다") 바로 아래에 후보
+              카드를 띄운다. 이전엔 오른쪽 사이드 패널에 항상 떠 있었는데, 대화 흐름
+              밖이라 어느 버블에 대한 응답인지 연결이 약했다. phase가
+              awaiting_candidate_selection인 동안은 항상 그 마지막 메시지가 이 선택
+              질문이므로, 메시지 목록 맨 끝에 붙이면 자연히 그 버블 바로 아래에 온다.
+              선택하면 phase가 바뀌어(hasSelected) 이 블록 자체가 사라진다. */}
+          {phase === 'awaiting_candidate_selection' && hasCandidates && !hasSelected && (
+            <div style={{ marginTop: 4 }}>
+              <div style={{ fontSize: 12, color: 'var(--text-2)', marginBottom: 10, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                주제 후보
+              </div>
+              {ideationConv.idea_candidates.map((c, i) => (
+                <CandidateCard key={c.candidate_id || i} candidate={c} index={i} onSelect={(idx) => handleSend(candidateSelectMessage(idx))} disabled={!canReplyOrContinue} />
+              ))}
+              <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 4 }}>
+                <button
+                  aria-label="다시 추천"
+                  title="다시 추천"
+                  disabled={!canReplyOrContinue}
+                  onClick={() => handleSend(REGENERATE_MESSAGE)}
+                  style={{
+                    background: 'none',
+                    border: '1px solid var(--glass-border)',
+                    borderRadius: 999,
+                    width: 30,
+                    height: 30,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    cursor: canReplyOrContinue ? 'pointer' : 'default',
+                    opacity: canReplyOrContinue ? 1 : 0.5,
+                    color: 'var(--text-2)',
+                  }}
+                >
+                  <RefreshCw size={14} />
+                </button>
+              </div>
+            </div>
+          )}
           <div ref={chatEndRef} />
         </div>
 
@@ -1146,18 +1276,24 @@ export function IdeationScreen({
           </div>
         )}
 
-        {/* 대상 선택 UI — 취소 확인 직후, 아직 위원을 고르지 않은 상태에서만 보인다. */}
+        {/* 의견 대상 선택 UI — 답변자를 고르는 것처럼 보이지 않도록 "누구의 의견에
+            반응하는지"를 명시한다. 선택된 위원이 먼저 답하고 상대 위원이 이어서 검토한다. */}
         {awaitingInterjectTarget && (
-          <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
-            <button className="btn-ghost" style={{ fontSize: 12 }} onClick={() => setInterjectTarget('planning_expert')}>
-              기획 위원에게
-            </button>
-            <button className="btn-ghost" style={{ fontSize: 12 }} onClick={() => setInterjectTarget('dev_expert')}>
-              개발 위원에게
-            </button>
-            <button className="btn-ghost" style={{ fontSize: 12 }} onClick={() => setInterjectTarget('both')}>
-              두 위원에게
-            </button>
+          <div style={{ marginTop: 8 }}>
+            <div style={{ fontSize: 12, color: 'var(--text-2)', marginBottom: 6 }}>
+              어느 의견에 대해 말씀하시겠어요?
+            </div>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <button className="btn-ghost" style={{ fontSize: 12 }} onClick={() => setInterjectTarget('planning_expert')}>
+                기획 위원 의견에
+              </button>
+              <button className="btn-ghost" style={{ fontSize: 12 }} onClick={() => setInterjectTarget('dev_expert')}>
+                개발 위원 의견에
+              </button>
+              <button className="btn-ghost" style={{ fontSize: 12 }} onClick={() => setInterjectTarget('both')}>
+                두 의견 모두에
+              </button>
+            </div>
           </div>
         )}
 
@@ -1175,7 +1311,7 @@ export function IdeationScreen({
               placeholder={
                 interjectPlaceholder ||
                 (awaitingInterjectTarget
-                  ? '먼저 위쪽에서 질문 대상을 선택해 주세요.'
+                  ? '먼저 위쪽에서 의견 대상을 선택해 주세요.'
                   : phase === 'failed'
                     ? '회의 처리 오류가 발생했습니다. 위의 다시 시도 버튼을 눌러주세요.'
                   : !canReplyOrContinue
@@ -1198,11 +1334,11 @@ export function IdeationScreen({
           </div>
         )}
 
+        {/* 가은/Claude(2026-07-23, 요청: "다시 추천"을 후보 패널의 새로고침 아이콘으로 이동) —
+            이 버튼은 후보 카드 아래(위 채팅 영역)로 옮겼다. "전문가 추천"은 후보 자체를
+            새로 만드는 게 아니라 다른 답변 경로라 그대로 입력창 아래에 남긴다. */}
         {phase === 'awaiting_candidate_selection' && (
           <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-            <button className="btn-ghost" style={{ fontSize: 12 }} disabled={!canReplyOrContinue} onClick={() => handleSend(REGENERATE_MESSAGE)}>
-              다시 추천
-            </button>
             <button className="btn-ghost" style={{ fontSize: 12 }} disabled={!canReplyOrContinue} onClick={() => handleSend(EXPERT_RECOMMEND_MESSAGE)}>
               전문가 추천
             </button>
@@ -1219,26 +1355,10 @@ export function IdeationScreen({
 
         <IdeaCanvasPanel ideationConv={ideationConv} analysis={announcementAnalysis} />
 
-        {hasSelected ? (
-          <div className="card glass" style={{ marginBottom: 12, padding: 14 }}>
-            <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 6 }}>선택한 주제</div>
-            <div style={{ fontSize: 13.5, fontWeight: 700, marginBottom: 4 }}>{ideationConv.selected_idea.title}</div>
-            {ideationConv.selection_reason && (
-              <div style={{ fontSize: 12, color: 'var(--text-2)', lineHeight: 1.6 }}>{ideationConv.selection_reason}</div>
-            )}
-          </div>
-        ) : (
-          hasCandidates && (
-            <div style={{ marginBottom: 8 }}>
-              <div style={{ fontSize: 12, color: 'var(--text-2)', marginBottom: 10, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                주제 후보
-              </div>
-              {ideationConv.idea_candidates.map((c, i) => (
-                <CandidateCard key={c.candidate_id || i} candidate={c} index={i} onSelect={(idx) => handleSend(candidateSelectMessage(idx))} disabled={!canReplyOrContinue} />
-              ))}
-            </div>
-          )
-        )}
+        {/* 가은/Claude(2026-07-23, 요청: "후보 선택하면 아이디어 선택 패널 없애줘") — 후보
+            카드는 대화창 안(선택 질문 버블 아래)에서 보여주고, 선택 후에는 이 자리에
+            요약 카드도 더 이상 띄우지 않는다. 선택 결과는 아래 IdeaCanvasPanel(문제
+            상황/타깃 사용자 등)과 대화 자체로 계속 드러난다. */}
 
         {ideationConv && (ideationConv.consensus?.length > 0 || ideationConv.unresolved_issues?.length > 0) && (
           <div className="card glass" style={{ marginBottom: 12, padding: 14 }}>

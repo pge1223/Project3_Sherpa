@@ -32,6 +32,8 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from openai import OpenAI
+
+from app.core.llm import trace_openai_client
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
@@ -284,7 +286,7 @@ def _build_llm_call(session_id: str, model: str):
     라우팅 버그로 인한 루프·과호출을 방지한다(ideation_preview.py의 동일 안전장치와 같은
     정책). API 키/내부 프롬프트는 절대 응답에 담지 않는다 — 이 함수는 호출 결과 텍스트만
     반환하고, 실패 시에도 프롬프트 원문이 아니라 서버 로그에만 상세를 남긴다."""
-    client = OpenAI(api_key=settings.OPENAI_API_KEY, max_retries=1)
+    client = trace_openai_client(OpenAI(api_key=settings.OPENAI_API_KEY, max_retries=1))
     call_count = {"n": 0}
 
     def llm_call(prompt: str) -> str:
@@ -320,7 +322,7 @@ def _build_streaming_backends(session_id: str, model: str):
     제너레이터(OpenAI stream=True), call_chat_completion(prompt)은 기존 _build_llm_call과
     동일한 블로킹 호출(스트리밍 대상이 아닌 분류·후보 생성 등에 쓴다). 호출 횟수 상한은
     make_streaming_llm_call이 중앙에서 관리하므로 여기서는 세지 않는다."""
-    client = OpenAI(api_key=settings.OPENAI_API_KEY, max_retries=1)
+    client = trace_openai_client(OpenAI(api_key=settings.OPENAI_API_KEY, max_retries=1))
 
     def stream_chat_completion(prompt: str):
         started = time.time()
@@ -747,6 +749,9 @@ class ReplyRequest(BaseModel):
     # /reply, /reply/stream 호출과 하위 호환) — 값이 있으면 지정 위원이 먼저 답하는
     # reply_to_interjection 경로로 라우팅한다(아래 reply_conversation_stream 참고).
     target_speaker_id: Optional[str] = None
+    # 사용자가 누구의 발언에 반응하는지와 누가 먼저 답할지는 의미가 다르므로 별도 보존한다.
+    opinion_target_speaker_id: Optional[str] = None
+    interrupted_speaker_id: Optional[str] = None
     interrupted_request_id: Optional[str] = None
     active_issue_id: Optional[str] = None
     # 재인/Claude(2026-07-23, 아바타 페이싱 연동 — 실측: "진행자 2번·기획 1번·개발 1번이
@@ -842,7 +847,11 @@ async def reply_conversation(session_id: str, request: ReplyRequest):
     try:
         message = _clamp_text(request.message, "message")
         trace_event("IDEATION_REQUEST_STARTED", mode="sync", user_message=sanitize_preview(message))
-        if previous_state.get("phase") in ("expert_discussion", "awaiting_user_decision"):
+        if previous_state.get("phase") in (
+            "expert_discussion",
+            "awaiting_user_decision",
+            "discussion_complete",
+        ):
             trace_event(
                 "IDEATION_USER_INTERJECTION",
                 issue=previous_state.get("active_issue_id"),
@@ -930,6 +939,25 @@ async def reply_conversation_stream(session_id: str, request: ReplyRequest, http
     target_speaker_id = request.target_speaker_id
     if target_speaker_id is not None and target_speaker_id not in ("planning_expert", "dev_expert", "both"):
         raise HTTPException(status_code=400, detail="target_speaker_id는 planning_expert/dev_expert/both 중 하나여야 합니다.")
+    opinion_target_speaker_id = request.opinion_target_speaker_id
+    if opinion_target_speaker_id is not None and opinion_target_speaker_id not in (
+        "planning_expert",
+        "dev_expert",
+        "both",
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="opinion_target_speaker_id는 planning_expert/dev_expert/both 중 하나여야 합니다.",
+        )
+    interrupted_speaker_id = request.interrupted_speaker_id
+    if interrupted_speaker_id is not None and interrupted_speaker_id not in (
+        "planning_expert",
+        "dev_expert",
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="interrupted_speaker_id는 planning_expert/dev_expert 중 하나여야 합니다.",
+        )
 
     try:
         record = _acquire_session_record_or_404(session_id)
@@ -983,16 +1011,21 @@ async def reply_conversation_stream(session_id: str, request: ReplyRequest, http
                 "IDEATION_REQUEST_STARTED",
                 mode="stream",
                 target_speaker=target_speaker_id,
+                opinion_target_speaker=opinion_target_speaker_id,
+                interrupted_speaker=interrupted_speaker_id,
                 user_message=sanitize_preview(message),
             )
             is_user_interjection = target_speaker_id is not None or previous_state.get("phase") in (
                 "expert_discussion",
                 "awaiting_user_decision",
+                "discussion_complete",
             )
             if is_user_interjection:
                 trace_event(
                     "IDEATION_USER_INTERJECTION",
                     target_speaker=target_speaker_id,
+                    opinion_target_speaker=opinion_target_speaker_id,
+                    interrupted_speaker=interrupted_speaker_id,
                     issue=previous_state.get("active_issue_id"),
                     interrupted_request_id=None,
                     content_length=len(message),
@@ -1009,6 +1042,8 @@ async def reply_conversation_stream(session_id: str, request: ReplyRequest, http
                     previous_state=previous_state,
                     user_message=message,
                     target_speaker_id=target_speaker_id,
+                    opinion_target_speaker_id=opinion_target_speaker_id or target_speaker_id,
+                    interrupted_speaker_id=interrupted_speaker_id,
                     llm_call=llm_call,
                     evidence_lookup=evidence_lookup,
                     ground_claims=ground_claims,

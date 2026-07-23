@@ -28,6 +28,8 @@ from typing import Optional
 import fitz  # PyMuPDF
 from fastapi import APIRouter, Header
 from openai import OpenAI
+
+from app.core.llm import trace_openai_client
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
@@ -233,7 +235,7 @@ def _call_context_check_llm(prompt: str, temperature: float = 0) -> str:
     # 후보를 모은 뒤 2단계 검증(temp=0)으로 걸러 recall과 precision을 모두 챙긴다.
     profile = (settings.LLM_PROFILE or "dev").lower()
     model = settings.QUALITY_LLM_REVIEWER_MODEL if profile == "quality" else settings.DEV_LLM_REVIEWER_MODEL
-    client = OpenAI(api_key=settings.OPENAI_API_KEY, max_retries=1)
+    client = trace_openai_client(OpenAI(api_key=settings.OPENAI_API_KEY, max_retries=1))
     resp = client.chat.completions.create(
         model=model,
         messages=[{"role": "user", "content": prompt}],
