@@ -203,10 +203,18 @@ user_selection_summary/proposal은 다른 필드가 spoken_text를 만들기 위
    않습니다.
 5. 사용자를 매번 다그치듯 묻지 않고, 자연스러운 질문 톤을 유지합니다.
 
-[근거 사용 규칙]
-- 질문의 근거로 공고문·평가기준·검색 근거를 인용할 수 있습니다. 각 근거는 document_id,
-  document_name, chunk_id, page, section, quote, relevance를 포함하되 확인할 수 없으면 null로 둡니다.
-- 근거가 없으면 evidence를 빈 배열로 둡니다 — 억지로 지어내지 않습니다.
+[근거 인용 규칙 — claims, 용준/Claude(2026-07-22, 요청: RAG 근거 실제 활용 강화)]
+judgment에서 "공고문/평가기준에 따르면 ~"처럼 문서 사실을 근거로 언급했다면 claims 배열에
+남깁니다(최대 3개, 없으면 빈 배열). 각 claim은 다음을 지킵니다:
+1. claim_type은 "document_fact"(retrieved_evidence에 실제로 적힌 사실·기준·조건·수치.
+   evidence_refs에 그 근거의 "ref" 값(예: "E1")을 반드시 1개 이상 포함), "expert_judgment"
+   (전문가 판단·질문 이유, evidence_refs 없어도 됨), "user_provided_fact"(user_idea에 이미
+   있는 내용) 중 하나입니다.
+2. evidence_refs에는 retrieved_evidence 각 항목의 "ref" 필드 값(예: "E1", "E2")만 그대로
+   씁니다 — chunk_id(긴 해시 문자열)를 직접 옮겨 적지 않습니다. retrieved_evidence에 없는
+   ref를 지어내지 않습니다.
+3. retrieved_evidence에 없는 사실(수치·일정·법규)은 document_fact로 단정하지 않습니다 — 확인이
+   필요하다고 judgment에서 그대로 말합니다.
 
 [출력 규칙]
 1. 유효한 JSON 객체 하나만 반환합니다. JSON 밖에 인사말, 설명, 마크다운 코드 블록을 넣지 않습니다.
@@ -233,15 +241,12 @@ user_selection_summary/proposal은 다른 필드가 spoken_text를 만들기 위
   "proposal": "string | null",
   "expected_answer_type": "preference | selection | definition | constraint | evidence | specification",
   "referenced_message_ids": ["string"],
-  "evidence": [
+  "claims": [
     {
-      "document_id": "string | null",
-      "document_name": "string | null",
-      "chunk_id": "string | null",
-      "page": 0,
-      "section": "string | null",
-      "quote": "string",
-      "relevance": "string | null"
+      "claim_id": "claim_1",
+      "text": "string",
+      "claim_type": "document_fact | expert_judgment | user_provided_fact",
+      "evidence_refs": ["string"]
     }
   ]
 }

@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from typing import Any, Callable
 
@@ -28,8 +29,28 @@ from .ideation_conv_nodes import (
     _safe_call_structured_json,
 )
 from .ideation_conv_state import IdeationConvState, build_roundtable_opening_message
-from .ideation_nodes import EvidenceLookup
+from .ideation_nodes import EvidenceLookup, call_evidence_lookup
+from .ideation_trace import sanitize_preview, trace_event
 from .llm import LLMCall
+
+
+def _runtime_scope_for(state: IdeationConvState) -> dict[str, Any]:
+    """ideation_conv_nodes.py::_runtime_scope_for와 동일한 목적 — 이 파일의 두 검색 호출
+    시점(candidate_planning/candidate_feasibility)은 아직 후보를 선택하기 전이라
+    selected_idea_document_id는 항상 None이지만, session_id는 여기서도 최신 state 기준으로
+    넘겨야 사용자 답변 target(user_session_answer) 스코프가 일관되게 적용된다."""
+    return {
+        "session_id": state.get("session_id"),
+        "selected_candidate_document_id": state.get("selected_idea_document_id"),
+    }
+
+# 용준/Claude(2026-07-22, 요청: 선택된 아이디어를 target 문서로 생성) — ai/meeting/graph는
+# ai.rag를 직접 import하지 않는다(기존 evidence_lookup/ground_claims와 동일한 경계). 실제
+# 색인 구현(ai.rag.orchestration.ideation_target_indexing_service)은 backend가 만들어
+# 주입한다. kind="candidate"면 payload={"session_id","candidate_id","candidate"}, 반환값은
+# {"document_id": str} 이상(색인 실패 시 호출부가 예외를 던지거나 status="failed"를 반환할
+# 수 있다 — 이 노드는 실패해도 selected_idea_document_id=None으로 안전하게 진행한다).
+IndexTargetEvidenceFn = Callable[[str, dict], dict]
 
 # 요청: "후보 재생성이 무한 반복되거나 LLM 호출 제한을 우회하지 못하도록 상한을 두세요."
 # 재질문 상한(_MAX_ANSWER_RETRY)과 같은 원칙 — 상한 도달 시 LLM을 아예 호출하지 않고
@@ -232,6 +253,55 @@ def _find_candidate(candidates: list[dict], candidate_id: str | None) -> dict | 
     return None
 
 
+def _candidate_document_id_key(idea: dict, source_ids: list[str]) -> str:
+    """선택/결합된 아이디어를 target 문서로 색인할 때 쓸 candidate_id를 결정한다. 단일
+    선택(select)은 원본 candidate_id를 그대로 쓰고, 결합(combine)/추천(recommend)은
+    candidate_id가 없을 수 있으므로 source_ids를 정렬해 이어붙인 결정적 키를 만든다 —
+    같은 두 후보를 같은 순서로 다시 결합하면 항상 같은 document_id가 나와야 재선택 시
+    중복 색인이 아니라 upsert가 되기 때문이다(요청 3번)."""
+    candidate_id = idea.get("candidate_id")
+    if isinstance(candidate_id, str) and candidate_id.strip():
+        return candidate_id.strip()
+    if source_ids:
+        return "combined-" + "-".join(sorted(str(sid) for sid in source_ids if sid))
+    return "selection-" + hashlib.sha256((idea.get("title") or "").encode("utf-8")).hexdigest()[:10]
+
+
+def _index_selected_candidate(
+    *,
+    state: IdeationConvState,
+    idea: dict,
+    source_ids: list[str],
+    index_target_evidence: IndexTargetEvidenceFn | None,
+) -> str | None:
+    """선택된 후보를 target evidence로 색인하고(요청 2번), 실패해도 회의 state를 손상시키지
+    않는다(요청 17-4번) — 실패하면 로그만 남기고 selected_idea_document_id=None으로 진행한다
+    (이후 검색에서 그 후보의 target 근거가 아직 없는 것으로만 취급된다)."""
+    if index_target_evidence is None:
+        return None
+    candidate_id = _candidate_document_id_key(idea, source_ids)
+    started_event_fields = {
+        "session_id": state["session_id"],
+        "candidate_id": candidate_id,
+        "title": sanitize_preview(idea.get("title") or "", limit=100),
+    }
+    try:
+        result = index_target_evidence(
+            "candidate",
+            {"session_id": state["session_id"], "candidate_id": candidate_id, "candidate": idea},
+        )
+    except Exception as exc:  # noqa: BLE001 — 색인 실패는 회의를 막지 않는다.
+        trace_event(
+            "IDEATION_TARGET_EVIDENCE_UPSERT_FAILED",
+            level=30,
+            source_type="ideation_candidate",
+            error=sanitize_preview(str(exc), limit=100),
+            **started_event_fields,
+        )
+        return None
+    return result.get("document_id") if isinstance(result, dict) else None
+
+
 def _resolve_selection(
     state: IdeationConvState,
     *,
@@ -242,6 +312,7 @@ def _resolve_selection(
     user_selection_message: str | None = None,
     source_candidates: list[dict] | None = None,
     merge_analysis: dict | None = None,
+    index_target_evidence: IndexTargetEvidenceFn | None = None,
 ) -> dict[str, Any]:
     """선택/결합/추천이 확정된 아이디어를 refinement로 넘길 형태로 변환한다. 이후
     refinement 흐름(질문/의견/재질문/최종 종합)은 전혀 수정하지 않고 그대로 재사용한다
@@ -290,9 +361,20 @@ def _resolve_selection(
     # 후보 확정 직후에도 라운드테이블 진입 전 진행자 안건 제시 메시지를 붙인다(LLM 호출 없음).
     opening_message = build_roundtable_opening_message(initial_idea_text or title, round_number=state["round"])
 
+    # 용준/Claude(2026-07-22, 요청: 선택된 아이디어를 target 문서로 생성) — 후보가 확정되는
+    # 이 시점(사용자 API 호출이 끝나기 전, state에 selected_idea가 저장되는 것과 같은 노드
+    # 실행 안)에 target evidence 색인을 동기적으로 완료한다. 다음 전문가 턴(planning_expert_
+    # discussion)이 이 함수가 반환한 selected_idea_document_id로 RAG 검색을 수행하므로,
+    # 색인이 끝나기 전에 다음 턴이 시작되는 race condition이 구조적으로 없다(그래프는 노드를
+    # 순차 실행한다).
+    selected_idea_document_id = _index_selected_candidate(
+        state=state, idea=idea, source_ids=source_ids, index_target_evidence=index_target_evidence
+    )
+
     return {
         "messages": [summary_message, opening_message],
         "selected_idea": idea,
+        "selected_idea_document_id": selected_idea_document_id,
         "selection_reason": reason,
         "user_idea": idea,
         "initial_idea": initial_idea_text,
@@ -321,7 +403,9 @@ def make_candidate_planning_node(
     3-2/3-3 — 후보 제시 전까지는 사용자에게 정지 지점을 보이지 않는다)."""
 
     def node(state: IdeationConvState) -> dict:
-        retrieved = evidence_lookup("planning_expert", _contest_query(state)) if evidence_lookup is not None else []
+        retrieved = call_evidence_lookup(
+            evidence_lookup, "planning_expert", _contest_query(state), runtime_scope=_runtime_scope_for(state)
+        )
         previous_candidates = state.get("idea_candidates") or []
         regeneration_reason = None
         if previous_candidates:
@@ -356,7 +440,9 @@ def make_candidate_feasibility_node(
 
     def node(state: IdeationConvState) -> dict:
         candidates = state.get("idea_candidates") or []
-        retrieved = evidence_lookup("dev_expert", _contest_query(state)) if evidence_lookup is not None else []
+        retrieved = call_evidence_lookup(
+            evidence_lookup, "dev_expert", _contest_query(state), runtime_scope=_runtime_scope_for(state)
+        )
         prompt = build_ideation_conv_candidate_feasibility_prompt(state["notice_and_criteria"], candidates, retrieved)
         raw, ok, attempts = _safe_call_structured_json(
             llm_call, prompt, _validate_candidate_feasibility_response, "candidate_feasibility"
@@ -392,6 +478,7 @@ def make_candidate_feasibility_node(
 def make_candidate_selection_node(
     llm_call: LLMCall,
     evidence_lookup: EvidenceLookup | None = None,
+    index_target_evidence: IndexTargetEvidenceFn | None = None,
 ) -> Callable[[IdeationConvState], dict]:
     """사용자의 후보 선택/결합/재추천/전문가추천 요청을 처리한다. 단순 번호·제목 선택과
     재추천 키워드는 LLM 없이 코드가 결정적으로 처리하고, 결합·전문가추천·모호한 답변만
@@ -412,6 +499,7 @@ def make_candidate_selection_node(
                 source_ids=[matched.get("candidate_id")],
                 user_selection_message=text,
                 source_candidates=[matched],
+                index_target_evidence=index_target_evidence,
             )
 
         if is_regenerate_request(text):
@@ -483,6 +571,7 @@ def make_candidate_selection_node(
                 source_ids=source_ids,
                 user_selection_message=text,
                 source_candidates=[idea],
+                index_target_evidence=index_target_evidence,
             )
         elif resolution == "combine":
             merge_analysis = raw.get("merge_analysis") or {}
@@ -531,6 +620,7 @@ def make_candidate_selection_node(
                 user_selection_message=text,
                 source_candidates=source_candidates_full,
                 merge_analysis=merge_analysis,
+                index_target_evidence=index_target_evidence,
             )
         else:  # resolution == "recommend"
             result = _resolve_selection(
@@ -541,6 +631,7 @@ def make_candidate_selection_node(
                 source_ids=source_ids,
                 user_selection_message=text,
                 source_candidates=source_candidates_full,
+                index_target_evidence=index_target_evidence,
             )
 
         result["llm_calls_used"] = used
