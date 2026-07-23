@@ -94,6 +94,20 @@ def _facilitator_summary_payload_for(prompt: str) -> dict:
     }
 
 
+def _canvas_payload() -> dict:
+    """test_ideation_conversation_discovery.py의 캔버스 갱신 스텁과 같은 payload."""
+    return {
+        "problem": "문의 응대 부담",
+        "target_user": "소상공인",
+        "core_value": "응대 시간 절감",
+        "solution": "FAQ 자동 응답",
+        "differentiation": "저비용 구축",
+        "feasibility": "medium",
+        "risks": ["오답 위험"],
+        "contest_fit": "실현가능성 기준 대응",
+    }
+
+
 def _sync_stub_llm_call(session_id: str, model: str):
     """기존 동기식 /start, /reply(비교용)에 쓰는 완성 응답 스텁 — 스트리밍 스텁과 정확히
     같은 내용을 반환해야 "스트리밍 결과와 동기식 결과가 의미상 같다"를 비교할 수 있다."""

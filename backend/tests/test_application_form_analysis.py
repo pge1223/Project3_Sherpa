@@ -35,7 +35,7 @@ class _FakeCompletions:
         self._responder = responder
         self._counter = counter
 
-    def create(self, *, model, messages, response_format=None):
+    def create(self, *, model, messages, response_format=None, temperature=None):
         self._counter[0] += 1
         prompt = messages[0]["content"]
         return _FakeCompletion(self._responder(prompt))
