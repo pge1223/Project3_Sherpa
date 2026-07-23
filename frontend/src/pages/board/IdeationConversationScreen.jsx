@@ -913,7 +913,6 @@ export function IdeationScreen({
         </div>
 
         <ErrorBanner error={phaseFailure || error} onRetry={handleRestart} />
-        <StreamFallbackNotice message={streamFallbackNotice} />
         <StreamingCursorStyle />
 
         <div className="card glass" style={{ minHeight: 360, maxHeight: 520, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 4, padding: 16 }}>
