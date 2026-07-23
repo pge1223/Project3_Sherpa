@@ -204,6 +204,25 @@ class ConvMessage(TypedDict):
     # — content가 없어지는 게 아니라 값이 spoken_text로 바뀌었을 뿐이므로 structured를 모르는
     # 기존 클라이언트는 영향받지 않는다. 답변(answer/interjection) 메시지만 항상 None이다.
     structured: dict | None
+    # 용준/Claude(2026-07-22, 요청: RAG 근거 실제 활용 강화) — evidence(위)는 그대로
+    # "이번 턴 프롬프트에 주입된 검색 결과 전체"라는 기존 의미를 유지한다(하위 호환).
+    # 아래 필드들은 그중 실제로 주장(claim)과 연결·검증된 부분만 별도로 담는 신규 선택
+    # 필드다 — claims/grounding 관련 필드가 없는 메시지 타입(질문 응답, 진행자 정리 등
+    # 일부)은 빈 리스트/None/0으로 채운다(TypedDict는 런타임에 강제되지 않으므로 이 필드를
+    # 모르는 기존 코드는 영향받지 않는다).
+    claims: list[dict]
+    linked_evidence_refs: list[str]
+    supported_claim_count: int
+    unsupported_claim_count: int
+    # 용준/Claude(2026-07-22, 요청: claim 통계 의미 분리) — supported_claim_count(기존 필드,
+    # 의미 변경 없이 유지)와 별도로 "실제 문서 근거로 검증됨"과 "근거 없이 허용된 전문가
+    # 판단"을 분리한 신규 선택 필드. claims/grounding이 없는 메시지 타입은 0으로 채운다.
+    accepted_claim_count: int
+    grounded_claim_count: int
+    expert_judgment_count: int
+    missing_information: list[str]
+    evidence_status: str | None
+    sufficiency: str | None
 
 
 class IdeationConvState(TypedDict):
@@ -269,6 +288,16 @@ class IdeationConvState(TypedDict):
     # (요청 8번 "discovery 모드의 최종 결과에는 최초 생성 후보... 이력을 포함").
     original_idea_candidates: list[dict]
     selected_idea: dict | None
+    # 용준/Claude(2026-07-22, 요청: 선택된 아이디어를 target 문서로 생성) — candidate_selection
+    # 노드가 선택/결합된 아이디어를 target evidence로 색인한 뒤 그 document_id를 저장한다
+    # (ai/meeting/graph/ideation_conv_discovery.py::_resolve_selection). 색인이 주입되지
+    # 않았거나(use_rag=False 등) 실패했으면 None이다 — 이 경우 RAG 검색은 이 후보의 target
+    # 근거를 아직 찾지 못한 것으로만 취급한다(회의가 막히지 않는다). 사용자가 후보를 다시
+    # 선택/결합하면 이 값이 새 document_id로 교체되어, 이전 후보의 target은 더 이상 현재
+    # 근거로 검색되지 않는다(ai/rag/orchestration/ideation_evidence_service.py::
+    # _scope_target_evidence 참고 — 이전 후보 chunk 자체는 회의 이력으로 Chroma에 남는다).
+    # 구버전 저장 state에는 이 키가 없을 수 있으므로 읽는 쪽은 항상 `.get(...)`로 접근한다.
+    selected_idea_document_id: str | None
     selection_reason: str | None
     # "다시 추천" 요청 횟수 — ideation_conv_discovery.py::MAX_CANDIDATE_REGENERATIONS에
     # 도달하면 더 이상 LLM을 호출해 후보를 재생성하지 않는다(요청: 무한 반복/LLM 호출 제한
@@ -373,6 +402,36 @@ class IdeationConvState(TypedDict):
     # 없을 수 있으므로 읽는 쪽은 항상 `.get("next_route")`로 접근한다(하위 호환).
     next_route: str | None
 
+    # 용준/Claude(2026-07-22, 요청: 반복되는 근거 없는 의견을 사용자 질문으로 전환) — 같은
+    # 쟁점(active_issue_id)이 바뀌지 않는 한 이어서 누적되고, 이슈가 바뀌거나 사용자가 실제로
+    # 답변하면(apply_user_answer) 0/빈 값으로 리셋된다. make_conv_discussion_node가 매 발언
+    # 직후 갱신하고, 임계값(2회 연속)에 도달하면 needs_user_input=True로 강제 전환한다(
+    # _route_next_expert_turn은 기존 needs_user_input 라우팅을 그대로 재사용한다 — 새 라우팅
+    # 분기를 추가하지 않는다). 구버전 저장 state에는 이 키들이 없을 수 있으므로 읽는 쪽은
+    # 항상 `.get(...)`로 접근한다(하위 호환).
+    consecutive_zero_linked_turns: int
+    # evidence_status="expert_judgment_only"(문서 근거 없이 전문가 판단만 있는 턴)가 연속된 횟수.
+    consecutive_expert_judgment_only_turns: int
+    # 직전 턴의 missing_information(claim_grounding 결과, 정규화·정렬된 텍스트 목록) — 다음
+    # 턴이 같은 값을 반복하는지 비교하는 데 쓴다.
+    last_missing_information: list[str]
+    # missing_information이 직전 턴과 완전히 동일하게(비어있지 않은 채) 반복된 연속 횟수.
+    consecutive_repeated_missing_information_turns: int
+    # 직전 턴의 new_information(발언 스키마 필수 필드)을 이어붙인 텍스트 — 다음 턴이 같은
+    # 내용을 어휘만 바꿔 반복하는지(_looks_like_restatement와 동일한 유사도 판정) 비교한다.
+    last_new_information_text: str
+    # new_information이 직전 턴과 의미상 거의 동일하게 반복된 연속 횟수.
+    consecutive_no_new_information_turns: int
+
+    # 용준/Claude(2026-07-23, Phase 1 "Shadow Deterministic Evidence Planner") — 같은
+    # speaker/issue("persona_id:issue_id" 키)별 이전 shadow planner 선택 이력({"speaker",
+    # "effective_issue_id", "chunk_id"}만 담는 최소 정보). API 응답(_serialize_state)에는
+    # 노출하지 않는다 — 순수 내부 진단용 상태다. evidence_planner가 주입되지 않으면(기본,
+    # ENABLE_IDEATION_EVIDENCE_PLANNER_SHADOW=False) 항상 빈 dict로 유지된다. 구버전 저장
+    # state에는 이 키가 없을 수 있으므로 읽는 쪽은 항상 `.get("evidence_plan_shadow_history",
+    # {})`로 접근한다(하위 호환).
+    evidence_plan_shadow_history: dict[str, list[dict]]
+
 
 def _extract_initial_idea_text(user_idea: dict | str | None) -> str:
     """user_idea에서 trim된 초기 아이디어 텍스트를 뽑아낸다. dict({"description": ...})와
@@ -451,6 +510,7 @@ def initial_conv_state(
         idea_candidates=[],
         original_idea_candidates=[],
         selected_idea=None,
+        selected_idea_document_id=None,
         selection_reason=None,
         candidate_regeneration_count=0,
         selection_intent=None,
@@ -475,6 +535,13 @@ def initial_conv_state(
         required_counterpart_speaker_id=None,
         counterpart_review_completed=True,
         next_route=None,
+        consecutive_zero_linked_turns=0,
+        consecutive_expert_judgment_only_turns=0,
+        last_missing_information=[],
+        consecutive_repeated_missing_information_turns=0,
+        last_new_information_text="",
+        consecutive_no_new_information_turns=0,
+        evidence_plan_shadow_history={},
     )
 
 
@@ -519,6 +586,16 @@ def apply_user_answer(previous_state: IdeationConvState, answer_message: ConvMes
             "pending_question_topic": None,
             # 다음 단계로 실제로 넘어가는 시점이므로 재질문 카운터를 리셋한다(새 쟁점 시작).
             "answer_retry_count": 0,
+            # 용준/Claude(2026-07-22, 요청: 반복 감지 카운터는 사용자가 실제로 새 정보를
+            # 제공하면 리셋) — 사용자가 방금 근거 부족/반복 질문에 답했으므로, 다음 전문가
+            # 발언은 이 새 답변을 근거로 다시 시작해야 한다(이전 반복 이력이 그대로 남아
+            # 곧바로 다시 사용자에게 되묻는 것을 막는다).
+            "consecutive_zero_linked_turns": 0,
+            "consecutive_expert_judgment_only_turns": 0,
+            "last_missing_information": [],
+            "consecutive_repeated_missing_information_turns": 0,
+            "last_new_information_text": "",
+            "consecutive_no_new_information_turns": 0,
         }
     )
 

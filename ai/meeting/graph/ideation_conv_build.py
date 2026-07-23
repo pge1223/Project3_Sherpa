@@ -132,6 +132,9 @@ def assemble_ideation_conversation_graph(
     llm_call: LLMCall,
     checkpointer: Any | None = None,
     evidence_lookup=None,
+    ground_claims=None,
+    index_target_evidence=None,
+    evidence_planner=None,
 ):
     """대화형 아이디어 발전 회의 그래프를 조립한다.
 
@@ -155,19 +158,30 @@ def assemble_ideation_conversation_graph(
     graph = StateGraph(IdeationConvState)
 
     planning_question_node = make_conv_question_node(
-        "planning_expert", "awaiting_planning_answer", llm_call, evidence_lookup
+        "planning_expert", "awaiting_planning_answer", llm_call, evidence_lookup, ground_claims
     )
     developer_question_node = make_conv_question_node(
-        "dev_expert", "awaiting_developer_answer", llm_call, evidence_lookup
+        "dev_expert", "awaiting_developer_answer", llm_call, evidence_lookup, ground_claims
     )
     # 용준/Claude(2026-07-22, 요청: 동적 전문가 회의로 개편) — speaks_second/discussion_stage를
     # 더 이상 빌드 시점에 고정하지 않는다(각 노드가 매 실행마다 state로부터 계산한다,
     # make_conv_discussion_node 참고). 두 전문가 모두 서로를 직접 호출할 수 있는 대칭 노드다.
+    # 용준/Claude(2026-07-23, Phase 1 "Shadow Deterministic Evidence Planner") — evidence_planner는
+    # 오직 이 두 discussion 노드에만 주입한다(요청: 질문/후보 생성/후보 검토/synthesis/
+    # facilitator에는 Phase 1 planner를 적용하지 않는다).
     planning_discussion_node = make_conv_discussion_node(
-        "planning_expert", llm_call=llm_call, evidence_lookup=evidence_lookup
+        "planning_expert",
+        llm_call=llm_call,
+        evidence_lookup=evidence_lookup,
+        ground_claims=ground_claims,
+        evidence_planner=evidence_planner,
     )
     dev_discussion_node = make_conv_discussion_node(
-        "dev_expert", llm_call=llm_call, evidence_lookup=evidence_lookup
+        "dev_expert",
+        llm_call=llm_call,
+        evidence_lookup=evidence_lookup,
+        ground_claims=ground_claims,
+        evidence_planner=evidence_planner,
     )
     discussion_facilitator_node = make_discussion_facilitator_node(llm_call)
     canvas_update_node = make_canvas_update_node(llm_call)
@@ -176,7 +190,9 @@ def assemble_ideation_conversation_graph(
     # 용준/Claude(2026-07-21): discovery(아이디어 발굴) 모드 노드 3종.
     candidate_planning_node = make_candidate_planning_node(llm_call, evidence_lookup)
     candidate_feasibility_node = make_candidate_feasibility_node(llm_call, evidence_lookup)
-    candidate_selection_node = make_candidate_selection_node(llm_call, evidence_lookup)
+    candidate_selection_node = make_candidate_selection_node(
+        llm_call, evidence_lookup, index_target_evidence=index_target_evidence
+    )
 
     graph.add_node("planning_question", planning_question_node)
     graph.add_node("developer_question", developer_question_node)

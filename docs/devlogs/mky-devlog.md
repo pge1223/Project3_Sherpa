@@ -1,5 +1,52 @@
 # mky Devlog
 
+## 2026-07-23 (완성 리포트 실데이터 배선 + 동적 rubric 수정 + 버전 비교(C) + AI 피드백 탭)
+
+- 한 일:
+  - **A. 동적 rubric 추출 버그 수정**(가은 위임, `backend/app/api/routes/meetings.py`
+    `_build_rubric_extraction_prompt`): LLM이 `criterion_id`에 `persona_id`를 복사해 여러 항목이
+    같은 id를 갖고(중복) → `build_dynamic_rubric_mapping`이 `ValueError`로 거부 → 정적 4항목으로
+    폴백되던 문제. 프롬프트를 "criterion_id는 항목마다 고유(persona 식별자 아님) + 배점 0 항목
+    제외"로 고쳐 **공고문 실제 5항목·배점(AI혁신성25/데이터활용성20/실현가능성20/창의성차별성15/
+    기대효과성20=100)** 이 그대로 채점에 반영됨. 실 파이프라인 재분석으로 검증
+  - **B. 완성 리포트를 실제 `/report` 데이터로 배선**(`VersionTrackerTestPage.jsx`): mock
+    `ALL_VERSIONS` 대신 `reportToVersions(report)`로 실 점수·위원 피드백·개인화 impl_guides 렌더.
+    항목별 max_score(동적 rubric 대비)·위원 탭 매핑 실데이터화. embedded일 때만 실데이터, 단독
+    `/version-test`는 mock 데모 보존
+  - **위원 배분 fix**: 종합 위원(presentation_completeness)이 전 항목을 겹쳐 채점해 "첫 채점자
+    우선"이면 개발 항목이 기획으로 잘못 감 → **채점자 우선순위(기술>전문>종합)로 담당 결정**
+  - **C. 버전 비교(RPT-004)**: `GET /projects/{id}/comparison` 엔드포인트 신설(최근 2 meeting을
+    `build_revision_comparison`으로 비교) + 프론트 "다음 수정본 제출"을 **실제 파일 업로드→기존
+    target 삭제→재분석→진행률**로 구현 + `/comparison`으로 **[v1.0,v1.1] 2버전 렌더**(이전/현재
+    막대·해결/신규/잔존 뱃지·점수 추이). 개인화 가이드는 최신 버전에서만 표시
+  - **자세히 보기 파서 수정**: 실 LLM 산문이 `1. 2. 3.` 형식인데 파서가 `①②③`만 인식→밋밋한
+    문단 폴백. 두 형식 다 인식(문장 중 숫자 오탐 방지)해 단계 카드+애니메이션 복원
+  - **AI 피드백 탭 신설**(기획/개발 위원 옆 3번째): 문자서식·오탈자를 위원 채점과 별개로 표시
+    (`getTypoCheck`/`getContextCheck`), **점수 미반영**, "수정 필요"로 추적. LLM 호출이라 메인
+    리포트와 분리(비차단) 로딩
+  - **환경 구성**: HWP 대비 LibreOffice 26.2 + H2Orestart 0.7.13(unopkg add) 설치, `olefile`
+    누락(HWP 바이너리 파서 필수, requirements.txt엔 있으나 로컬 env 미설치) 설치. 단, 실제 테스트
+    파일은 DOCX라 텍스트 추출은 LibreOffice 불필요(HWPParser/DOCXParser 직접 파싱)임을 확인
+- 결정/이유:
+  - **위원 탭(2개)은 4-persona를 접은 추상화** — 개발=technical_feasibility, 나머지=기획. 동적
+    rubric에서 여러 위원이 겹쳐 채점하므로 "첫 채점자"가 아니라 우선순위로 담당을 정해야 정확
+  - **AI 피드백은 점수와 분리** — 오탈자·서식은 배점 대상이 아니라 교정 항목이라 별도 탭 +
+    "수정 필요"만 추적(사용자 요청)
+  - **수정본은 기존 target 삭제 후 업로드** — analyze가 target "첫 문서"를 쓰므로. 이전 버전
+    데이터는 meeting 스냅샷에 보존돼 `/comparison`이 그대로 비교 가능(문서 삭제 무영향)
+  - **동적 rubric 캐시**(project.dynamic_rubric_mapping)로 재분석 시 같은 rubric 재사용 →
+    v1.0/v1.1이 동일 기준으로 비교됨
+- 막힌 점:
+  - H2Orestart HWPX 변환이 `0xC0000409` 크래시(LibreOffice Java 설정) — 그러나 텍스트 추출 경로는
+    LibreOffice를 안 쓰는 걸 확인해 우회(변환은 재인 담당 미리보기 영역). 테스트 파일도 DOCX라 무관
+  - 개선 수정본이 원본보다 짧아(10,246→5,728자) 재채점에서 점수가 오히려 하락 — 비교 메커니즘
+    (해결/신규/잔존·델타)은 정확히 동작. LLM 채점 노이즈 + "교체"라 손해. additive 수정본이 상승에 유리
+  - AI 피드백 버전 간 "해결" 뱃지(v0→v1 오탈자 diff)는 버전별 검사 결과 저장이 필요 → 다음 단계
+- 다음 할 일:
+  - A(rubric)·B·C·AI 피드백 탭 브라우저 E2E 최종 확인
+  - AI 피드백 버전 diff(해결 추적) — 검사 결과 per-version 저장
+  - 개발 위원 개인화 뱃지 실데이터 확인(개발 항목이 needs_improvement로 낮게 나오는 문서 필요)
+
 ## 2026-07-21 (이어서 — 개인 맞춤형 피드백 루프 백엔드 로직·계약 정합)
 
 - 한 일:

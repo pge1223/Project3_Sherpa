@@ -30,6 +30,18 @@ class IndexingContext(BaseModel):
             "호출자가 아는 경우에만 전달하는 선택 필드로, 없으면 청크 메타데이터에 저장되지 않는다."
         ),
     )
+    # 용준/Claude(2026-07-22, 요청: 선택된 아이디어/사용자 답변을 target evidence로 색인) —
+    # 특정 호출자(현재는 아이디어 회의 target evidence 색인)만 필요로 하는 부가 메타데이터를
+    # 청크 메타데이터에 그대로 실어 보내는 범용 통로. document_role처럼 매번 새 전용 필드를
+    # 추가하지 않고, 이 호출자 전용 키(예: ideation_source_type/session_id/candidate_id)만
+    # 여기 담는다 — 다른 호출자(일반 문서 업로드 등)는 이 필드를 쓰지 않으므로(항상 None)
+    # 기존 색인 결과에 전혀 영향이 없다. 값은 Chroma가 저장 가능한 원시 타입(str/int/float/
+    # bool)만 담아야 한다 — sanitize_metadata_for_chroma가 그 외 타입을 그대로 통과시키면
+    # Chroma 저장이 실패할 수 있다.
+    extra_metadata: Optional[dict] = Field(
+        None,
+        description="호출자 전용 부가 메타데이터(문자열/숫자/불리언 값만). 청크 메타데이터에 그대로 병합된다.",
+    )
     collection_name: str = Field(default=DEFAULT_COLLECTION_NAME, description="Chroma 컬렉션 이름")
 
     @field_validator("project_id", "document_id")
