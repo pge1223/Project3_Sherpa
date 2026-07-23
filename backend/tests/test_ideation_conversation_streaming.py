@@ -146,10 +146,11 @@ class _FakeStreamState:
     invalid_first=True면 전체 스트림에서 가장 먼저 들어오는 호출(항상 기획 위원의 최초
     의견) 한 번만 검증 실패를 유도해 재시도 시나리오를 만든다."""
 
-    def __init__(self, chunk_size=3, delay=0.0, invalid_first=False):
+    def __init__(self, chunk_size=3, delay=0.0, invalid_first=False, stream_started_event=None):
         self.chunk_size = chunk_size
         self.delay = delay
         self.invalid_first = invalid_first
+        self.stream_started_event = stream_started_event
         self.call_counts = {"discussion": 0, "facilitator_summary": 0}
         self._first_call_done = False
 
@@ -172,6 +173,8 @@ class _FakeStreamState:
                 raise AssertionError(f"스트리밍 대상이 아닌 프롬프트가 stream_chat_completion으로 왔습니다: {prompt[:100]}")
             raw = json.dumps(payload, ensure_ascii=False)
             for i in range(0, len(raw), self.chunk_size):
+                if self.stream_started_event is not None:
+                    self.stream_started_event.set()
                 if self.delay:
                     time.sleep(self.delay)
                 yield raw[i : i + self.chunk_size]
@@ -609,7 +612,8 @@ def test_cancel_stops_active_stream_and_releases_lock_without_failing_phase(clie
     """용준/Claude(2026-07-22, 요청: "잠시만" 실제 취소) — POST /cancel이 진행 중인 스트림을
     실제로 멈추고(cancelled 이벤트 수신), 세션 락을 반납해 곧바로 새 요청을 보낼 수 있어야
     한다(409가 나지 않아야 한다). 취소된 요청은 phase="failed"로 이어지면 안 된다."""
-    fake = _FakeStreamState(chunk_size=1, delay=0.05)
+    stream_started_event = threading.Event()
+    fake = _FakeStreamState(chunk_size=1, delay=0.05, stream_started_event=stream_started_event)
     monkeypatch.setattr(conv_route, "_build_streaming_backends", lambda session_id, model: fake.build())
     conv_route.configure_ideation_trace(enabled=True, content_max_chars=120, stream_deltas=False)
     caplog.set_level(logging.INFO, logger="ai.meeting.ideation_trace")
@@ -625,7 +629,7 @@ def test_cancel_stops_active_stream_and_releases_lock_without_failing_phase(clie
 
     thread = threading.Thread(target=stream_call)
     thread.start()
-    time.sleep(0.08)  # 첫 delta들이 이미 나간 뒤 취소하도록 여유를 준다.
+    assert stream_started_event.wait(timeout=5), "취소 전에 실제 LLM 스트림이 시작되지 않았습니다"
 
     cancel_resp = client.post(f"/ideation-conversation/{session_id}/cancel", json={})
     assert cancel_resp.status_code == 200
