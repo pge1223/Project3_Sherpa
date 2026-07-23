@@ -18,6 +18,7 @@ from .ideation_conv_discovery import MAX_CANDIDATE_REGENERATIONS, is_regenerate_
 from .ideation_conv_nodes import (
     PHASE_TO_PENDING_PERSONA,
     REVISION_TRIGGER_STANCES,
+    _runtime_scope_for,
     conversation_context_for,
     generate_expert_delegation_facilitator_recommendation,
     generate_expert_delegation_proposal,
@@ -30,17 +31,98 @@ from .ideation_conv_nodes import (
     make_expert_delegation_review_message,
     make_follow_up_message,
 )
+from .ideation_nodes import call_evidence_lookup
 from .ideation_conv_state import (
     ConvMessage,
+    IdeationCancelled,
     IdeationConvState,
     apply_user_answer,
     initial_conv_state,
     is_graph_entry_phase,
     request_finalize,
 )
+from .ideation_trace import sanitize_preview, trace_event
 from .llm import LLMCall
 
 IdeationConvProgressCallback = Callable[[dict], None]
+
+# 용준/Claude(2026-07-22, 요청: 사용자 답변을 session target evidence로 반영) — ai/meeting/graph는
+# ai.rag를 직접 import하지 않는다(evidence_lookup/ground_claims와 동일한 경계). 실제 색인
+# 구현(ai.rag.orchestration.ideation_target_indexing_service)은 backend가 만들어 주입한다.
+# kind="user_answer"면 payload={"session_id","user_message_id","answer_text",
+# "pending_question","pending_question_topic"}.
+IndexTargetEvidenceFn = Callable[[str, dict], dict]
+
+# 짧은 동의·감탄·UI 제어 문구는 target evidence로 색인하지 않는다(요청 17-2번) — 결정적
+# 키워드/길이 기준으로만 판단하고 LLM을 다시 부르지 않는다.
+_MIN_TARGET_EVIDENCE_CHARS = 12
+_SKIP_AS_TARGET_EVIDENCE_PHRASES = (
+    "네", "넵", "네네", "좋아요", "좋습니다", "감사합니다", "고맙습니다", "알겠습니다", "확인했습니다",
+    "잠시만", "잠깐만",
+)
+
+
+def _should_index_user_message_as_target_evidence(*, message_type: str, phase: str, content: str) -> bool:
+    """용준/Claude(2026-07-22, 요청: 인덱싱 대상 메시지 제한) — 진행자의 질문에 대한 구체적인
+    답변이나, 기능/사용자/데이터/일정/제약/구현 범위를 추가하는 사용자 개입만 target evidence로
+    색인 대상으로 판단한다. message_type/phase/길이/키워드만으로 결정적으로 판단하고, "실제
+    아이디어 정보가 포함됐는지"를 LLM으로 판정하지 않는다(안전하게 판단할 방법이 없으면 무조건
+    사실로 승격하지 않는다는 원칙 그대로 — 판단이 애매하면 색인하지 않는 쪽으로 보수적으로
+    판단한다)."""
+    if message_type not in ("answer", "interjection"):
+        return False
+    if phase == "awaiting_candidate_selection":
+        # 후보 선택 응답은 index_selected_candidate_as_target()이 candidate 자체를 색인하므로
+        # 사용자의 선택 발화(번호/제목) 자체를 또 색인하지 않는다.
+        return False
+    normalized = (content or "").strip()
+    if len(normalized) < _MIN_TARGET_EVIDENCE_CHARS:
+        return False
+    if is_regenerate_request(normalized) or is_expert_delegation_request(normalized):
+        return False
+    if normalized in _SKIP_AS_TARGET_EVIDENCE_PHRASES:
+        return False
+    return True
+
+
+def _index_user_answer(
+    *,
+    state: IdeationConvState,
+    answer_message: ConvMessage,
+    raw_answer_text: str,
+    index_target_evidence: IndexTargetEvidenceFn | None,
+) -> None:
+    """사용자 답변을 session target evidence로 색인한다(요청 4번). 색인이 끝난 뒤에야 이
+    함수가 반환하므로(동기 호출), 호출부가 그 다음에 이어서 그래프를 실행하면 다음 전문가
+    검색은 항상 이번 답변이 색인된 뒤의 상태를 본다(요청 9번 순서 보장) — 별도의 백그라운드
+    작업이나 큐를 쓰지 않는다. 실패해도 예외를 전파하지 않는다 — 회의 자체는 계속돼야 하고
+    (요청 17-4번), 이번 턴은 그냥 이 답변의 target 근거 없이 진행된다."""
+    if index_target_evidence is None:
+        return
+    if not _should_index_user_message_as_target_evidence(
+        message_type=answer_message["message_type"], phase=state["phase"], content=raw_answer_text
+    ):
+        return
+    try:
+        index_target_evidence(
+            "user_answer",
+            {
+                "session_id": state["session_id"],
+                "user_message_id": answer_message["message_id"],
+                "answer_text": raw_answer_text,
+                "pending_question": state.get("pending_question"),
+                "pending_question_topic": state.get("pending_question_topic"),
+            },
+        )
+    except Exception as exc:  # noqa: BLE001 — 색인 실패가 회의를 막으면 안 된다.
+        trace_event(
+            "IDEATION_TARGET_EVIDENCE_UPSERT_FAILED",
+            level=30,
+            session_id=state.get("session_id"),
+            source_type="user_session_answer",
+            user_message_id=answer_message["message_id"],
+            error=sanitize_preview(str(exc), limit=100),
+        )
 
 # API가 사용자 입력을 받아도 되는(=그래프를 다시 부르지 않고 멈춰 있어야 하는) phase.
 # 용준/Claude(2026-07-21): discovery(아이디어 발굴) 모드의 후보 선택 대기 phase를 추가한다
@@ -124,16 +206,36 @@ def _progress(snapshot: IdeationConvState) -> dict:
     }
 
 
+# 용준/Claude(2026-07-22, 요청: "잠시만" 실제 취소): on_snapshot 콜백 타입은 더 이상 쓰지
+# 않지만(아래 _drive_graph 참고 — 매 스냅샷마다 부르는 대신 취소 시점의 마지막 완료 상태만
+# 예외에 실어 전달한다), start_ideation_conversation 등 공개 함수 시그니처의 하위 호환을
+# 위해 이름은 남겨 둔다.
+IdeationConvSnapshotCallback = Callable[[IdeationConvState], None]
+
+
 def _drive_graph(
     graph: Any,
     state: IdeationConvState,
     on_progress: IdeationConvProgressCallback | None = None,
+    on_snapshot: IdeationConvSnapshotCallback | None = None,
 ) -> IdeationConvState:
+    """용준/Claude(2026-07-22, 요청: "잠시만" 실제 취소): IdeationCancelled가 이 for 루프
+    도중 올라오면, 그 시점까지 완료된 마지막 스냅샷을 예외 객체(exc.partial_state)에 실어
+    그대로 상위(worker)까지 전파한다 — "쟁점 A에 대한 발언 2건은 이미 완료, 3번째가
+    스트리밍 중 취소"된 경우 앞의 2건은 exc.partial_state에 담기고, 취소된 3번째만
+    빠진다(완료된 전문가 주장은 유지, 미완성만 취소 — 요청 14번). 일반 오류(취소가 아닌
+    예외)는 그대로 전파하고 partial_state를 붙이지 않는다 — 호출부가 세션 store에 아무것도
+    쓰지 않아야 이전 canonical state가 손상되지 않는다(회귀 테스트: 스트리밍 중 일반 LLM
+    오류가 나도 세션 state가 손상되지 않아야 한다)."""
     final_state: IdeationConvState = state
-    for snapshot in graph.stream(state, stream_mode="values"):
-        final_state = snapshot
-        if on_progress is not None:
-            on_progress(_progress(snapshot))
+    try:
+        for snapshot in graph.stream(state, stream_mode="values"):
+            final_state = snapshot
+            if on_progress is not None:
+                on_progress(_progress(snapshot))
+    except IdeationCancelled as exc:
+        exc.partial_state = final_state if final_state is not state else None
+        raise
     return final_state
 
 
@@ -145,19 +247,29 @@ def start_ideation_conversation(
     llm_call: LLMCall,
     max_rounds: int = 3,
     evidence_lookup=None,
+    ground_claims=None,
+    index_target_evidence: IndexTargetEvidenceFn | None = None,
+    evidence_planner=None,
     on_progress: IdeationConvProgressCallback | None = None,
+    on_snapshot: IdeationConvSnapshotCallback | None = None,
     application_form_items: list[dict] | None = None,
 ) -> IdeationConvState:
     """세션을 시작해 기획 전문가의 첫 질문 하나만 만들고 멈춘다(요청 목표 흐름 1~3번).
 
     가은/Claude(2026-07-22, 요청: 신청양식 항목 약한 주입): application_form_items는 순수
     추가 파라미터다(기본값 None) — 넘기지 않으면 기존 호출부와 완전히 동일하게 동작한다."""
-    graph = assemble_ideation_conversation_graph(llm_call, evidence_lookup=evidence_lookup)
+    graph = assemble_ideation_conversation_graph(
+        llm_call,
+        evidence_lookup=evidence_lookup,
+        ground_claims=ground_claims,
+        index_target_evidence=index_target_evidence,
+        evidence_planner=evidence_planner,
+    )
     state = initial_conv_state(
         session_id, notice_and_criteria, user_idea, max_rounds=max_rounds,
         application_form_items=application_form_items,
     )
-    return _drive_graph(graph, state, on_progress)
+    return _drive_graph(graph, state, on_progress, on_snapshot)
 
 
 _DELEGATION_COUNTERPART = {"planning_expert": "dev_expert", "dev_expert": "planning_expert"}
@@ -200,7 +312,8 @@ def _delegate_to_expert(
         return previous_state, failed_state, []
 
     # 1) 담당 위원의 최초 제안.
-    owner_retrieved = evidence_lookup(persona_id, query) if evidence_lookup is not None else []
+    runtime_scope = _runtime_scope_for(previous_state)
+    owner_retrieved = call_evidence_lookup(evidence_lookup, persona_id, query, runtime_scope=runtime_scope)
     proposal_raw, ok, attempts = generate_expert_delegation_proposal(
         llm_call,
         persona_id,
@@ -218,11 +331,15 @@ def _delegate_to_expert(
     proposal_message = make_expert_delegation_message(
         persona_id=persona_id,
         round_number=previous_state["round"],
+        spoken_text=proposal_raw.get("spoken_text", ""),
         proposal=proposal_raw["proposal"],
         reason=proposal_raw["reason"],
         assumption=proposal_raw["assumption"],
         referenced_message_ids=proposal_raw.get("referenced_message_ids"),
-        evidence=proposal_raw.get("evidence"),
+        # 용준/Claude(2026-07-22, RAG 근거 유실 수정): proposal_raw.get("evidence")는 LLM이
+        # 자발적으로 되돌려준 검증되지 않는 필드라 대부분 비어 있었다 — owner_retrieved(위에서
+        # 실제 RAG 검색으로 얻어 프롬프트에 주입한 근거)를 그대로 저장해야 한다.
+        evidence=owner_retrieved,
         known_message_ids=known_ids,
     )
     messages = [proposal_message]
@@ -231,7 +348,7 @@ def _delegate_to_expert(
     # 2) 반대 위원의 검토(용준/Claude(2026-07-21), 요청: expert_delegation도 위원 간 상호
     #    검토로 확장) — 사용자가 아니라 동료 전문가로서 제안을 검토한다.
     counterpart_id = _DELEGATION_COUNTERPART[persona_id]
-    counterpart_retrieved = evidence_lookup(counterpart_id, query) if evidence_lookup is not None else []
+    counterpart_retrieved = call_evidence_lookup(evidence_lookup, counterpart_id, query, runtime_scope=runtime_scope)
     review_raw, ok, attempts = generate_expert_delegation_review(
         llm_call,
         counterpart_id,
@@ -247,7 +364,11 @@ def _delegate_to_expert(
     used += attempts
 
     review_message = make_expert_delegation_review_message(
-        persona_id=counterpart_id, round_number=previous_state["round"], raw=review_raw, known_message_ids=known_ids
+        persona_id=counterpart_id,
+        round_number=previous_state["round"],
+        raw=review_raw,
+        known_message_ids=known_ids,
+        evidence=counterpart_retrieved,
     )
     messages.append(review_message)
     known_ids = known_ids | {review_message["message_id"]}
@@ -257,7 +378,7 @@ def _delegate_to_expert(
     #    LLM 호출 없이 이미 나온 stance 필드만으로 결정적으로 게이팅한다).
     revision_raw: dict | None = None
     if review_raw.get("stance") in REVISION_TRIGGER_STANCES:
-        revision_retrieved = evidence_lookup(persona_id, query) if evidence_lookup is not None else []
+        revision_retrieved = call_evidence_lookup(evidence_lookup, persona_id, query, runtime_scope=runtime_scope)
         revision_raw, ok, attempts = generate_expert_delegation_proposal(
             llm_call,
             persona_id,
@@ -276,11 +397,14 @@ def _delegate_to_expert(
         revision_message = make_expert_delegation_message(
             persona_id=persona_id,
             round_number=previous_state["round"],
+            spoken_text=revision_raw.get("spoken_text", ""),
             proposal=revision_raw["proposal"],
             reason=revision_raw["reason"],
             assumption=revision_raw["assumption"],
             referenced_message_ids=revision_raw.get("referenced_message_ids"),
-            evidence=revision_raw.get("evidence"),
+            # 용준/Claude(2026-07-22, RAG 근거 유실 수정): revision_retrieved(이번 수정 턴에
+            # 다시 검색한 근거)를 그대로 저장한다 — 위 proposal_message와 동일한 이유.
+            evidence=revision_retrieved,
             known_message_ids=known_ids,
             responding_to=revision_raw.get("responding_to"),
             revision=revision_raw.get("revision"),
@@ -495,7 +619,11 @@ def reply_ideation_conversation(
     user_message: str,
     llm_call: LLMCall,
     evidence_lookup=None,
+    ground_claims=None,
+    index_target_evidence: IndexTargetEvidenceFn | None = None,
+    evidence_planner=None,
     on_progress: IdeationConvProgressCallback | None = None,
+    on_snapshot: IdeationConvSnapshotCallback | None = None,
 ) -> IdeationConvState:
     """사용자 답변을 반영해 다음 정지 지점까지 그래프를 이어간다.
 
@@ -557,6 +685,7 @@ def reply_ideation_conversation(
                 "failed_node": None,
                 "answer_retry_count": 0,
                 "selected_idea": None,
+                "selected_idea_document_id": None,
                 "selection_reason": None,
                 "selection_intent": None,
                 "user_selection_message": None,
@@ -565,8 +694,14 @@ def reply_ideation_conversation(
                 "candidate_regeneration_count": regeneration_count + 1,
             }
         )
-        graph = assemble_ideation_conversation_graph(llm_call, evidence_lookup=evidence_lookup)
-        return _drive_graph(graph, restart_state, on_progress)
+        graph = assemble_ideation_conversation_graph(
+            llm_call,
+            evidence_lookup=evidence_lookup,
+            ground_claims=ground_claims,
+            index_target_evidence=index_target_evidence,
+            evidence_planner=evidence_planner,
+        )
+        return _drive_graph(graph, restart_state, on_progress, on_snapshot)
 
     pending_persona = PHASE_TO_PENDING_PERSONA.get(previous_state["phase"])
     extra_message: ConvMessage | None = None
@@ -592,6 +727,16 @@ def reply_ideation_conversation(
     answer_message = _new_user_message(
         user_message, previous_state["round"], message_type=_reply_message_type_for(previous_state)
     )
+    # 용준/Claude(2026-07-22, 요청: 사용자 답변을 session target evidence로 반영 + 인덱싱
+    # 완료 후 다음 전문가 턴 실행) — apply_user_answer/그래프 실행보다 먼저, 이 답변을 동기적으로
+    # target evidence로 색인한다. 이 함수가 반환한 뒤에야 아래 _drive_graph가 다음 전문가 노드를
+    # 실행하므로, 색인 전에 다음 전문가 검색이 시작되는 race condition이 없다(요청 9번).
+    _index_user_answer(
+        state=previous_state,
+        answer_message=answer_message,
+        raw_answer_text=user_message,
+        index_target_evidence=index_target_evidence,
+    )
     state = apply_user_answer(previous_state, answer_message)
     if extra_messages:
         # 전문가 위임 제안 흐름(요청: "모르겠다" UX 개선 + 위원 간 상호 검토 확장) — 사용자의
@@ -605,8 +750,14 @@ def reply_ideation_conversation(
         # 방어적 점검 — apply_user_answer()는 항상 그래프 진입 가능한 phase로만 전이시키므로
         # 정상 흐름에서는 절대 여기 도달하지 않는다.
         raise AssertionError(f"apply_user_answer가 진입 불가능한 phase를 반환했습니다: {state['phase']!r}")
-    graph = assemble_ideation_conversation_graph(llm_call, evidence_lookup=evidence_lookup)
-    return _drive_graph(graph, state, on_progress)
+    graph = assemble_ideation_conversation_graph(
+        llm_call,
+        evidence_lookup=evidence_lookup,
+        ground_claims=ground_claims,
+        index_target_evidence=index_target_evidence,
+        evidence_planner=evidence_planner,
+    )
+    return _drive_graph(graph, state, on_progress, on_snapshot)
 
 
 def finalize_ideation_conversation(
@@ -614,10 +765,118 @@ def finalize_ideation_conversation(
     previous_state: IdeationConvState,
     llm_call: LLMCall,
     on_progress: IdeationConvProgressCallback | None = None,
+    on_snapshot: IdeationConvSnapshotCallback | None = None,
 ) -> IdeationConvState:
     """사용자가 "주제 확정하고 초안 받기"를 눌렀을 때만 호출된다(요청 9~10항). phase가
     awaiting_user_decision이 아니면 request_finalize()가 ValueError를 던진다 — 호출부
     (API 라우터)가 이를 400으로 변환해야 한다."""
     state = request_finalize(previous_state)
     graph = assemble_ideation_conversation_graph(llm_call)
-    return _drive_graph(graph, state, on_progress)
+    return _drive_graph(graph, state, on_progress, on_snapshot)
+
+
+_TARGET_TO_FORCED_SPEAKER = {"planning_expert": "planning_expert", "dev_expert": "dev_expert"}
+_INTERJECTION_COUNTERPART = {"planning_expert": "dev_expert", "dev_expert": "planning_expert"}
+# expert_discussion 계열 phase(취소 직후에도 canonical state의 phase는 여전히
+# "expert_discussion"이다 — 아직 한 라운드가 끝나지 않았으므로) + 기존 REPLYABLE_PHASES(라운드
+# 사이 자유 질문에도 대상 지정을 허용하는 자연스러운 확장) 양쪽에서 인터럽션을 받는다.
+INTERJECTION_REPLYABLE_PHASES = REPLYABLE_PHASES | {"expert_discussion"}
+
+
+def reply_to_interjection(
+    *,
+    previous_state: IdeationConvState,
+    user_message: str,
+    target_speaker_id: str,
+    llm_call: LLMCall,
+    evidence_lookup=None,
+    ground_claims=None,
+    index_target_evidence: IndexTargetEvidenceFn | None = None,
+    evidence_planner=None,
+    on_progress: IdeationConvProgressCallback | None = None,
+    on_snapshot: IdeationConvSnapshotCallback | None = None,
+) -> IdeationConvState:
+    """용준/Claude(2026-07-22, 요청: "잠시만" 재개 — 지정 위원 우선 응답): 사용자가 "잠시만"
+    으로 진행 중이던 발언을 취소한 뒤(또는 라운드 사이 자유롭게) 특정 위원을 지정해 질문했을
+    때 호출된다. reply_ideation_conversation과 분리한 이유: phase 게이트가 다르고
+    (expert_discussion 자체도 허용해야 한다), "지정 위원이 먼저 답하고 상대가 반드시
+    검토한다"를 보장하려면 진입 노드를 강제해야 하기 때문이다(forced_next_speaker).
+
+    target_speaker_id="both"면 active_issue_id가 가리키는 쟁점의 가장 최근 발언자 반대편이
+    먼저 답한다(마지막이 planning_expert였다면 dev_expert 먼저) — 찾을 수 없으면 기본값
+    planning_expert가 먼저 답한다. 지정 위원 응답 이후 라우팅은 기존
+    _route_next_expert_turn을 그대로 타므로(recommended_next_speaker가 상대 위원이면 자동으로
+    상대가 검토), "지정 위원 답변 → 상대 검토"가 그래프 구조 변경 없이 보장된다."""
+    if previous_state["phase"] not in INTERJECTION_REPLYABLE_PHASES:
+        raise ValueError(
+            f"이 phase에서는 위원 지정 질문을 받을 수 없습니다: {previous_state['phase']!r}."
+        )
+    if target_speaker_id not in ("planning_expert", "dev_expert", "both"):
+        raise ValueError(f"target_speaker_id가 올바르지 않습니다: {target_speaker_id!r}")
+
+    if target_speaker_id == "both":
+        last_expert_message = None
+        for msg in reversed(previous_state["messages"]):
+            if msg.get("speaker_id") in ("planning_expert", "dev_expert"):
+                last_expert_message = msg
+                break
+        if last_expert_message and last_expert_message["speaker_id"] == "planning_expert":
+            forced_speaker = "dev_expert"
+        else:
+            forced_speaker = "planning_expert"
+    else:
+        forced_speaker = _TARGET_TO_FORCED_SPEAKER[target_speaker_id]
+
+    interjection_message = ConvMessage(
+        message_id=f"MSG-{uuid.uuid4().hex[:10]}",
+        speaker_id="user",
+        speaker_name="사용자",
+        role="사용자",
+        round=previous_state["round"],
+        message_type="interjection",
+        content=user_message,
+        referenced_message_ids=[],
+        evidence=[],
+        created_at=datetime.now(timezone.utc).isoformat(),
+        structured={
+            "target_speaker_id": target_speaker_id,
+            "active_issue_id": previous_state.get("active_issue_id"),
+        },
+    )
+    # 용준/Claude(2026-07-22, 요청: 사용자 답변을 session target evidence로 반영) — "잠시만"
+    # 인터젝션도 구체적인 개입이면 색인 대상이다(reply_ideation_conversation과 동일한 분류
+    # 규칙 재사용). 아래 _drive_graph보다 먼저 실행되므로 인덱싱 완료 후에만 다음 전문가
+    # 검색이 시작된다(요청 9번).
+    _index_user_answer(
+        state=previous_state,
+        answer_message=interjection_message,
+        raw_answer_text=user_message,
+        index_target_evidence=index_target_evidence,
+    )
+
+    state = IdeationConvState(
+        **{
+            **previous_state,
+            "phase": "expert_discussion",
+            "messages": previous_state["messages"] + [interjection_message],
+            "forced_next_speaker": forced_speaker,
+            "pending_question": None,
+            "pending_question_topic": None,
+            # 용준/Claude(2026-07-22, 요청: 지정 위원 질문 후 상대 검토 코드 강제) — forced_speaker가
+            # 답하고 나면 반드시 반대편(_INTERJECTION_COUNTERPART)이 한 번 더 검토해야 하고,
+            # 그 전까지는 _route_next_expert_turn이 facilitator로 이동하지 못한다(그래프
+            # 라우팅이 아니라 이 네 필드가 강제한다 — 요청 상태 필드 그대로).
+            "interjection_target_speaker_id": target_speaker_id,
+            "interjection_response_message_id": None,
+            "required_counterpart_speaker_id": _INTERJECTION_COUNTERPART[forced_speaker],
+            "counterpart_review_completed": False,
+        }
+    )
+    graph = assemble_ideation_conversation_graph(
+        llm_call,
+        evidence_lookup=evidence_lookup,
+        ground_claims=ground_claims,
+        index_target_evidence=index_target_evidence,
+        evidence_planner=evidence_planner,
+    )
+    return _drive_graph(graph, state, on_progress, on_snapshot)

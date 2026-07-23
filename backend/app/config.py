@@ -67,21 +67,42 @@ class Settings(BaseSettings):
     ENABLE_IDEATION_PREVIEW: bool = False
 
     # 용준/Claude(2026-07-21, 요청: 실시간 스트리밍): 대화형 아이디어 회의의 NDJSON 스트리밍
-    # 응답(POST /ideation-conversation/{session_id}/reply/stream)을 켤지 여부.
+    # 응답(POST /ideation-conversation/{session_id}/reply/stream)을 켤지 여부. 기본값
+    # True — 프리뷰 라우터를 활성화하면 현재 기본 UI의 실시간 응답도 함께 동작하게 한다.
     # ENABLE_IDEATION_PREVIEW와 별개 플래그로 둔 이유는, 프리뷰 라우터 자체는 켜져
-    # 있어도(기존 동기식 API는 계속 쓰고 싶은 경우) 스트리밍만 따로 끌 수 있게 하기
-    # 위해서다. 이 값이 False이면 /reply/stream 라우트는 (라우터 자체는 등록돼 있어도)
+    # 있어도(기존 동기식 API는 계속 쓰고 싶은 경우) 스트리밍은 아직 검증 전이라 끄고 싶을 수
+    # 있어서다. 이 값이 False이면 /reply/stream 라우트는 (라우터 자체는 등록돼 있어도)
     # 404를 반환한다 — 기존 동기식 /reply는 이 플래그와 무관하게 항상 동작한다.
-    # 가은/Claude(2026-07-22, 요청: 타이핑 효과 기본 활성화): 스트리밍이 충분히 검증돼
-    # 기본값을 False -> True로 바꿨다. 끄고 싶으면 backend/.env에
-    # ENABLE_IDEATION_STREAMING=false를 명시하면 된다.
     ENABLE_IDEATION_STREAMING: bool = True
+
+    # 아이디어 회의 화자·응답 대상·라우팅을 터미널에서 확인하는 개발 전용 로그. 사용자
+    # 발언이 포함될 수 있어 운영 기본값은 항상 False다. delta 단위 로그는 별도 플래그를
+    # 한 번 더 켜야 출력된다.
+    ENABLE_IDEATION_TRACE_LOGS: bool = False
+    IDEATION_TRACE_CONTENT_MAX_CHARS: int = 500
+    IDEATION_TRACE_STREAM_DELTAS: bool = False
 
     # 용준/Claude(2026-07-22, 요청: RAG 품질 오프라인 평가 도구): Faithfulness/Persona
     # Evidence Fit LLM-as-judge 전용 모델. 실제 답변을 생성하는 모델(DEV_LLM_REVIEWER_MODEL
     # 등)과 분리해 둔다 — 평가자가 생성자와 같은 모델·같은 편향을 공유하지 않도록 하기
     # 위함이다(요청 7번). ai/rag/evaluation/rag_quality/cli.py만 읽는다.
     EVAL_LLM_MODEL: str = "gpt-4o-mini"
+
+    # 용준/Claude(2026-07-23, Phase 1 "Shadow Deterministic Evidence Planner"): 아이디어 회의
+    # discussion 턴에서 규칙 기반 evidence planner를 그림자(shadow) 모드로 실행할지 여부.
+    # 기본값 False — 꺼져 있으면 planner 콜러블 자체를 주입하지 않아 기존 prompt/claims/
+    # grounding/routing/streaming 동작과 100% 동일하다. 켜져 있어도(True) 이 단계에서는
+    # planner 결과가 trace 로그로만 기록될 뿐 발언 생성에 전혀 쓰이지 않는다.
+    ENABLE_IDEATION_EVIDENCE_PLANNER_SHADOW: bool = False
+
+    # 용준/Claude(2026-07-23, Phase 2 "Active Evidence Injection"): Phase 1 shadow planner가
+    # 선택한 근거를 discussion(planning_expert/dev_expert) 발언 prompt와 claim grounding에
+    # 실제로 주입할지 여부. ENABLE_IDEATION_EVIDENCE_PLANNER_SHADOW와 별개 플래그다 — shadow는
+    # "로그만", 이 플래그는 "실제 사용"을 뜻한다. 기본값 False — 꺼져 있으면 기존 retrieved
+    # 전체 주입 경로와 100% 동일하게 동작한다. 두 플래그가 동시에 켜져도 planner는 턴당 한 번만
+    # 실행되고(같은 plan을 shadow 기록과 active 주입에 함께 쓴다), question/candidate
+    # generation/facilitator/synthesis 노드에는 적용되지 않는다.
+    ENABLE_IDEATION_EVIDENCE_PLANNER_DISCUSSION: bool = False
 
     class Config:
         env_file = str(_ENV_FILE)

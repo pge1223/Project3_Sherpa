@@ -153,6 +153,21 @@ def active_stage_for(phase: str) -> ActiveStage | Literal["failed"]:
     return _PHASE_TO_ACTIVE_STAGE.get(phase, "refinement")
 
 
+class IssueRecord(TypedDict):
+    """용준/Claude(2026-07-22, 요청: 동적 전문가 회의로 개편): expert_discussion이 다루는
+    쟁점 1개. round 번호가 아니라 쟁점 단위로 회의를 관리하기 위한 최소 단위 — LLM은
+    active_issue_id/issue_resolved bool만 판단하고, 이 레코드의 생성·이동(open→resolved)은
+    항상 코드가 결정적으로 수행한다(라우팅이 LLM 추천을 맹신하지 않는 것과 같은 원칙)."""
+
+    issue_id: str
+    title: str
+    status: Literal["open", "resolved"]
+    planning_position: str | None
+    development_position: str | None
+    resolution: str | None
+    turns: int
+
+
 class DiscussionRoundRecord(TypedDict):
     """용준/Claude(2026-07-21, 요청: 위원 간 실제 회의로 개편): expert_discussion 라운드
     1회가 만든 발언들의 텍스트 스냅샷. messages(원본 발언 전체)와 별도로 이 요약을 두는
@@ -180,13 +195,34 @@ class ConvMessage(TypedDict):
     referenced_message_ids: list[str]
     evidence: list[dict]
     created_at: str
-    # 용준/Claude(2026-07-21, 전문가 의견 UX 개선): opinion/agreement/disagreement 메시지의
-    # judgment/reason/suggestion/confirmed/unconfirmed를 필드별로 담은 선택 정보 — content
-    # 문자열(기존 그대로 유지)과 별개로, 프런트가 "판단/제안은 기본 노출, 근거·확정·미확정은
-    # 상세 보기로 접기"를 구현할 수 있도록 순수 추가한 필드다. content가 없어지는 게 아니므로
-    # structured를 모르는 기존 클라이언트는 영향받지 않는다. 질문/답변/설명/요약 메시지는
-    # 항상 None이다.
+    # 용준/Claude(2026-07-21, 전문가 의견 UX 개선; 2026-07-22, 요청: 보고서형 메시지 →
+    # 자연스러운 회의 발화 전환으로 범위 확장): judgment/reason/suggestion/agreement/
+    # concern/proposal/interim_conclusion/confirmed/unconfirmed/responding_to_message_id/
+    # responding_to_speaker_id 등 내부 판단·상태 필드를 담는다. content는 이제 LLM이 만든
+    # spoken_text(사용자에게 보이는 자연스러운 발화 문장) 그대로이고, structured는 그
+    # spoken_text를 만들기 위한 재료이자 다음 턴 프롬프트·요약 카드가 참조하는 내부 상태다
+    # — content가 없어지는 게 아니라 값이 spoken_text로 바뀌었을 뿐이므로 structured를 모르는
+    # 기존 클라이언트는 영향받지 않는다. 답변(answer/interjection) 메시지만 항상 None이다.
     structured: dict | None
+    # 용준/Claude(2026-07-22, 요청: RAG 근거 실제 활용 강화) — evidence(위)는 그대로
+    # "이번 턴 프롬프트에 주입된 검색 결과 전체"라는 기존 의미를 유지한다(하위 호환).
+    # 아래 필드들은 그중 실제로 주장(claim)과 연결·검증된 부분만 별도로 담는 신규 선택
+    # 필드다 — claims/grounding 관련 필드가 없는 메시지 타입(질문 응답, 진행자 정리 등
+    # 일부)은 빈 리스트/None/0으로 채운다(TypedDict는 런타임에 강제되지 않으므로 이 필드를
+    # 모르는 기존 코드는 영향받지 않는다).
+    claims: list[dict]
+    linked_evidence_refs: list[str]
+    supported_claim_count: int
+    unsupported_claim_count: int
+    # 용준/Claude(2026-07-22, 요청: claim 통계 의미 분리) — supported_claim_count(기존 필드,
+    # 의미 변경 없이 유지)와 별도로 "실제 문서 근거로 검증됨"과 "근거 없이 허용된 전문가
+    # 판단"을 분리한 신규 선택 필드. claims/grounding이 없는 메시지 타입은 0으로 채운다.
+    accepted_claim_count: int
+    grounded_claim_count: int
+    expert_judgment_count: int
+    missing_information: list[str]
+    evidence_status: str | None
+    sufficiency: str | None
 
 
 class IdeationConvState(TypedDict):
@@ -228,6 +264,16 @@ class IdeationConvState(TypedDict):
     consensus: list[str]
     unresolved_issues: list[str]
     idea_proposal: dict | None
+    idea_canvas: dict | None
+    # 가은/Claude(2026-07-22, 요청: 신청양식 항목 약한 주입): 공모전 신청양식에서 추출한
+    # 항목 목록([{field_name, description, char_limit}], 양식에 있는 만큼 전부 — 개수
+    # 상한 없음). 세션 시작 시 한 번 채워지고 이후 절대 바뀌지 않는다(discussion_rounds처럼
+    # 매 라운드 갱신되는 값이 아니다). make_conv_discussion_node가 매 발언 프롬프트에
+    # "참고 자료"로만 주입한다(질문 주제·순서는 여전히 코드가 결정 — 이 값은 같은 주제를
+    # 다룰 때 표현만 다듬는 데 쓰인다, ideation_conv_discussion.txt의 [신청양식 참고 규칙]
+    # 참고). 없으면 빈 리스트(양식 미등록) — 구버전 저장 state에는 이 키가 없을 수 있으므로
+    # 읽는 쪽은 항상 `.get("application_form_items", [])`로 접근한다(하위 호환).
+    application_form_items: list[dict]
     failed_node: str | None
     llm_calls_used: int
     # 용준/Claude(2026-07-20): 같은 쟁점(pending_question)으로 재질문한 횟수. 사용자가
@@ -251,6 +297,16 @@ class IdeationConvState(TypedDict):
     # (요청 8번 "discovery 모드의 최종 결과에는 최초 생성 후보... 이력을 포함").
     original_idea_candidates: list[dict]
     selected_idea: dict | None
+    # 용준/Claude(2026-07-22, 요청: 선택된 아이디어를 target 문서로 생성) — candidate_selection
+    # 노드가 선택/결합된 아이디어를 target evidence로 색인한 뒤 그 document_id를 저장한다
+    # (ai/meeting/graph/ideation_conv_discovery.py::_resolve_selection). 색인이 주입되지
+    # 않았거나(use_rag=False 등) 실패했으면 None이다 — 이 경우 RAG 검색은 이 후보의 target
+    # 근거를 아직 찾지 못한 것으로만 취급한다(회의가 막히지 않는다). 사용자가 후보를 다시
+    # 선택/결합하면 이 값이 새 document_id로 교체되어, 이전 후보의 target은 더 이상 현재
+    # 근거로 검색되지 않는다(ai/rag/orchestration/ideation_evidence_service.py::
+    # _scope_target_evidence 참고 — 이전 후보 chunk 자체는 회의 이력으로 Chroma에 남는다).
+    # 구버전 저장 state에는 이 키가 없을 수 있으므로 읽는 쪽은 항상 `.get(...)`로 접근한다.
+    selected_idea_document_id: str | None
     selection_reason: str | None
     # "다시 추천" 요청 횟수 — ideation_conv_discovery.py::MAX_CANDIDATE_REGENERATIONS에
     # 도달하면 더 이상 LLM을 호출해 후보를 재생성하지 않는다(요청: 무한 반복/LLM 호출 제한
@@ -298,25 +354,92 @@ class IdeationConvState(TypedDict):
     # 결정하는 조건부 엣지(ideation_conv_build.py::_route_after_review)가 참조한다.
     discussion_review_stance: str | None
 
-    # 가은/Claude(2026-07-22, 요청: 아이디어 기획 캔버스 자동 갱신 — 경이 협의 완료): 프론트
-    # 오른쪽 패널 '아이디어 기획 캔버스'의 최신 값(problem/target_user/core_value/solution/
-    # differentiation/feasibility/risks/contest_fit — selected_idea와 같은 키 이름을 써서
-    # 프론트가 idea_canvas ?? selected_idea 폴백만으로 그릴 수 있게 한다). 매 라운드가 끝날
-    # 때 canvas_update 노드(ideation_conv_nodes.py::make_canvas_update_node)가 덮어쓴다.
-    # 갱신 실패 시에는 직전 값이 그대로 유지된다(비치명적). 구버전 저장 state에는 이 키가
-    # 없을 수 있으므로 읽는 쪽은 항상 `.get("idea_canvas")`로 접근한다(하위 호환).
-    idea_canvas: dict | None
+    # 용준/Claude(2026-07-22, 요청: 동적 전문가 회의로 개편) — round 번호가 아니라 쟁점
+    # 단위로 회의를 관리한다. 구버전 저장 state에는 이 키들이 없을 수 있으므로 읽는 쪽은
+    # 항상 `.get(...)`로 접근한다(하위 호환).
+    open_issues: list[IssueRecord]
+    resolved_issues: list[IssueRecord]
+    active_issue_id: str | None
+    # 직전 발언자(persona_id 또는 "ideation_facilitator") — 같은 화자의 의미 없는 연속 발언을
+    # 판단하는 라우터(_route_next_expert_turn)가 참조한다.
+    previous_speaker: str | None
+    # 이번 라운드(=이번 API 호출 동안 그래프가 한 번에 처리하는 구간) 안에서 실행된 전문가
+    # 발언 수 — _MAX_EXPERT_TURNS_PER_ROUND/_MIN_EXPERT_TURNS_PER_ROUND 캡 판단에 쓴다.
+    # discussion_facilitator가 라운드를 마무리할 때 0으로 리셋된다.
+    expert_turn_count: int
+    # 라운드/토론이 왜 끝났는지 기록한다: consensus_reached/user_input_required/
+    # no_new_information/max_turns_reached/user_finalized/interrupted_by_user.
+    stop_reason: str | None
+    # "잠시만" 재개(reply_to_interjection)가 다음 그래프 진입을 특정 전문가로 강제 지정할 때만
+    # 채운다 — 해당 노드가 실행되자마자 None으로 리셋되어 다음 라운드에 잔류하지 않는다.
+    forced_next_speaker: str | None
 
-    # 가은/Claude(2026-07-22, 요청: 신청양식 항목 약한 주입): 공모전 신청양식에서 추출한
-    # 항목 목록([{field_name, description, char_limit}], 양식에 있는 만큼 전부 — 개수
-    # 상한 없음). 세션 시작 시 한 번
-    # 채워지고 이후 절대 바뀌지 않는다(discussion_rounds처럼 매 라운드 갱신되는 값이
-    # 아니다). make_conv_discussion_node가 매 발언 프롬프트에 "참고 자료"로만 주입한다
-    # (질문 주제·순서는 여전히 TOPIC_PRIORITY가 결정 — 이 값은 같은 주제를 물을 때 표현만
-    # 다듬는 데 쓰인다, ideation_conv_discussion.txt의 [신청양식 참고 규칙] 참고). 없으면
-    # 빈 리스트(양식 미등록) — 구버전 저장 state에는 이 키가 없을 수 있으므로 읽는 쪽은
-    # 항상 `.get("application_form_items", [])`로 접근한다(하위 호환).
-    application_form_items: list[dict]
+    # 용준/Claude(2026-07-22, 요청: 지정 위원 질문 후 상대 검토 코드 강제) — reply_to_interjection이
+    # 사용자가 지정한 대상(target_speaker_id 원본값 — "planning_expert"/"dev_expert"/"both")을
+    # 그대로 기록한다. 이 네 필드는 서로 세트로 채워지고(reply_to_interjection이 한 번에
+    # 설정) counterpart_review_completed=True가 되는 순간 다시 함께 리셋된다(다음 인터젝션과
+    # 섞이지 않도록). 구버전 저장 state에는 이 키들이 없을 수 있으므로 읽는 쪽은 항상
+    # `.get(...)`로 접근한다(하위 호환 — 없으면 "보류 중인 상대 검토 없음"으로 취급).
+    interjection_target_speaker_id: str | None
+    # 지정 위원이 인터젝션에 처음 답한 메시지의 message_id — make_conv_discussion_node가
+    # 그 위원의 발언을 만든 직후 채운다(요청: 어느 발언이 "검토 대상"인지 코드가 결정적으로
+    # 추적). 상대 검토가 끝나면 required_counterpart_speaker_id 등과 함께 None으로 리셋된다.
+    interjection_response_message_id: str | None
+    # 반드시 한 번 더 발언해야 하는 반대편 위원("planning_expert"/"dev_expert") —
+    # reply_to_interjection이 지정 위원의 반대편으로 설정한다. _route_next_expert_turn이
+    # 이 값이 남아있는 한(counterpart_review_completed=False) 다른 어떤 라우팅 신호
+    # (issue_resolved/needs_user_input/발언 캡 이외)보다 우선해 이 위원에게 발언을 넘긴다.
+    required_counterpart_speaker_id: str | None
+    # required_counterpart_speaker_id가 실제로 발언을 완료했는지 여부. False인 동안은
+    # facilitator로 이동할 수 없다(요청 6번) — reply_to_interjection이 False로 설정하고,
+    # 그 위원의 discussion 노드 실행이 끝나면 True로 바뀌며 위 세 필드도 함께 리셋된다.
+    counterpart_review_completed: bool
+
+    # 용준/Claude(2026-07-22, 요청: "잠시만" 취소 중 phase 오염 수정) — 그래프 내부에서만
+    # 의미가 있는 "다음 라우팅 목적지" 신호. discussion_facilitator가 continue_round를
+    # 결정했을 때(_route_after_facilitator)와 candidate_selection이 결합/선택을 확정했을 때
+    # (_route_after_candidate_selection)만 값을 채운다 — 이전에는 이 두 곳이 phase 자체를
+    # "planning_question"으로 잠깐 바꿔 그래프 내부 라우팅에만 쓰고 곧바로 다음 노드가
+    # 실행되길 기대했지만, 취소가 바로 그 다음 노드 실행 중(스트리밍 llm_call)에 일어나면
+    # graph.stream()이 이미 그 "잠깐의" phase를 스냅샷으로 내보낸 뒤였다 — 그 스냅샷이
+    # IdeationCancelled.partial_state로 세션에 그대로 저장되면서 canonical phase가 그래프
+    # 밖에서는 의미 없는 내부 신호값으로 오염됐다(reply_to_interjection이 이 값을 유효한
+    # 재개 지점으로 인식하지 못해 거부). 이제 phase는 항상 그 시점의 실제 canonical 상태
+    # ("expert_discussion")로 유지하고, 라우팅 목적지만 이 필드로 분리해서 넘긴다 — 목적지
+    # 노드(planning_expert_discussion)가 실행되자마자 None으로 리셋되므로(forced_next_speaker와
+    # 동일한 패턴) 다음 라운드/다음 요청에 잔류하지 않는다. 구버전 저장 state에는 이 키가
+    # 없을 수 있으므로 읽는 쪽은 항상 `.get("next_route")`로 접근한다(하위 호환).
+    next_route: str | None
+
+    # 용준/Claude(2026-07-22, 요청: 반복되는 근거 없는 의견을 사용자 질문으로 전환) — 같은
+    # 쟁점(active_issue_id)이 바뀌지 않는 한 이어서 누적되고, 이슈가 바뀌거나 사용자가 실제로
+    # 답변하면(apply_user_answer) 0/빈 값으로 리셋된다. make_conv_discussion_node가 매 발언
+    # 직후 갱신하고, 임계값(2회 연속)에 도달하면 needs_user_input=True로 강제 전환한다(
+    # _route_next_expert_turn은 기존 needs_user_input 라우팅을 그대로 재사용한다 — 새 라우팅
+    # 분기를 추가하지 않는다). 구버전 저장 state에는 이 키들이 없을 수 있으므로 읽는 쪽은
+    # 항상 `.get(...)`로 접근한다(하위 호환).
+    consecutive_zero_linked_turns: int
+    # evidence_status="expert_judgment_only"(문서 근거 없이 전문가 판단만 있는 턴)가 연속된 횟수.
+    consecutive_expert_judgment_only_turns: int
+    # 직전 턴의 missing_information(claim_grounding 결과, 정규화·정렬된 텍스트 목록) — 다음
+    # 턴이 같은 값을 반복하는지 비교하는 데 쓴다.
+    last_missing_information: list[str]
+    # missing_information이 직전 턴과 완전히 동일하게(비어있지 않은 채) 반복된 연속 횟수.
+    consecutive_repeated_missing_information_turns: int
+    # 직전 턴의 new_information(발언 스키마 필수 필드)을 이어붙인 텍스트 — 다음 턴이 같은
+    # 내용을 어휘만 바꿔 반복하는지(_looks_like_restatement와 동일한 유사도 판정) 비교한다.
+    last_new_information_text: str
+    # new_information이 직전 턴과 의미상 거의 동일하게 반복된 연속 횟수.
+    consecutive_no_new_information_turns: int
+
+    # 용준/Claude(2026-07-23, Phase 1 "Shadow Deterministic Evidence Planner") — 같은
+    # speaker/issue("persona_id:issue_id" 키)별 이전 shadow planner 선택 이력({"speaker",
+    # "effective_issue_id", "chunk_id"}만 담는 최소 정보). API 응답(_serialize_state)에는
+    # 노출하지 않는다 — 순수 내부 진단용 상태다. evidence_planner가 주입되지 않으면(기본,
+    # ENABLE_IDEATION_EVIDENCE_PLANNER_SHADOW=False) 항상 빈 dict로 유지된다. 구버전 저장
+    # state에는 이 키가 없을 수 있으므로 읽는 쪽은 항상 `.get("evidence_plan_shadow_history",
+    # {})`로 접근한다(하위 호환).
+    evidence_plan_shadow_history: dict[str, list[dict]]
 
 
 def _extract_initial_idea_text(user_idea: dict | str | None) -> str:
@@ -387,6 +510,8 @@ def initial_conv_state(
         consensus=[],
         unresolved_issues=[],
         idea_proposal=None,
+        idea_canvas=None,
+        application_form_items=application_form_items or [],
         failed_node=None,
         llm_calls_used=0,
         answer_retry_count=0,
@@ -396,6 +521,7 @@ def initial_conv_state(
         idea_candidates=[],
         original_idea_candidates=[],
         selected_idea=None,
+        selected_idea_document_id=None,
         selection_reason=None,
         candidate_regeneration_count=0,
         selection_intent=None,
@@ -408,8 +534,25 @@ def initial_conv_state(
         discussion_revised_proposal=None,
         discussion_next_action=None,
         discussion_review_stance=None,
-        idea_canvas=None,
-        application_form_items=application_form_items or [],
+        open_issues=[],
+        resolved_issues=[],
+        active_issue_id=None,
+        previous_speaker=None,
+        expert_turn_count=0,
+        stop_reason=None,
+        forced_next_speaker=None,
+        interjection_target_speaker_id=None,
+        interjection_response_message_id=None,
+        required_counterpart_speaker_id=None,
+        counterpart_review_completed=True,
+        next_route=None,
+        consecutive_zero_linked_turns=0,
+        consecutive_expert_judgment_only_turns=0,
+        last_missing_information=[],
+        consecutive_repeated_missing_information_turns=0,
+        last_new_information_text="",
+        consecutive_no_new_information_turns=0,
+        evidence_plan_shadow_history={},
     )
 
 
@@ -454,6 +597,16 @@ def apply_user_answer(previous_state: IdeationConvState, answer_message: ConvMes
             "pending_question_topic": None,
             # 다음 단계로 실제로 넘어가는 시점이므로 재질문 카운터를 리셋한다(새 쟁점 시작).
             "answer_retry_count": 0,
+            # 용준/Claude(2026-07-22, 요청: 반복 감지 카운터는 사용자가 실제로 새 정보를
+            # 제공하면 리셋) — 사용자가 방금 근거 부족/반복 질문에 답했으므로, 다음 전문가
+            # 발언은 이 새 답변을 근거로 다시 시작해야 한다(이전 반복 이력이 그대로 남아
+            # 곧바로 다시 사용자에게 되묻는 것을 막는다).
+            "consecutive_zero_linked_turns": 0,
+            "consecutive_expert_judgment_only_turns": 0,
+            "last_missing_information": [],
+            "consecutive_repeated_missing_information_turns": 0,
+            "last_new_information_text": "",
+            "consecutive_no_new_information_turns": 0,
         }
     )
 
@@ -467,6 +620,23 @@ def request_finalize(previous_state: IdeationConvState) -> IdeationConvState:
             f"awaiting_user_decision 상태에서만 최종 확정할 수 있습니다(현재: {previous_state['phase']!r})."
         )
     return IdeationConvState(**{**previous_state, "phase": "finalizing"})
+
+
+class IdeationCancelled(Exception):
+    """용준/Claude(2026-07-22, 요청: "잠시만" 실제 취소): 사용자가 "잠시만"으로 진행 중인
+    요청을 취소했을 때, 스트리밍 llm_call이 던지는 전용 예외. 일반 LLM 오류(RuntimeError 등)와
+    달리 _safe_call_structured_json/_safe_call_json이 재시도하지 않고 그대로 상위(그래프
+    실행)까지 전파해야 한다 — 재시도하면 이미 끊긴 OpenAI 스트림에 다시 과금 요청을 보내는
+    낭비가 생기고, phase="failed"로 만들면 "취소는 일반 오류가 아니다"라는 요구를 어기게
+    된다."""
+
+    def __init__(self, session_id: str, request_id: str | None = None):
+        super().__init__(f"[{session_id}] 사용자가 요청(request_id={request_id})을 취소했습니다.")
+        self.session_id = session_id
+        self.request_id = request_id
+        # ideation_conv_run.py::_drive_graph가 취소 시점까지 완료된 마지막 그래프 스냅샷을
+        # 실어 보낸다 — 완료된 발언이 하나도 없으면(첫 노드 실행 중 취소) None 그대로 둔다.
+        self.partial_state: "IdeationConvState | None" = None
 
 
 def is_graph_entry_phase(phase: str) -> bool:

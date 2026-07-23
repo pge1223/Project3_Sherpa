@@ -28,13 +28,18 @@ from .ideation_conv_nodes import (
     EXPERT_DELEGATION_STREAM_FIELDS,
     EXPERT_DELEGATION_TRAILER,
     FACILITATOR_SUMMARY_STREAM_FIELDS,
+    MAX_EXPERT_TURNS_PER_ISSUE,
+    MAX_EXPERT_TURNS_PER_ROUND,
+    MIN_EXPERT_TURNS_PER_ISSUE,
+    MIN_EXPERT_TURNS_PER_ROUND,
     QUESTION_STREAM_FIELDS,
     REVISION_TRIGGER_STANCES,
-    discussion_headers_for,
+    make_canvas_update_node,
 )
 from .ideation_conv_run import (
     finalize_ideation_conversation,
     reply_ideation_conversation,
+    reply_to_interjection,
     start_ideation_conversation,
 )
 from .ideation_conv_state import (
@@ -42,7 +47,9 @@ from .ideation_conv_state import (
     TOPIC_PRIORITY,
     ConvPhase,
     DiscussionRoundRecord,
+    IdeationCancelled,
     IdeationConvState,
+    IssueRecord,
     active_stage_for,
     initial_conv_state,
     remaining_topics_for,
@@ -50,6 +57,15 @@ from .ideation_conv_state import (
 # 용준/Claude(2026-07-21, 요청: 실시간 스트리밍) — 그래프/노드 코드와 완전히 분리된 순수
 # 유틸리티(FastAPI·OpenAI 모두 참조하지 않음). backend의 스트리밍 llm_call이 사용한다.
 from .json_stream import JSONFieldStreamer, decode_partial_json_string
+from .ideation_trace import (
+    bind_trace_context,
+    configure_ideation_trace,
+    is_late_request_event,
+    reset_trace_context,
+    sanitize_preview,
+    stream_delta_trace_enabled,
+    trace_event,
+)
 
 __all__ = [
     "MeetingState",
@@ -82,7 +98,14 @@ __all__ = [
     "initial_conv_state",
     "start_ideation_conversation",
     "reply_ideation_conversation",
+    "reply_to_interjection",
     "finalize_ideation_conversation",
+    "IdeationCancelled",
+    "IssueRecord",
+    "MIN_EXPERT_TURNS_PER_ISSUE",
+    "MAX_EXPERT_TURNS_PER_ISSUE",
+    "MIN_EXPERT_TURNS_PER_ROUND",
+    "MAX_EXPERT_TURNS_PER_ROUND",
     "QUESTION_STREAM_FIELDS",
     "DISCUSSION_STREAM_FIELDS",
     "FACILITATOR_SUMMARY_STREAM_FIELDS",
@@ -91,8 +114,15 @@ __all__ = [
     "DELEGATION_REVIEW_STREAM_FIELDS",
     "DELEGATION_FACILITATOR_STREAM_FIELDS",
     "REVISION_TRIGGER_STANCES",
-    "discussion_headers_for",
+    "make_canvas_update_node",
     "DiscussionRoundRecord",
     "JSONFieldStreamer",
     "decode_partial_json_string",
+    "bind_trace_context",
+    "configure_ideation_trace",
+    "is_late_request_event",
+    "reset_trace_context",
+    "sanitize_preview",
+    "stream_delta_trace_enabled",
+    "trace_event",
 ]

@@ -341,17 +341,35 @@ def build_ideation_conv_discussion_prompt(
     conversation_context: Any,
     speaks_second: bool,
     discussion_stage: str = "initial_position",
+    active_issue_id: str | None = None,
+    open_issues: Any = None,
+    resolved_issues: Any = None,
+    current_speaker: Any = None,
+    responding_to_message: Any = None,
+    evidence_plan_notice: str = "",
     application_form_items: Any = None,
 ) -> str:
-    """기획/개발 전문가의 "보완 의견 턴" 실행 프롬프트를 조립한다. speaks_second=True인
-    쪽(라운드의 두 번째 발언자)만 다음 행동(continue_round/await_user_decision)을
-    판단한다 — "finalize"는 이 스키마에 아예 존재하지 않아, 전문가가 회의를 임의로
-    확정할 수 없다(요청 9~10항).
+    """기획/개발 전문가의 "보완 의견 턴" 실행 프롬프트를 조립한다.
 
-    discussion_stage(용준/Claude(2026-07-21, 요청: 위원 간 실제 회의로 개편)는
-    "initial_position"(최초 의견, 기본값 — 기존 호출부 하위 호환) / "review"(상대 의견을
-    검토) / "revision"(검토를 반영해 수정하거나 유지) 중 하나다. 어느 값이든 스키마는
-    동일하고(호출부가 항상 같은 필드를 읽을 수 있다), 프롬프트 안내문만 달라진다.
+    evidence_plan_notice(용준/Claude(2026-07-23, Phase 2 "Active Evidence Injection"), 기본값
+    빈 문자열): 비어 있으면 <<RETRIEVED_EVIDENCE_JSON>>은 기존과 완전히 동일한 문자열이다
+    (템플릿 자체는 수정하지 않는다 — 플래그가 꺼져 있을 때 프롬프트가 한 글자도 달라지지
+    않아야 한다는 요구사항 때문). 값이 있으면(discussion evidence planner가 active 모드로
+    선정한 근거를 쓸 때만) retrieved_evidence JSON 앞에 안내문으로 붙인다 — 이번 발언이 다룰
+    쟁점과, 선택되지 않은 근거는 이 목록에 없다는 사실을 명시한다.
+
+    용준/Claude(2026-07-22, 요청: 동적 전문가 회의로 개편): discussion_stage는 이제
+    "initial_position"(이번 쟁점에서 처음 말함, responding_to 없어도 됨) / "response"(상대
+    또는 자신의 직전 발언에 실제로 반응함, responding_to 필수) 두 값뿐이다("review"/
+    "revision" 구분은 없앴다 — 라운드 안에서 몇 번째 발언인지가 아니라 "이 쟁점에 대해
+    처음 말하는가/반응하는가"만 따진다). speaks_second는 더 이상 next_action 판단 여부를
+    결정하지 않는다(다음 발언자/라운드 종료는 그래프 라우터가 계산 — ideation_conv_build.py::
+    _route_next_expert_turn) — 하위 호환을 위해 필드와 프롬프트 문구는 유지하되
+    "discussion_stage=='response'와 동일한 신호"로만 취급한다.
+
+    active_issue_id/open_issues/resolved_issues(새 파라미터, 기본값 None — 호출부가 안 넘기면
+    빈 값으로 렌더돼 기존 동작과 동일)는 지금 회의가 쟁점 단위로 어디까지 왔는지 전문가에게
+    알려준다 — 전문가는 이 값을 보고 새 쟁점을 열지, 기존 쟁점을 이어갈지 판단한다.
 
     가은/Claude(2026-07-22, 요청: 신청양식 항목 약한 주입): application_form_items는 순수
     추가 파라미터(기본값 None)다 — [{"field_name","description","char_limit"}] 형태의
@@ -359,14 +377,24 @@ def build_ideation_conv_discussion_prompt(
     [신청양식 참고 규칙] 섹션이 실질적으로 아무 효과가 없다(참고할 항목 자체가 없으므로)."""
     card = get_persona_card(persona_id)
     template = _read_text(IDEATION_CONV_DISCUSSION_TEMPLATE)
+    evidence_text = _as_text(retrieved_evidence)
+    if evidence_plan_notice:
+        evidence_text = f"{evidence_plan_notice}\n\n{evidence_text}"
     replacements = {
         "<<PERSONA_BLOCK>>": render_persona_block(card),
         "<<NOTICE_AND_CRITERIA_JSON>>": _as_text(notice_and_criteria),
         "<<USER_IDEA_JSON>>": _as_text(user_idea),
-        "<<RETRIEVED_EVIDENCE_JSON>>": _as_text(retrieved_evidence),
+        "<<RETRIEVED_EVIDENCE_JSON>>": evidence_text,
         "<<CONVERSATION_CONTEXT_JSON>>": _as_text(conversation_context),
         "<<SPEAKS_SECOND>>": "true" if speaks_second else "false",
         "<<DISCUSSION_STAGE>>": discussion_stage,
+        "<<ACTIVE_ISSUE_ID>>": active_issue_id or "(아직 없음 — 이번 발언에서 새로 엽니다)",
+        "<<OPEN_ISSUES_JSON>>": _as_text(open_issues if open_issues is not None else []),
+        "<<RESOLVED_ISSUES_JSON>>": _as_text(resolved_issues if resolved_issues is not None else []),
+        "<<CURRENT_SPEAKER_JSON>>": _as_text(current_speaker if current_speaker is not None else {}),
+        "<<RESPONDING_TO_MESSAGE_JSON>>": _as_text(
+            responding_to_message if responding_to_message is not None else {}
+        ),
         "<<APPLICATION_FORM_ITEMS_JSON>>": _as_text(application_form_items if application_form_items else None),
     }
     for token, value in replacements.items():
@@ -389,10 +417,7 @@ def build_ideation_conv_canvas_update_prompt(
     unresolved_issues: Any,
     notice_and_criteria: Any,
 ) -> str:
-    """가은/Claude(2026-07-22, 요청: 아이디어 기획 캔버스 자동 갱신 — 경이 협의 완료): 라운드테이블
-    한 라운드가 끝난 직후 캔버스(문제/타깃/해결 방식/차별점/구현 가능성·리스크/심사기준 대응)를
-    이번 라운드 발언으로 갱신하는 프롬프트를 조립한다. 페르소나 카드를 쓰지 않는다 — 이 노드는
-    화면에 보이는 발언을 만들지 않는 기록용 노드이기 때문이다."""
+    """한 라운드의 발언을 바탕으로 아이디어 캔버스 갱신 프롬프트를 조립한다."""
     template = _read_text(IDEATION_CONV_CANVAS_UPDATE_TEMPLATE)
     replacements = {
         "<<CURRENT_CANVAS_JSON>>": _as_text(current_canvas if current_canvas is not None else None),
@@ -420,12 +445,20 @@ def build_ideation_conv_discussion_facilitator_prompt(
     decided_next_action: str,
     round_number: int,
     max_rounds: int,
+    open_issues: Any = None,
+    resolved_issues: Any = None,
+    stop_reason: str | None = None,
 ) -> str:
-    """용준/Claude(2026-07-21, 요청: 위원 간 실제 회의로 개편): 기획/개발 두 전문가의 이번
-    라운드 보완 의견(및 수정 의견)이 끝난 직후, 진행자가 합의·이견을 정리하고 사용자 질문이
-    꼭 필요한지 판단하는 프롬프트를 조립한다. decided_next_action은 이미 dev_expert의 검토
-    턴이 정한 값을 그대로 받는다 — 이 프롬프트가 그 결정 자체를 바꾸지 않는다(요청: 기존
-    라운드 진행/max_rounds 강제 로직 재사용)."""
+    """진행자가 전문가 토론을 정리하고 사용자 질문이 꼭 필요한지 판단하는 프롬프트를
+    조립한다. decided_next_action은 이미 라우터(ideation_conv_build.py::
+    _route_next_expert_turn)가 정한 값을 그대로 받는다 — 이 프롬프트가 그 결정 자체를
+    바꾸지 않는다(요청: 기존 라운드 진행/max_rounds 강제 로직 재사용).
+
+    용준/Claude(2026-07-22, 요청: 동적 전문가 회의로 개편): planning_position/
+    development_review는 더 이상 "이번 라운드 발언"이 아니라 각 전문가의 "가장 최근 발언"
+    스냅샷이다(발언 횟수가 라운드마다 고정이 아니게 됐으므로). open_issues/resolved_issues/
+    stop_reason(모두 새 파라미터, 기본값 None — 호출부가 안 넘기면 기존과 동일하게 렌더)은
+    이 라운드가 왜 끝났는지, 아직 안 끝난 쟁점이 남아있는지를 진행자에게 알려준다."""
     card = get_persona_card("ideation_facilitator")
     template = _read_text(IDEATION_CONV_DISCUSSION_FACILITATOR_TEMPLATE)
     replacements = {
@@ -439,6 +472,9 @@ def build_ideation_conv_discussion_facilitator_prompt(
         "<<DECIDED_NEXT_ACTION>>": decided_next_action,
         "<<ROUND_NUMBER>>": str(round_number),
         "<<MAX_ROUNDS>>": str(max_rounds),
+        "<<OPEN_ISSUES_JSON>>": _as_text(open_issues if open_issues is not None else []),
+        "<<RESOLVED_ISSUES_JSON>>": _as_text(resolved_issues if resolved_issues is not None else []),
+        "<<STOP_REASON>>": stop_reason or "",
     }
     for token, value in replacements.items():
         template = template.replace(token, value)

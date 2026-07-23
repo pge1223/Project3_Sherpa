@@ -35,26 +35,22 @@ NOTICE_AND_CRITERIA = {
 }
 USER_IDEA = {"description": "소상공인이 손님 문의에 자동으로 답하는 챗봇"}
 
-_REMAINING_TOPICS_RE = re.compile(
-    r"\[아직 확인되지 않은 주제\(우선순위 순\) remaining_topics\]\n(.*?)\n\n", re.S
-)
-
-# 가은/Claude(2026-07-22, 요청: 아이디어 기획 캔버스 자동 갱신 — 경이 협의 완료): 매 라운드
-# 끝에 canvas_update 노드가 "[캔버스 갱신 규칙]" 프롬프트로 LLM을 한 번 더 부른다 — 이 파일의
-# 모든 stub이 이 프롬프트를 처리하지 못하면 "예상하지 못한 프롬프트"로 죽으므로 공용 응답을
-# 둔다. 메시지를 만들지 않는 기록용 노드라 기존 테스트의 메시지/phase 기대값에는 영향이 없다.
 CANVAS_STUB_RESPONSE = json.dumps(
     {
-        "problem": "[canvas] 손님 문의 응대 부담",
-        "target_user": "[canvas] 동네 소상공인",
-        "core_value": "[canvas] 응대 시간 절감",
-        "solution": "[canvas] FAQ 자동 응답 챗봇",
-        "differentiation": "[canvas] 저비용 구축",
+        "problem": "손님 문의 응대 부담",
+        "target_user": "동네 소상공인",
+        "core_value": "응대 시간 절감",
+        "solution": "FAQ 자동 응답 챗봇",
+        "differentiation": "저비용 구축",
         "feasibility": "medium",
-        "risks": ["[canvas] 오답 응대 위험"],
-        "contest_fit": "[canvas] 실현가능성·차별성 기준에 대응",
+        "risks": ["오답 응대 위험"],
+        "contest_fit": "실현가능성·차별성 기준에 대응",
     },
     ensure_ascii=False,
+)
+
+_REMAINING_TOPICS_RE = re.compile(
+    r"\[아직 확인되지 않은 주제\(우선순위 순\) remaining_topics\]\n(.*?)\n\n", re.S
 )
 
 
@@ -136,6 +132,7 @@ class ScriptedLLM:
             speaker = "planning_expert" if is_planning else "dev_expert"
             is_revision_stage = "[stage]\nrevision" in prompt
             payload = {
+                "spoken_text": f"[{speaker}] 발화 제안 내용입니다",
                 "proposal": f"[{speaker}] 임시 제안 내용입니다",
                 "reason": f"[{speaker}] 제안 이유입니다",
                 "assumption": f"[{speaker}] 이 방향을 기준으로 진행하겠습니다",
@@ -154,6 +151,7 @@ class ScriptedLLM:
             return json.dumps(
                 {
                     "stance": "보완",
+                    "spoken_text": f"[{reviewer}] 발화 검토 내용입니다",
                     "judgment": f"[{reviewer}] 검토 판단입니다",
                     "reason": f"[{reviewer}] 검토 근거입니다",
                     "responding_to": "상대 전문가의 임시 제안 내용",
@@ -174,6 +172,7 @@ class ScriptedLLM:
                     "agreements": ["제안 방향에 합의"],
                     "considerations": ["추후 세부 사항은 계속 조정 가능"],
                     "final_recommendation": "이 방향으로 진행하겠습니다.",
+                    "spoken_text": "이 방향으로 진행하겠습니다.",
                 },
                 ensure_ascii=False,
             )
@@ -186,6 +185,7 @@ class ScriptedLLM:
             speaker = "planning_expert" if is_planning else "dev_expert"
             return json.dumps(
                 {
+                    "spoken_text": f"[{speaker}] 발화 핵심 질문입니다",
                     "judgment": f"[{speaker}] 현재까지 확인된 내용입니다",
                     "question": f"[{speaker}] 핵심 질문입니다",
                     "question_topic": _topic_from_prompt(prompt),
@@ -196,11 +196,19 @@ class ScriptedLLM:
             )
 
         if "[의견 규칙]" in prompt:
-            next_action = self.dev_next_action if is_dev else None
             speaker = "dev" if is_dev else "planning"
+            # 용준/Claude(2026-07-22, 요청: 동적 전문가 회의로 개편) — dev_next_action은 더
+            # 이상 그래프가 직접 읽지 않지만(다음 라운드 진행은 discussion_facilitator가
+            # stop_reason/open_issues로 결정), 이 stub은 기존 테스트 의도를 최대한 보존하기
+            # 위해 dev_next_action="continue_round"면 쟁점을 아직 해결하지 않은 채(issue_
+            # resolved=False) 진행자에게 넘기고("아직 할 일이 남았다" 신호 — facilitator가
+            # round<max_rounds라면 continue_round로 이어간다), 그 외에는 쟁점을 해결한 채
+            # 넘긴다(진행자가 await_user_decision으로 멈춘다).
+            dev_resolves_issue = self.dev_next_action != "continue_round"
             return json.dumps(
                 {
                     "stance": "보완",
+                    "spoken_text": f"[{speaker}] 발화 핵심 판단입니다",
                     "judgment": f"[{speaker}] 핵심 판단입니다",
                     "reason": f"[{speaker}] 판단 근거입니다",
                     "suggestion": f"[{speaker}] 개선 제안입니다",
@@ -210,7 +218,7 @@ class ScriptedLLM:
                     # 용준/Claude(2026-07-21, 요청: 위원 간 실제 회의로 개편) — review 단계
                     # (is_dev) 검증이 responding_to/agreement 또는 concern 중 하나를 요구하므로
                     # 항상 채워둔다. stance="보완"은 REVISION_TRIGGER_STANCES에 없어
-                    # planning_expert_revision은 실행되지 않는다(기본 stub 흐름 유지).
+                    # 기획 위원의 추가 수정 응답은 필요하지 않다(기본 stub 흐름 유지).
                     "responding_to": "기획 전문가가 방금 말한 핵심 판단" if is_dev else None,
                     "agreement": f"[{speaker}] 동의 지점입니다" if is_dev else "",
                     "concern": "",
@@ -218,7 +226,17 @@ class ScriptedLLM:
                     "unconfirmed": ["결제 연동 필요 여부"],
                     "referenced_message_ids": [],
                     "evidence": [],
-                    "next_action": next_action,
+                    "next_action": None,
+                    "active_issue_id": "mvp_scope",
+                    "active_issue_title": "MVP 범위",
+                    "new_information": [f"[{speaker}] 새로 확인된 내용"],
+                    "proposal": f"[{speaker}] 제안",
+                    "changed_position": False,
+                    "needs_counterpart_response": not is_dev,
+                    "recommended_next_speaker": "ideation_facilitator" if is_dev else "dev_expert",
+                    "issue_resolved": bool(is_dev and dev_resolves_issue),
+                    "needs_user_input": False,
+                    "user_question": None,
                 },
                 ensure_ascii=False,
             )
@@ -233,6 +251,7 @@ class ScriptedLLM:
                     "agreements": [],
                     "disagreements": [],
                     "facilitator_summary": "두 전문가가 이번 라운드 의견을 정리했습니다.",
+                    "spoken_text": "두 위원이 이번 라운드 의견을 정리했습니다.",
                     "needs_user_decision": False,
                     "user_question": None,
                 },
@@ -308,71 +327,16 @@ def test_start_runs_roundtable_immediately_without_interview_question():
     assert dev_prompts, "라운드테이블에서는 사용자 답변을 기다리지 않고 개발 위원도 곧바로 실행돼야 한다"
 
 
-# ---------------------------------------------------------------------------
-# 1-1. 아이디어 기획 캔버스 자동 갱신 — 가은/Claude(2026-07-22, 경이 협의 완료)
-# ---------------------------------------------------------------------------
-
-
-def test_canvas_updated_after_roundtable_round():
-    """매 라운드가 끝나면(discussion_facilitator 직후) canvas_update 노드가
-    state["idea_canvas"]를 갱신한다 — 프론트 IdeaCanvasPanel이 이 값을 우선 사용한다."""
+def test_roundtable_updates_idea_canvas_without_changing_meeting_phase():
+    """진행자 정리 뒤 캔버스가 갱신되고 기존 회의 종료 phase는 그대로 유지된다."""
     llm = ScriptedLLM()
     state = _start(llm)
 
     assert state["phase"] == "awaiting_user_decision"
-    canvas = state.get("idea_canvas")
-    assert canvas is not None
-    assert canvas["problem"] == "[canvas] 손님 문의 응대 부담"
-    assert canvas["target_user"] == "[canvas] 동네 소상공인"
-    assert canvas["feasibility"] == "medium"
-    assert canvas["risks"] == ["[canvas] 오답 응대 위험"]
-    # 캔버스 프롬프트에 이번 라운드 발언(구조화 원문)이 실제로 주입됐는지도 확인한다.
-    canvas_prompts = [p for p in llm.captured_prompts if "[캔버스 갱신 규칙]" in p]
+    assert state["idea_canvas"] == json.loads(CANVAS_STUB_RESPONSE)
+    canvas_prompts = [prompt for prompt in llm.captured_prompts if "[캔버스 갱신 규칙]" in prompt]
     assert len(canvas_prompts) == 1
     assert "[기획 전문가 최초 의견 planning_position]" in canvas_prompts[0]
-
-
-def test_canvas_update_failure_is_non_fatal():
-    """canvas_update는 비치명적이다 — 캔버스 응답이 끝까지 JSON이 아니어도 라운드는 이미
-    성공했으므로 phase가 "failed"로 바뀌면 안 되고, 캔버스만 갱신되지 않은 채 남는다."""
-    base = ScriptedLLM()
-
-    def llm(prompt: str) -> str:
-        if "[캔버스 갱신 규칙]" in prompt:
-            return "이것은 JSON이 아닙니다"
-        return base(prompt)
-
-    state = _start(llm)
-
-    assert state["phase"] == "awaiting_user_decision"
-    assert state["failed_node"] is None
-    assert state.get("idea_canvas") is None
-
-
-def test_canvas_keeps_previous_value_when_later_update_fails():
-    """첫 라운드에서 캔버스가 채워진 뒤, 이후 라운드의 캔버스 갱신이 실패하면 직전 값이
-    그대로 유지돼야 한다(빈 값으로 덮어쓰이면 안 된다)."""
-    base = ScriptedLLM()
-    canvas_calls = {"n": 0}
-
-    def llm(prompt: str) -> str:
-        if "[캔버스 갱신 규칙]" in prompt:
-            canvas_calls["n"] += 1
-            if canvas_calls["n"] > 1:
-                return "이것은 JSON이 아닙니다"  # 두 번째 라운드부터 실패
-            return CANVAS_STUB_RESPONSE
-        return base(prompt)
-
-    state = _start(llm)
-    assert state["idea_canvas"] is not None
-
-    # 사용자가 의견을 남겨 다음 라운드가 실행되게 한다(awaiting_user_decision에서 reply).
-    state = reply_ideation_conversation(
-        previous_state=state, user_message="MVP 범위를 더 좁히고 싶어요", llm_call=llm
-    )
-    assert canvas_calls["n"] >= 2, "두 번째 라운드에서도 캔버스 갱신이 시도돼야 한다"
-    assert state["idea_canvas"] is not None
-    assert state["idea_canvas"]["problem"] == "[canvas] 손님 문의 응대 부담"
 
 
 # ---------------------------------------------------------------------------
@@ -650,8 +614,11 @@ def test_repeated_insufficient_answers_force_progress_after_retry_cap():
 
 
 def test_sufficient_answer_advances_and_opinion_is_structured():
-    """용준/Claude(2026-07-21, 요청: 위원 간 실제 회의로 개편) — 헤더는 이제 역할별로 다르다
-    (discussion_headers_for): 기획 위원은 [기획 관점]/[근거]/[제안]/.../[임시 결론]을 쓴다."""
+    """용준/Claude(2026-07-22, 요청: 보고서형 메시지 → 자연스러운 회의 발화 전환) — 채팅에
+    보이는 content는 이제 spoken_text 그대로이고 보고서형 헤더([기획 관점]/[근거]/[제안]/
+    [임시 결론]/[확정 사항]/[미확정 사항] 등)를 전혀 포함하지 않는다. 그 필드들(judgment/
+    reason/suggestion/interim_conclusion/confirmed/unconfirmed)은 여전히 structured에
+    그대로 저장되어 내부 상태로 쓰인다."""
     llm = ScriptedLLM(dev_next_action="await_user_decision")
     state = _start(llm)
     assert state["phase"] == "awaiting_user_decision"
@@ -659,8 +626,12 @@ def test_sufficient_answer_advances_and_opinion_is_structured():
     planning_opinion = next(
         m for m in state["messages"] if m["speaker_id"] == "planning_expert" and m["message_type"] == "opinion"
     )
-    for header in ("[기획 관점]", "[근거]", "[제안]", "[임시 결론]", "[확정 사항]", "[미확정 사항]"):
-        assert header in planning_opinion["content"]
+    for header in ("[기획 관점]", "[기술 검토]", "[근거]", "[제안]", "[임시 결론]", "[확정 사항]", "[미확정 사항]"):
+        assert header not in planning_opinion["content"]
+    assert planning_opinion["content"] == "[planning] 발화 핵심 판단입니다"
+    for field in ("judgment", "reason", "suggestion", "interim_conclusion", "confirmed", "unconfirmed"):
+        assert field in planning_opinion["structured"]
+        assert planning_opinion["structured"][field] not in (None, "")
 
 
 # ---------------------------------------------------------------------------
@@ -721,6 +692,7 @@ def _llm_with_question_expected_answer_type(expected_answer_type):
         if "[질문 규칙]" in prompt:
             return json.dumps(
                 {
+                    "spoken_text": "발화 핵심 질문입니다",
                     "judgment": "현재까지 확인된 내용입니다",
                     "question": "핵심 질문입니다",
                     "question_topic": _topic_from_prompt(prompt),
@@ -777,6 +749,7 @@ def test_pending_expected_answer_type_resets_after_advancing_to_next_question():
         if "[질문 규칙]" in prompt:
             question_call_count["n"] += 1
             payload = {
+                "spoken_text": "발화 핵심 질문입니다",
                 "judgment": "현재까지 확인된 내용입니다",
                 "question": "핵심 질문입니다",
                 "question_topic": _topic_from_prompt(prompt),
@@ -823,6 +796,7 @@ def _llm_with_sufficiency_response(sufficiency_response: dict):
         if "[질문 규칙]" in prompt:
             return json.dumps(
                 {
+                    "spoken_text": "발화 핵심 질문입니다",
                     "judgment": "현재까지 확인된 내용입니다",
                     "question": "핵심 질문입니다",
                     "question_topic": _topic_from_prompt(prompt),
@@ -866,7 +840,9 @@ def test_clarification_request_message_types_are_handled_without_reasking_raw(cl
     assert state["answer_retry_count"] == 0  # 요청: 설명 요청은 재질문 카운터를 늘리지 않는다.
     assert state["messages"][-1]["speaker_id"] == "planning_expert"
     assert "생활비 절감" in state["messages"][-1]["content"]
-    assert "[설명]" in state["messages"][-1]["content"]
+    # 용준/Claude(2026-07-22, 요청: 보고서형 메시지 → 자연스러운 회의 발화 전환) — [설명]
+    # 헤더는 더 이상 붙지 않는다(clarification_response 자체가 완결된 자연스러운 응답).
+    assert "[설명]" not in state["messages"][-1]["content"]
     dev_prompts = [p for p in llm.captured_prompts if "당신은 AI Review Board의 개발 전문가입니다" in p]
     assert not dev_prompts, "설명 요청 상황에서는 개발 전문가가 호출되면 안 된다"
 
@@ -889,6 +865,7 @@ def test_clarification_request_then_sufficient_answer_advances_normally():
         if "[질문 규칙]" in prompt:
             return json.dumps(
                 {
+                    "spoken_text": "발화 핵심 질문입니다",
                     "judgment": "현재까지 확인된 내용입니다",
                     "question": "핵심 질문입니다",
                     "question_topic": _topic_from_prompt(prompt),
@@ -998,6 +975,7 @@ def test_discussion_node_handles_non_list_confirmed_and_unconfirmed_safely():
             return json.dumps(
                 {
                     "stance": "보완",
+                    "spoken_text": "발화 판단입니다",
                     "judgment": "판단",
                     "reason": "근거",
                     "suggestion": "제안",
@@ -1009,7 +987,17 @@ def test_discussion_node_handles_non_list_confirmed_and_unconfirmed_safely():
                     "unconfirmed": "이것도 배열이 아니라 문자열입니다",
                     "referenced_message_ids": [],
                     "evidence": [],
-                    "next_action": "await_user_decision" if is_dev else None,
+                    "next_action": None,
+                    "active_issue_id": "mvp_scope",
+                    "active_issue_title": "MVP 범위",
+                    "new_information": ["새로 확인된 내용"],
+                    "proposal": "제안",
+                    "changed_position": False,
+                    "needs_counterpart_response": not is_dev,
+                    "recommended_next_speaker": "ideation_facilitator" if is_dev else "dev_expert",
+                    "issue_resolved": bool(is_dev),
+                    "needs_user_input": False,
+                    "user_question": None,
                 },
                 ensure_ascii=False,
             )
@@ -1019,13 +1007,12 @@ def test_discussion_node_handles_non_list_confirmed_and_unconfirmed_safely():
                     "agreements": [],
                     "disagreements": [],
                     "facilitator_summary": "두 전문가가 이번 라운드 의견을 정리했습니다.",
+                    "spoken_text": "두 위원이 이번 라운드 의견을 정리했습니다.",
                     "needs_user_decision": False,
                     "user_question": None,
                 },
                 ensure_ascii=False,
             )
-        if "[캔버스 갱신 규칙]" in prompt:
-            return CANVAS_STUB_RESPONSE
         raise AssertionError(f"예상하지 못한 프롬프트: {prompt[:100]}")
 
     state = _start(llm)
@@ -1033,10 +1020,14 @@ def test_discussion_node_handles_non_list_confirmed_and_unconfirmed_safely():
     assert state["phase"] == "awaiting_user_decision"
     assert state["consensus"] == []
     assert state["unresolved_issues"] == []
+    # 용준/Claude(2026-07-22, 요청: 보고서형 메시지 → 자연스러운 회의 발화 전환) —
+    # confirmed/unconfirmed는 더 이상 content에 [확정 사항]/[미확정 사항] 헤더로 붙지 않고
+    # structured에만 저장된다. 문자열이 잘못된 타입으로 와도(비-배열) 글자 단위로 쪼개져
+    # 오염되지 않고 안전하게 빈 배열로 정규화되는지는 structured로 확인한다.
     for m in state["messages"]:
         if m["message_type"] == "opinion":
-            assert "[확정 사항]\n- (없음)" in m["content"]
-            assert "[미확정 사항]\n- (없음)" in m["content"]
+            assert m["structured"]["confirmed"] == []
+            assert m["structured"]["unconfirmed"] == []
 
 
 def test_node_recovers_when_json_is_wrapped_in_explanatory_prose():
@@ -1048,6 +1039,7 @@ def test_node_recovers_when_json_is_wrapped_in_explanatory_prose():
         if "[질문 규칙]" in prompt:
             payload = json.dumps(
                 {
+                    "spoken_text": "발화 핵심 질문입니다",
                     "judgment": "판단",
                     "question": "핵심 질문",
                     "question_topic": "problem",
@@ -1195,15 +1187,18 @@ def test_expert_delegation_on_planning_question_produces_proposal_and_advances()
     proposal_message = next(
         m for m in state["messages"] if m["speaker_id"] == "planning_expert" and m["message_type"] == "opinion"
     )
-    assert "[기획 전문가 제안]" in proposal_message["content"]
-    assert "[제안 이유]" in proposal_message["content"]
-    assert "[임시 가정]" in proposal_message["content"]
+    # 용준/Claude(2026-07-22, 요청: 보고서형 메시지 → 자연스러운 회의 발화 전환) — content는
+    # 이제 spoken_text + 고정 안내 문구다. proposal/reason/assumption은 structured에서
+    # 확인한다(예전에는 [기획 전문가 제안]/[제안 이유]/[임시 가정] 헤더로 content에 있었다).
+    assert proposal_message["content"].startswith("[planning_expert] 발화 제안 내용입니다")
     assert "다른 방향을 제시하면" in proposal_message["content"]
+    assert proposal_message["structured"]["proposal"] == "[planning_expert] 임시 제안 내용입니다"
+    assert proposal_message["structured"]["reason"] == "[planning_expert] 제안 이유입니다"
     review_message = next(
         m for m in state["messages"] if m["speaker_id"] == "dev_expert" and m["message_type"] == "opinion"
     )
-    assert "[검토]" in review_message["content"]
-    assert "[검토 결론]" in review_message["content"]
+    assert review_message["content"] == "[dev_expert] 발화 검토 내용입니다"
+    assert review_message["structured"]["recommendation"] == "[dev_expert] 이 방향을 채택해도 좋습니다"
     facilitator_message = next(m for m in state["messages"] if m["speaker_id"] == "ideation_facilitator")
     assert facilitator_message["content"].startswith("이 방향으로 진행하겠습니다.")
     assert facilitator_message["message_type"] == "summary"
@@ -1239,7 +1234,7 @@ def test_expert_delegation_on_developer_question_produces_mvp_proposal_and_advan
         m for m in state["messages"] if m["speaker_id"] == "dev_expert" and m["message_type"] == "opinion"
     ]
     assert dev_delegation_messages
-    assert "[개발 전문가 제안]" in dev_delegation_messages[0]["content"]
+    assert dev_delegation_messages[0]["structured"]["proposal"]
     assert state["messages"][-2]["content"] != original_question_content or state["messages"][-1]["content"] != original_question_content
 
 
@@ -1271,7 +1266,7 @@ def test_delegation_phrase_not_deterministically_matched_falls_back_to_llm_class
     assert state["phase"] == "awaiting_user_decision"
     assert state["answer_retry_count"] == 0
     assert any(
-        m["speaker_id"] == "dev_expert" and m["message_type"] == "opinion" and "[개발 전문가 제안]" in m["content"]
+        m["speaker_id"] == "dev_expert" and m["message_type"] == "opinion" and m["structured"].get("proposal")
         for m in state["messages"]
     )
 
@@ -1297,7 +1292,7 @@ def test_mvp_meaning_question_is_clarification_request_not_expert_delegation():
     assert state["phase"] == "awaiting_planning_answer"  # 같은 질문을 여전히 기다린다.
     assert state["pending_question"] == original_pending_question
     assert state["answer_retry_count"] == 0
-    assert "[설명]" in state["messages"][-1]["content"]
+    assert "MVP는 최소 기능 제품" in state["messages"][-1]["content"]
     # sufficiency LLM은 실제로 호출됐다(결정적 규칙이 용어 질문 표지를 보고 위임으로 보지
     # 않았으므로 정상적으로 LLM 판정으로 넘어갔다) — 위임 제안 프롬프트는 호출되지 않았다.
     assert not [p for p in llm.captured_prompts if "[제안 규칙]" in p]
@@ -1314,7 +1309,7 @@ def test_explicit_expert_recommendation_request_triggers_delegation():
 
     assert state["phase"] == "awaiting_developer_answer"
     assert any(
-        m["speaker_id"] == "planning_expert" and m["message_type"] == "opinion" and "[기획 전문가 제안]" in m["content"]
+        m["speaker_id"] == "planning_expert" and m["message_type"] == "opinion" and m["structured"].get("proposal")
         for m in state["messages"]
     )
 
@@ -1383,15 +1378,24 @@ def test_expert_delegation_generation_failure_falls_back_to_failed_phase():
 
 
 class _DebateScriptedLLM:
-    """review 단계(dev_expert)의 stance를 자유롭게 지정할 수 있는 stub — 실제 개발 위원의
-    검토가 기획 위원의 발언을 구체적으로 인용하는지, stance에 따라
-    planning_expert_revision이 켜지고 꺼지는지 검증하기 위함이다."""
+    """용준/Claude(2026-07-22, 요청: 동적 전문가 회의로 개편): review 단계(dev_expert)의
+    stance를 자유롭게 지정할 수 있는 stub — 실제 개발 위원의 검토가 기획 위원의 발언을
+    구체적으로 인용하는지, stance에 따라(REVISION_TRIGGER_STANCES) 기획 위원이 다시
+    응답하는지 검증하기 위함이다. discussion_stage가 "initial_position"/"response" 두
+    값뿐이라 몇 번째 발언인지는 페르소나별 호출 횟수로 추적한다."""
 
     def __init__(self, dev_stance="보완", dev_next_action="await_user_decision", revision_concern="개발 관점 우려"):
         self.captured_prompts: list[str] = []
         self.dev_stance = dev_stance
         self.dev_next_action = dev_next_action
         self.revision_concern = revision_concern
+        self._planning_calls = 0
+        self._dev_calls = 0
+        # 용준/Claude(2026-07-22, 요청: 동적 전문가 회의로 개편) — 여러 라운드에 걸쳐 이
+        # stub이 재사용될 수 있으므로(예: continue_round 시나리오), "이번 기획 발언이
+        # 수정(revision) 응답이어야 하는가"는 누적 호출 횟수가 아니라 "직전 개발 위원 발언이
+        # 수정을 요구했는가" 플래그로 판단한다.
+        self._awaiting_revision = False
 
     def __call__(self, prompt: str) -> str:
         self.captured_prompts.append(prompt)
@@ -1404,6 +1408,7 @@ class _DebateScriptedLLM:
             speaker = "planning_expert" if is_planning else "dev_expert"
             return json.dumps(
                 {
+                    "spoken_text": f"[{speaker}] 발화 질문",
                     "judgment": f"[{speaker}] 판단",
                     "question": f"[{speaker}] 질문",
                     "question_topic": _topic_from_prompt(prompt),
@@ -1415,11 +1420,55 @@ class _DebateScriptedLLM:
 
         if "[의견 규칙]" in prompt:
             is_dev = "당신은 AI Review Board의 개발 전문가입니다" in prompt
-            if "[discussion_stage]\nrevision" in prompt:
-                # planning_expert_revision — dev의 concern에 구체적으로 응답한다.
+            needs_revision = self.dev_stance in {"반박", "조건부_동의", "대안_제시"}
+
+            if is_dev:
+                self._dev_calls += 1
+                # review — 방금 나온 기획 전문가의 최초 의견을 구체적으로 검토한다.
+                # needs_revision이면 기획 위원이 다시 응답해야 하므로 아직 쟁점을 닫지
+                # 않는다(recommended_next_speaker="planning_expert"). 그렇지 않으면 진행자로
+                # 넘기되, dev_next_action="continue_round"면 쟁점을 아직 해결하지 않은 채
+                # 넘겨 facilitator가 다음 라운드로 자동 진행하게 한다(기존 테스트 의도 보존).
+                dev_resolves_issue = not needs_revision and self.dev_next_action != "continue_round"
+                self._awaiting_revision = needs_revision
+                return json.dumps(
+                    {
+                        "stance": self.dev_stance,
+                        "spoken_text": f"발화: {self.revision_concern}",
+                        "judgment": "기획 방향에는 동의하지만 범위가 큽니다",
+                        "reason": "업무 자동화 전체를 MVP에 넣으면 남은 라운드 안에 검증하기 어렵습니다",
+                        "suggestion": "문서 요약과 학습 추천부터 검증하는 편이 현실적입니다",
+                        "interim_conclusion": "문서 요약부터 검증하는 방향으로 잠정 결론짓습니다",
+                        "responding_to": self.revision_concern,
+                        "agreement": "문제 정의 자체에는 동의합니다",
+                        "concern": self.revision_concern,
+                        "confirmed": [],
+                        "unconfirmed": [],
+                        "referenced_message_ids": [],
+                        "evidence": [],
+                        "next_action": None,
+                        "active_issue_id": "mvp_scope",
+                        "active_issue_title": "MVP 범위",
+                        "new_information": [self.revision_concern],
+                        "proposal": "문서 요약과 학습 추천부터 검증",
+                        "changed_position": False,
+                        "needs_counterpart_response": needs_revision,
+                        "recommended_next_speaker": "planning_expert" if needs_revision else "ideation_facilitator",
+                        "issue_resolved": dev_resolves_issue,
+                        "needs_user_input": False,
+                        "user_question": None,
+                    },
+                    ensure_ascii=False,
+                )
+
+            self._planning_calls += 1
+            if self._awaiting_revision:
+                self._awaiting_revision = False
+                # 직전 dev 발언이 수정을 요구했다 — dev의 concern에 구체적으로 응답(수정)한다.
                 return json.dumps(
                     {
                         "stance": "조건부_동의",
+                        "spoken_text": f"발화: '{self.revision_concern}'을 반영해 범위를 문서 요약 하나로 좁혔습니다",
                         "judgment": "기획 전문가가 개발 전문가의 우려를 반영해 범위를 조정합니다",
                         "reason": "MVP 범위를 좁히면 남은 라운드 안에 검증할 수 있습니다",
                         "suggestion": "핵심 기능 하나만 우선 구현합니다",
@@ -1433,26 +1482,16 @@ class _DebateScriptedLLM:
                         "referenced_message_ids": [],
                         "evidence": [],
                         "next_action": None,
-                    },
-                    ensure_ascii=False,
-                )
-            if is_dev:
-                # review — 방금 나온 기획 전문가의 최초 의견을 구체적으로 검토한다.
-                return json.dumps(
-                    {
-                        "stance": self.dev_stance,
-                        "judgment": "기획 방향에는 동의하지만 범위가 큽니다",
-                        "reason": "업무 자동화 전체를 MVP에 넣으면 남은 라운드 안에 검증하기 어렵습니다",
-                        "suggestion": "문서 요약과 학습 추천부터 검증하는 편이 현실적입니다",
-                        "interim_conclusion": "문서 요약부터 검증하는 방향으로 잠정 결론짓습니다",
-                        "responding_to": self.revision_concern,
-                        "agreement": "문제 정의 자체에는 동의합니다",
-                        "concern": self.revision_concern,
-                        "confirmed": [],
-                        "unconfirmed": [],
-                        "referenced_message_ids": [],
-                        "evidence": [],
-                        "next_action": self.dev_next_action,
+                        "active_issue_id": "mvp_scope",
+                        "active_issue_title": "MVP 범위",
+                        "new_information": [f"'{self.revision_concern}'을 반영해 범위를 문서 요약 하나로 좁힘"],
+                        "proposal": "문서 요약 하나로 범위를 좁힌 MVP",
+                        "changed_position": True,
+                        "needs_counterpart_response": False,
+                        "recommended_next_speaker": "ideation_facilitator",
+                        "issue_resolved": True,
+                        "needs_user_input": False,
+                        "user_question": None,
                     },
                     ensure_ascii=False,
                 )
@@ -1460,6 +1499,7 @@ class _DebateScriptedLLM:
             return json.dumps(
                 {
                     "stance": "보완",
+                    "spoken_text": "발화: 업무 자동화 전체를 MVP 범위로 제안합니다",
                     "judgment": "두 후보를 결합하면 업무 자동화 과정의 부족한 역량을 학습으로 연결하는 서비스가 됩니다",
                     "reason": "사용자 답변에서 반복 업무 부담이 확인됐습니다",
                     "suggestion": "업무 자동화 전체를 MVP 범위로 제안합니다",
@@ -1472,6 +1512,16 @@ class _DebateScriptedLLM:
                     "referenced_message_ids": [],
                     "evidence": [],
                     "next_action": None,
+                    "active_issue_id": "mvp_scope",
+                    "active_issue_title": "MVP 범위",
+                    "new_information": ["업무 자동화 전체를 MVP 범위로 제안"],
+                    "proposal": "업무 자동화 전체를 MVP 범위로 제안",
+                    "changed_position": False,
+                    "needs_counterpart_response": True,
+                    "recommended_next_speaker": "dev_expert",
+                    "issue_resolved": False,
+                    "needs_user_input": False,
+                    "user_question": None,
                 },
                 ensure_ascii=False,
             )
@@ -1482,14 +1532,12 @@ class _DebateScriptedLLM:
                     "agreements": ["문서 업무 분석에서 시작한다"],
                     "disagreements": [],
                     "facilitator_summary": "기획 위원과 개발 위원이 문서 업무 분석부터 시작하는 방향에 합의했습니다.",
+                    "spoken_text": "두 위원이 문서 업무 분석부터 시작하는 방향에 합의했습니다.",
                     "needs_user_decision": False,
                     "user_question": None,
                 },
                 ensure_ascii=False,
             )
-
-        if "[캔버스 갱신 규칙]" in prompt:
-            return CANVAS_STUB_RESPONSE
 
         raise AssertionError(f"예상하지 못한 프롬프트입니다: {prompt[:200]}")
 
@@ -1536,12 +1584,15 @@ def test_planning_revision_runs_when_dev_stance_needs_response_and_references_co
     revision_message = state["messages"][-2]
     assert revision_message["speaker_id"] == "planning_expert"
     assert "MVP 범위가 너무 큽니다" in revision_message["content"]
-    assert "[수정 내용]" in revision_message["content"]
+    assert revision_message["structured"]["revision"]
 
     assert state["discussion_rounds"], "discussion_rounds가 비어 있으면 안 된다"
     record = state["discussion_rounds"][-1]
-    assert record["revised_proposal"] is not None
-    assert "MVP 범위가 너무 큽니다" in record["revised_proposal"]
+    # 용준/Claude(2026-07-22, 요청: 동적 전문가 회의로 개편) — revised_proposal은 더 이상
+    # 별도로 추적하지 않는다(발언 횟수가 라운드마다 고정이 아니게 됐으므로). planning_position이
+    # "기획 위원의 가장 최근 발언"이라 수정 발언 내용이 여기에 담긴다.
+    assert record["revised_proposal"] is None
+    assert "MVP 범위가 너무 큽니다" in record["planning_position"]
 
 
 def test_planning_revision_skipped_when_dev_simply_agrees():
@@ -1553,8 +1604,10 @@ def test_planning_revision_skipped_when_dev_simply_agrees():
 
     speakers = [m["speaker_id"] for m in state["messages"]]
     assert speakers[-3:] == ["planning_expert", "dev_expert", "ideation_facilitator"]
-    revision_prompts = [p for p in llm.captured_prompts if "[discussion_stage]\nrevision" in p]
-    assert not revision_prompts, "동의 stance에서는 revision LLM 호출 자체가 없어야 한다"
+    # 용준/Claude(2026-07-22, 요청: 동적 전문가 회의로 개편) — discussion_stage에 "revision"이
+    # 라는 별도 값은 더 이상 없다(review/revision을 "response"로 통합). 대신 기획 위원이
+    # 두 번째로 불렸는지(=수정 발언을 했는지)로 직접 검증한다.
+    assert llm._planning_calls == 1, "동의 stance에서는 기획 위원의 두 번째(수정) 발언 자체가 없어야 한다"
 
 
 def test_facilitator_message_always_present_and_summarizes_not_repeats():
@@ -1571,9 +1624,11 @@ def test_facilitator_message_always_present_and_summarizes_not_repeats():
     # 기획/개발 위원의 원문 그대로가 아니라 진행자 고유의 요약 문장이어야 한다.
     assert "두 후보를 결합하면 업무 자동화" not in summary["content"]
 
-    # 용준/Claude(2026-07-21, 요청: 전문가 라운드테이블 전환) — 진행자 메시지 형식이
-    # "[다음 질문]"에서 "[합의 사항]"으로 바뀌었다.
-    assert state["discussion_rounds"][-1]["facilitator_summary"] == summary["content"].split("\n\n[합의 사항]")[0]
+    # 용준/Claude(2026-07-22, 요청: 보고서형 메시지 → 자연스러운 회의 발화 전환) — content는
+    # 이제 spoken_text(1~2문장의 채팅용 정리)이고, discussion_rounds 아카이브는 여전히
+    # facilitator_summary(3~5문장 상세 요약, raw.get("facilitator_summary")) 원문을 그대로
+    # 저장한다 — 이 둘은 서로 다른 문장이므로 structured에서 원문을 직접 비교한다.
+    assert state["discussion_rounds"][-1]["facilitator_summary"] == summary["structured"]["facilitator_summary"]
 
 
 def test_facilitator_does_not_change_phase_decided_by_dev_review():
@@ -1642,6 +1697,7 @@ class _NeedsDecisionScriptedLLM(_DebateScriptedLLM):
                     "agreements": [],
                     "disagreements": ["MVP 범위를 어디까지 좁힐지"],
                     "facilitator_summary": "MVP 범위에 대해 두 위원의 의견이 갈립니다.",
+                    "spoken_text": "MVP를 문서 요약만으로 시작할까요, 업무 자동화까지 포함할까요?",
                     "needs_user_decision": True,
                     "user_question": "MVP를 문서 요약만으로 시작할까요, 업무 자동화까지 포함할까요?",
                 },
@@ -1657,7 +1713,11 @@ def test_facilitator_sets_pending_question_when_needs_user_decision():
     assert state["phase"] == "awaiting_user_decision"
     assert state["pending_question"] == "MVP를 문서 요약만으로 시작할까요, 업무 자동화까지 포함할까요?"
     assert state["pending_question_topic"] == "facilitator_decision"
-    assert "[사용자 의견이 필요한 사항]" in state["messages"][-1]["content"]
+    # 용준/Claude(2026-07-22, 요청: 보고서형 메시지 → 자연스러운 회의 발화 전환) — 예전에는
+    # [사용자 의견이 필요한 사항] 헤더로 user_question이 content에 붙었지만, 이제
+    # needs_user_decision=true일 때 spoken_text 자체가 질문을 자연스럽게 담는다.
+    assert "MVP를 문서 요약만으로 시작할까요" in state["messages"][-1]["content"]
+    assert state["messages"][-1]["structured"]["user_question"] == state["pending_question"]
 
 
 def test_user_answer_to_facilitator_question_is_answer_type():
@@ -1781,6 +1841,30 @@ def test_dev_expert_receives_own_role_specific_rag_retrieval():
     assert "dev_expert" in personas_called, "개발 위원도 자신의 role로 RAG 검색을 별도로 호출해야 한다"
 
 
+def test_discussion_message_evidence_reflects_rag_retrieval_not_llm_self_report():
+    """용준/Claude(2026-07-22, RAG 근거 유실 수정 회귀 테스트): _DebateScriptedLLM은 항상
+    "evidence": []를 반환한다(LLM이 evidence 필드를 스스로 채우지 않는 실제 상황과 동일) —
+    그런데도 실제로 RoleAwareRetrievalService가 찾아 프롬프트에 주입한 근거(retrieved)가
+    있었다면, 저장된 ConvMessage.evidence와 로그의 injected_evidence_count는 그 근거를
+    반영해야 한다. 예전 코드는 raw.get("evidence")만 저장해 여기서 항상 0건으로 유실됐다."""
+    calls: list[tuple[str, str]] = []
+    lookup = _role_tagged_evidence_lookup(calls)
+    llm = _DebateScriptedLLM(dev_stance="보완")
+
+    state = start_ideation_conversation(
+        session_id="CONV-RAG-EVIDENCE-LOSS",
+        notice_and_criteria=NOTICE_AND_CRITERIA,
+        user_idea=USER_IDEA,
+        llm_call=llm,
+        evidence_lookup=lookup,
+    )
+
+    planning_message = next(m for m in state["messages"] if m["speaker_id"] == "planning_expert" and m["message_type"] != "question")
+    assert planning_message["evidence"], "RAG 검색 결과가 있었으므로 메시지 evidence가 비어있으면 안 된다"
+    assert planning_message["evidence"][0]["chunk_id"] == "C1"
+    assert planning_message["evidence"][0]["document_id"] == "DOC-planning_expert"
+
+
 def test_dev_review_prompt_can_see_planning_evidence_via_conversation_context():
     """기획 위원이 실제로 인용한 RAG 근거(quote)가, 개발 위원의 검토 프롬프트
     conversation_context(상대 발언 전체)에 그대로 실려 전달되는지 확인한다 — 개발 위원이
@@ -1799,7 +1883,8 @@ def test_dev_review_prompt_can_see_planning_evidence_via_conversation_context():
     )
 
     dev_review_prompts = [
-        p for p in llm.captured_prompts if "[의견 규칙]" in p and "[discussion_stage]\nreview" in p
+        p for p in llm.captured_prompts if "[의견 규칙]" in p and "당신은 AI Review Board의 개발 전문가입니다" in p
+        and "[discussion_stage]\nresponse" in p
     ]
     assert dev_review_prompts
     dev_prompt = dev_review_prompts[-1]
@@ -1832,6 +1917,17 @@ def test_facilitator_and_discussion_prompts_instruct_against_fabricating_evidenc
 
     discussion_prompt_path = MEETING_DIR / "prompts" / "ideation_conv_discussion.txt"
     assert "근거 없는 사실" in discussion_prompt_path.read_text(encoding="utf-8")
+
+
+def test_facilitator_prompt_instructs_not_to_summarize_expert_judgment_only_as_agreement():
+    """용준/Claude(2026-07-22, 요청: linked_evidence_count=0인 의견을 문서로 확인된 합의처럼
+    요약하지 않도록 수정) — evidence_status="expert_judgment_only"인 발언을 진행자가
+    "합의했습니다"로만 요약하지 않고, 문서 근거가 없다는 사실을 함께 밝히도록 지시하는지
+    구조적으로 확인한다."""
+    facilitator_prompt_path = MEETING_DIR / "prompts" / "ideation_conv_discussion_facilitator.txt"
+    text = facilitator_prompt_path.read_text(encoding="utf-8")
+    assert "expert_judgment_only" in text
+    assert "합의했습니다" in text and "반복하지 않습니다" in text
 
 
 def test_no_evidence_available_produces_empty_evidence_section_without_crashing():
@@ -1875,6 +1971,7 @@ def _delegation_scripted_llm(review_stance: str):
         if "[질문 규칙]" in prompt:
             return json.dumps(
                 {
+                    "spoken_text": f"[{speaker}] 발화 질문",
                     "judgment": f"[{speaker}] 판단",
                     "question": f"[{speaker}] 질문",
                     "question_topic": _topic_from_prompt(prompt),
@@ -1892,6 +1989,7 @@ def _delegation_scripted_llm(review_stance: str):
             is_revision_stage = "[stage]\nrevision" in prompt
             return json.dumps(
                 {
+                    "spoken_text": f"[{speaker}] 발화 제안",
                     "proposal": f"[{speaker}] 제안",
                     "reason": f"[{speaker}] 이유",
                     "assumption": f"[{speaker}] 가정",
@@ -1906,6 +2004,7 @@ def _delegation_scripted_llm(review_stance: str):
             return json.dumps(
                 {
                     "stance": review_stance,
+                    "spoken_text": f"[{speaker}] 발화 검토",
                     "judgment": f"[{speaker}] 검토 판단",
                     "reason": f"[{speaker}] 검토 근거",
                     "responding_to": "상대의 임시 제안 내용",
@@ -1919,7 +2018,12 @@ def _delegation_scripted_llm(review_stance: str):
             )
         if "[위임 정리 규칙]" in prompt:
             return json.dumps(
-                {"agreements": [], "considerations": [], "final_recommendation": "위임 최종 권고안입니다."},
+                {
+                    "agreements": [],
+                    "considerations": [],
+                    "final_recommendation": "위임 최종 권고안입니다.",
+                    "spoken_text": "위임 최종 권고안입니다.",
+                },
                 ensure_ascii=False,
             )
         if "[의견 규칙]" in prompt:
@@ -1927,22 +2031,33 @@ def _delegation_scripted_llm(review_stance: str):
             # expert_discussion으로 넘어가 같은 요청 안에서 실제 회의(기획/개발 보완 의견)까지
             # 이어진다 — 이 테스트들은 위임 흐름 자체만 검증하므로 discussion 응답은 항상
             # "보완"으로 단순하게 고정한다.
-            is_review_stage = "[discussion_stage]\nreview" in prompt
+            is_response_stage = "[discussion_stage]\nresponse" in prompt
             return json.dumps(
                 {
                     "stance": "보완",
+                    "spoken_text": f"[{speaker}] 발화 판단",
                     "judgment": f"[{speaker}] 판단",
                     "reason": f"[{speaker}] 근거",
                     "suggestion": f"[{speaker}] 제안",
                     "interim_conclusion": f"[{speaker}] 임시 결론",
-                    "responding_to": "상대 발언" if is_review_stage else None,
-                    "agreement": "동의 지점" if is_review_stage else "",
+                    "responding_to": "상대 발언" if is_response_stage else None,
+                    "agreement": "동의 지점" if is_response_stage else "",
                     "concern": "",
                     "confirmed": [],
                     "unconfirmed": [],
                     "referenced_message_ids": [],
                     "evidence": [],
-                    "next_action": "await_user_decision" if is_review_stage else None,
+                    "next_action": None,
+                    "active_issue_id": "delegation_followup",
+                    "active_issue_title": "위임 이후 후속 논의",
+                    "new_information": [f"[{speaker}] 새로운 판단"],
+                    "proposal": f"[{speaker}] 제안",
+                    "changed_position": False,
+                    "needs_counterpart_response": not is_response_stage,
+                    "recommended_next_speaker": "ideation_facilitator" if is_response_stage else "dev_expert",
+                    "issue_resolved": is_response_stage,
+                    "needs_user_input": False,
+                    "user_question": None,
                 },
                 ensure_ascii=False,
             )
@@ -1952,13 +2067,12 @@ def _delegation_scripted_llm(review_stance: str):
                     "agreements": [],
                     "disagreements": [],
                     "facilitator_summary": "라운드 정리",
+                    "spoken_text": "라운드 정리",
                     "needs_user_decision": False,
                     "user_question": None,
                 },
                 ensure_ascii=False,
             )
-        if "[캔버스 갱신 규칙]" in prompt:
-            return CANVAS_STUB_RESPONSE
         raise AssertionError(f"예상하지 못한 프롬프트: {prompt[:150]}")
 
     return llm_call
@@ -1975,11 +2089,13 @@ def test_delegation_revision_runs_when_counterpart_review_disagrees():
 
     state = reply_ideation_conversation(previous_state=state, user_message="잘 모르겠어요", llm_call=llm)
 
-    dev_messages = [m for m in state["messages"] if m["speaker_id"] == "dev_expert" and "[개발 전문가 제안]" in m["content"]]
+    # 용준/Claude(2026-07-22, 요청: 동적 전문가 회의로 개편) — discussion 노드의 structured도
+    # 이제 "proposal" 키를 갖게 되어 위임(expert_delegation) 메시지와 구분이 안 되므로,
+    # 위임 메시지에만 있는 "assumption" 키로 좁힌다.
+    dev_messages = [m for m in state["messages"] if m["speaker_id"] == "dev_expert" and "assumption" in (m["structured"] or {})]
     assert len(dev_messages) == 2, "제안(1회) + 검토를 반영한 수정(1회) = 2건이어야 한다"
     revision_message = dev_messages[-1]
-    assert "구현 범위가 너무 넓습니다" in revision_message["content"]
-    assert "[수정 내용]" in revision_message["content"]
+    assert "구현 범위가 너무 넓습니다" in revision_message["structured"]["revision"]
     facilitator_message = next(m for m in state["messages"] if m["speaker_id"] == "ideation_facilitator")
     assert facilitator_message["content"].startswith("위임 최종 권고안입니다.")
 
@@ -1992,7 +2108,10 @@ def test_delegation_revision_skipped_when_counterpart_review_simply_agrees():
     state = reply_ideation_conversation(previous_state=state, user_message="답변1", llm_call=llm)
     state = reply_ideation_conversation(previous_state=state, user_message="잘 모르겠어요", llm_call=llm)
 
-    dev_messages = [m for m in state["messages"] if m["speaker_id"] == "dev_expert" and "[개발 전문가 제안]" in m["content"]]
+    # 용준/Claude(2026-07-22, 요청: 동적 전문가 회의로 개편) — discussion 노드의 structured도
+    # 이제 "proposal" 키를 갖게 되어 위임(expert_delegation) 메시지와 구분이 안 되므로,
+    # 위임 메시지에만 있는 "assumption" 키로 좁힌다.
+    dev_messages = [m for m in state["messages"] if m["speaker_id"] == "dev_expert" and "assumption" in (m["structured"] or {})]
     assert len(dev_messages) == 1, "동의면 제안(1회)만 있고 수정 턴이 추가되면 안 된다"
     facilitator_message = next(m for m in state["messages"] if m["speaker_id"] == "ideation_facilitator")
     assert facilitator_message["content"].startswith("위임 최종 권고안입니다.")
@@ -2013,6 +2132,36 @@ def test_delegation_never_re_asks_the_same_question_to_user():
     # 진행자 최종 권고안 스키마 자체에 재질문 필드가 없으므로, 원래 질문 문자열이 그대로
     # 반복될 수 없다.
     assert original_question not in facilitator_message["content"]
+
+
+# ---------------------------------------------------------------------------
+# 21. 보고서형 메시지 → 자연스러운 회의 발화 전환(요청 2026-07-22) — 회의 전체(라운드테이블
+#     한 라운드 + 사용자 개입으로 다음 라운드까지)에서 어떤 메시지의 content에도 예전
+#     보고서형 대괄호 헤더가 남아있지 않은지 한 번에 스윕 검증한다.
+# ---------------------------------------------------------------------------
+
+_LEGACY_REPORT_HEADERS = (
+    "[기획 관점]", "[기술 검토]", "[상대 의견 검토]", "[동의]", "[동의하는 부분]",
+    "[우려·제약]", "[우려/제약]", "[구현 대안]", "[임시 결론]", "[확정 사항]", "[미확정 사항]",
+    "[현재 판단]", "[핵심 질문]", "[사용자 선택 반영]", "[합의 사항]", "[남은 쟁점]",
+    "[사용자 의견이 필요한 사항]", "[재질문]", "[설명]", "[제안 이유]", "[임시 가정]",
+    "[검토]", "[검토 결론]", "[제안 검토]", "[상대 검토 반영]", "[수정 내용]", "[참고 사항]",
+)
+
+
+def test_no_legacy_report_headers_leak_into_any_message_content_across_round_and_interjection():
+    llm = _DebateScriptedLLM(dev_stance="반박", revision_concern="MVP 범위가 너무 큽니다")
+    state = _run_to_discussion(llm, max_rounds=3)
+    state = reply_ideation_conversation(
+        previous_state=state, user_message="대학생도 포함하고 싶어요.", llm_call=llm
+    )
+
+    for message in state["messages"]:
+        for header in _LEGACY_REPORT_HEADERS:
+            assert header not in message["content"], (
+                f"{message['speaker_id']}의 content에 보고서형 헤더 {header!r}가 남아있습니다: "
+                f"{message['content']!r}"
+            )
 
 
 if __name__ == "__main__":

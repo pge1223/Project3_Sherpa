@@ -38,10 +38,24 @@ function defaultProfile() {
   }
 }
 
+// 경이/Claude(2026-07-22, 가은님 위임): null-safe 병합. 저장된 레코드에 degree/
+// graduation_status가 null로 들어있으면 기존 `{...default, ...remote}` 스프레드가 default를
+// null로 덮어써서(state.degree=null) 다음 저장 때 null을 재전송하는 악순환이 있었다(윤한님과
+// Network 확인 결과 백엔드는 정상, 프론트가 null을 보내던 것). null/undefined 값은 무시하고
+// default를 유지하도록 필드별로 병합한다.
+function mergeSection(base, over) {
+  const merged = { ...base }
+  for (const key of Object.keys(over || {})) {
+    if (over[key] !== null && over[key] !== undefined) merged[key] = over[key]
+  }
+  return merged
+}
+
 function mergeProfile(remote) {
+  const base = defaultProfile()
   return {
-    education: { ...defaultProfile().education, ...remote?.education },
-    experience: { ...defaultProfile().experience, ...remote?.experience },
+    education: mergeSection(base.education, remote?.education),
+    experience: mergeSection(base.experience, remote?.experience),
   }
 }
 
@@ -189,8 +203,13 @@ export default function MyPage() {
 
   const experienceSummary =
     `인턴 ${profile.experience.internship_months}개월 · 공모전 참여 ${profile.experience.competition_count}회 · 수상 ${profile.experience.award_count}회`
+  // 경이/Claude(2026-07-22, 가은님 위임): degree/graduation_status가 null로 올 때
+  // DEGREE_LABEL[null]=undefined라 "undefined undefined"가 뜨던 표시 버그 방어.
+  // (근본 원인인 백엔드 degree 저장 누락은 윤한님이 별도 수정 예정 — 여기선 표시만 방어)
+  const degreeLabel = DEGREE_LABEL[profile.education.degree] ?? '학위 미입력'
+  const gradLabel = GRADUATION_LABEL[profile.education.graduation_status] ?? ''
   const educationSummary =
-    `${DEGREE_LABEL[profile.education.degree]} ${GRADUATION_LABEL[profile.education.graduation_status]} · ${profile.education.is_technical_major ? '전공' : '비전공'}`
+    `${degreeLabel}${gradLabel ? ' ' + gradLabel : ''} · ${profile.education.is_technical_major ? '전공' : '비전공'}`
 
   return (
     <div style={styles.page}>

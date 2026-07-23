@@ -107,6 +107,19 @@ class TestBasicFieldConversion:
         items = to_retrieved_evidence(response, persona_id="finance")
         assert items[0]["location_type"] == "page"
 
+    def test_document_role_preserved(self):
+        """용준/Claude(2026-07-22, 요청: 역할별 검색 데이터 구성) — 색인 시점의
+        IndexingContext.document_role("criteria"/"target")이 그대로 노출돼야
+        ideation_evidence_service._compose_by_document_role이 역할별 쿼터를 계산할 수 있다."""
+        response = _response([_result(metadata={"document_role": "criteria"})])
+        items = to_retrieved_evidence(response, persona_id="finance")
+        assert items[0]["document_role"] == "criteria"
+
+    def test_document_role_missing_is_none(self):
+        response = _response([_result(metadata={})])
+        items = to_retrieved_evidence(response, persona_id="finance")
+        assert items[0]["document_role"] is None
+
 
 class TestScoreConversion:
     # RoleSearchResult.final_score는 필수 필드(float, None 불가)라 이 입력 경로에서는

@@ -62,6 +62,7 @@ def _llm_fixed_topic_and_sufficiency(question_topic: str, sufficiency_response: 
         if "[질문 규칙]" in prompt:
             return json.dumps(
                 {
+                    "spoken_text": "발화 핵심 질문입니다",
                     "judgment": "판단",
                     "question": "질문",
                     "question_topic": question_topic,
@@ -86,6 +87,7 @@ def test_question_node_stores_question_topic_in_returned_update():
     def llm_call(prompt: str) -> str:
         return json.dumps(
             {
+                "spoken_text": "발화 핵심 질문입니다",
                 "judgment": "판단",
                 "question": "질문",
                 "question_topic": "problem",
@@ -172,6 +174,7 @@ def test_resolved_topics_unchanged_when_forced_through_retry_cap():
         if "[질문 규칙]" in prompt:
             return json.dumps(
                 {
+                    "spoken_text": "발화 핵심 질문입니다",
                     "judgment": "판단",
                     "question": "질문",
                     "question_topic": "problem",
@@ -229,7 +232,14 @@ def test_pending_question_topic_replaced_by_new_question():
             question_call_count["n"] += 1
             topic = "problem" if question_call_count["n"] == 1 else "target_user"
             return json.dumps(
-                {"judgment": "판단", "question": "질문", "question_topic": topic, "referenced_message_ids": [], "evidence": []},
+                {
+                    "spoken_text": "발화 핵심 질문입니다",
+                    "judgment": "판단",
+                    "question": "질문",
+                    "question_topic": topic,
+                    "referenced_message_ids": [],
+                    "evidence": [],
+                },
                 ensure_ascii=False,
             )
         if "[판정 규칙]" in prompt:
@@ -280,7 +290,14 @@ def test_roadmap_question_allowed_when_prerequisites_met():
 
     def llm_call(prompt: str) -> str:
         return json.dumps(
-            {"judgment": "판단", "question": "로드맵 질문", "question_topic": "roadmap", "referenced_message_ids": [], "evidence": []},
+            {
+                "spoken_text": "발화 로드맵 질문입니다",
+                "judgment": "판단",
+                "question": "로드맵 질문",
+                "question_topic": "roadmap",
+                "referenced_message_ids": [],
+                "evidence": [],
+            },
             ensure_ascii=False,
         )
 
@@ -346,6 +363,7 @@ def test_invalid_question_topic_value_is_rejected():
 def test_discussion_node_retries_then_fails_when_confirmed_exceeds_limit():
     payload = {
         "stance": "보완",
+        "spoken_text": "발화 판단입니다",
         "judgment": "판단",
         "reason": "근거",
         "suggestion": "제안",
@@ -362,7 +380,7 @@ def test_discussion_node_retries_then_fails_when_confirmed_exceeds_limit():
         call_count["n"] += 1
         return json.dumps(payload, ensure_ascii=False)
 
-    node = make_conv_discussion_node("planning_expert", speaks_second=False, llm_call=llm_call)
+    node = make_conv_discussion_node("planning_expert", llm_call=llm_call)
     update = node(_base_state())
     assert update["phase"] == "failed"
     assert call_count["n"] == 2
@@ -394,7 +412,7 @@ def test_discussion_node_retries_then_fails_when_judgment_too_long():
         call_count["n"] += 1
         return json.dumps(payload, ensure_ascii=False)
 
-    node = make_conv_discussion_node("dev_expert", speaks_second=True, llm_call=llm_call)
+    node = make_conv_discussion_node("dev_expert", llm_call=llm_call)
     update = node(_base_state())
     assert update["phase"] == "failed"
     assert call_count["n"] == 2
@@ -406,6 +424,7 @@ def test_discussion_node_retries_then_fails_when_judgment_too_long():
 def test_discussion_node_succeeds_when_within_length_limits():
     payload = {
         "stance": "보완",
+        "spoken_text": "발화 판단도 짧습니다",
         "judgment": "판단은 짧습니다",
         "reason": "근거도 짧습니다",
         "suggestion": "제안도 짧습니다",
@@ -415,17 +434,89 @@ def test_discussion_node_succeeds_when_within_length_limits():
         "referenced_message_ids": [],
         "evidence": [],
         "next_action": None,
+        "active_issue_id": "mvp_scope",
+        "active_issue_title": "MVP 범위",
+        "new_information": ["새로 확인된 내용"],
+        "proposal": "제안",
+        "changed_position": False,
+        "needs_counterpart_response": True,
+        "recommended_next_speaker": "dev_expert",
+        "issue_resolved": False,
+        "needs_user_input": False,
+        "user_question": None,
     }
 
     def llm_call(prompt: str) -> str:
         return json.dumps(payload, ensure_ascii=False)
 
-    node = make_conv_discussion_node("planning_expert", speaks_second=False, llm_call=llm_call)
+    node = make_conv_discussion_node("planning_expert", llm_call=llm_call)
     update = node(_base_state())
     assert update.get("phase") != "failed"  # speaks_second=False면 phase 키 자체가 없을 수 있다.
     message = update["messages"][0]
     assert message["structured"]["judgment"] == "판단은 짧습니다"
     assert message["structured"]["confirmed"] == ["확인1"]
+    # 용준/Claude(2026-07-22, 요청: 보고서형 메시지 → 자연스러운 회의 발화 전환) — 화면에
+    # 보이는 content는 spoken_text 그대로이고 judgment/reason 등 내부 필드는 노출되지 않는다.
+    assert message["content"] == "발화 판단도 짧습니다"
+
+
+# ---------------------------------------------------------------------------
+# 18. spoken_text 분량 제한(요청: 보고서형 메시지 → 자연스러운 회의 발화 전환) — 300자를
+#     넘기면 다른 필드와 동일하게 재시도 후 실패 처리된다(강제로 잘라내지 않는다).
+# ---------------------------------------------------------------------------
+
+
+def test_discussion_node_retries_then_fails_when_spoken_text_too_long():
+    long_spoken_text = "가" * 301  # 300자 상한 초과
+    payload = {
+        "stance": "보완",
+        "spoken_text": long_spoken_text,
+        "judgment": "판단",
+        "reason": "근거",
+        "suggestion": "제안",
+        "interim_conclusion": "임시 결론",
+        "confirmed": [],
+        "unconfirmed": [],
+        "referenced_message_ids": [],
+        "evidence": [],
+        "next_action": None,
+    }
+    call_count = {"n": 0}
+
+    def llm_call(prompt: str) -> str:
+        call_count["n"] += 1
+        return json.dumps(payload, ensure_ascii=False)
+
+    node = make_conv_discussion_node("planning_expert", llm_call=llm_call)
+    update = node(_base_state())
+    assert update["phase"] == "failed"
+    assert call_count["n"] == 2
+    assert "messages" not in update
+
+
+def test_question_node_rejects_blank_spoken_text():
+    """spoken_text가 비어 있으면(다른 필드는 정상이어도) 질문 생성이 실패해야 한다 —
+    화면에 아무것도 안 보이는 빈 말풍선을 만들지 않기 위한 방어선이다."""
+    call_count = {"n": 0}
+
+    def llm_call(prompt: str) -> str:
+        call_count["n"] += 1
+        return json.dumps(
+            {
+                "spoken_text": "",
+                "judgment": "판단",
+                "question": "질문",
+                "question_topic": "problem",
+                "referenced_message_ids": [],
+                "evidence": [],
+            },
+            ensure_ascii=False,
+        )
+
+    node = make_conv_question_node("planning_expert", "awaiting_planning_answer", llm_call)
+    update = node(_base_state())
+    assert update["phase"] == "failed"
+    assert call_count["n"] == 2
 
 
 # ---------------------------------------------------------------------------

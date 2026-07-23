@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import queue
@@ -46,11 +47,25 @@ if str(_MEETING_DIR) not in sys.path:
     sys.path.insert(0, str(_MEETING_DIR))
 
 from graph import (  # noqa: E402
+    IdeationCancelled,
     IdeationConvState,
     active_stage_for,
+    bind_trace_context,
+    configure_ideation_trace,
     finalize_ideation_conversation,
+    is_late_request_event,
+    reset_trace_context,
     reply_ideation_conversation,
+    reply_to_interjection,
+    sanitize_preview,
     start_ideation_conversation,
+    trace_event,
+)
+
+configure_ideation_trace(
+    enabled=settings.ENABLE_IDEATION_TRACE_LOGS,
+    content_max_chars=settings.IDEATION_TRACE_CONTENT_MAX_CHARS,
+    stream_deltas=settings.IDEATION_TRACE_STREAM_DELTAS,
 )
 
 from app.api.routes.meetings import _role_retrieval_service  # noqa: E402
@@ -67,23 +82,40 @@ _SESSION_TTL_SECONDS = 30 * 60  # 30분 이상 응답 없는 세션은 만료된
 _MAX_SESSIONS = 200  # 이 이상이면 가장 오래전에 활동한 세션부터 제거한다(메모리 상한).
 _MAX_ROUNDS_CAP = 3  # 요청 max_rounds가 이보다 크면 잘라낸다.
 _MAX_TEXT_LENGTH = 2000  # 공모전 설명/아이디어/답변 1건당 최대 길이(문자 수).
-# 용준/Claude(2026-07-21, 요청: 위원 간 실제 회의로 개편) — expert_discussion 라운드가
-# sufficiency(1) + planning_position(1) + dev_review(1) + [선택적] planning_revision(1) +
-# discussion_facilitator(1) + [continue_round이면] 다음 planning_question(1) = 최대 6회
-# 호출로 늘었고, 각 구조화 호출은 재시도 1회까지 더 셀 수 있어(_safe_call_structured_json)
-# 여유를 넉넉히 둔다.
-# 가은/Claude(2026-07-22, 요청: 아이디어 기획 캔버스 자동 갱신 — 경이 협의 완료) — 매 라운드
-# 끝에 canvas_update 호출이 1회(재시도 시 2회) 추가됐고, continue_round로 한 요청 안에서
-# 라운드가 두 번 돌면 최대 +4회까지 늘 수 있어 상한을 12 -> 16으로 올린다(상한의 목적은
-# 정확한 예산이 아니라 루프/재시도 폭주 감지다 — 기존 정책 그대로).
-_MAX_LLM_CALLS_PER_REQUEST = 16  # 한 HTTP 요청에서 허용하는 최대 LLM 호출 수(재시도 포함 여유).
+# 용준/Claude(2026-07-22, 요청: 동적 전문가 회의로 개편) — 발언 순서가 더 이상 라운드당
+# 고정 횟수가 아니라 쟁점·반론에 따라 동적으로 늘어난다(최대 MAX_EXPERT_TURNS_PER_ROUND=8회
+# + discussion_facilitator 1회 + sufficiency/판정류 호출 여유). 각 구조화 호출은 재시도
+# 1회까지 더 셀 수 있어(_safe_call_structured_json) 여유를 넉넉히 둔다.
+_MAX_LLM_CALLS_PER_REQUEST = 24  # 한 HTTP 요청에서 허용하는 최대 LLM 호출 수(재시도 포함 여유).
+# "잠시만" 취소 확인 대기 상한(초) — 취소 신호를 보낸 뒤 워커 스레드가 실제로 세션 락을
+# 반납할 때까지 짧게 폴링한다(요청: "취소 완료 전에 새 reply를 보내 세션 lock 409가
+# 발생하지 않게").
+_CANCEL_CONFIRM_TIMEOUT_SECONDS = 5.0
 
 
 class _SessionRecord:
-    __slots__ = ("state", "created_at", "last_active_at", "busy_lock")
+    __slots__ = (
+        "state",
+        "created_at",
+        "last_active_at",
+        "busy_lock",
+        "active_request_id",
+        "cancel_event",
+        "use_rag",
+        "project_id",
+    )
 
-    def __init__(self, state: IdeationConvState):
+    def __init__(self, state: IdeationConvState, *, use_rag: bool = False, project_id: Optional[str] = None):
         self.state = state
+        # 용준/Claude(2026-07-22, RAG 근거 유실 수정 2탄): /start 시점의 use_rag/project_id를
+        # 세션에 보관한다 — evidence_lookup은 콜러블이라 그래프 state(dict, 체크포인터가
+        # 직렬화할 수 있어야 함)에 넣을 수 없었고, 그래서 /reply·/reply/stream이 재개할 때
+        # evidence_lookup을 다시 만들 방법이 없어 항상 None으로 진행됐다(RAG 검색 자체가
+        # 호출되지 않음 — 최초 /start 턴에서만 검색되고 그 이후 모든 턴은 검색 없이 진행됨).
+        # ReplyRequest에 project_id/use_rag를 새로 받지 않고(기존 API 계약 유지), /start 때
+        # 결정된 값을 세션에 저장해두고 재사용한다.
+        self.use_rag = use_rag
+        self.project_id = project_id
         now = time.time()
         self.created_at = now
         self.last_active_at = now
@@ -94,6 +126,11 @@ class _SessionRecord:
         # "지금 이 세션을 처리 중인 요청이 있는지"만 표시한다(전역 락이 아니라 세션별이라
         # 서로 다른 세션의 요청은 완전히 병렬로 처리된다).
         self.busy_lock = threading.Lock()
+        # 용준/Claude(2026-07-22, 요청: "잠시만" 실제 취소) — 지금 이 세션에서 진행 중인
+        # 스트리밍 요청의 request_id와, 그 요청을 취소하라는 신호를 전달하는 이벤트. 스트리밍
+        # 요청이 아니면(/reply, /finalize) 둘 다 None으로 유지된다.
+        self.active_request_id: str | None = None
+        self.cancel_event: threading.Event | None = None
 
 
 class _SessionStore:
@@ -120,11 +157,11 @@ class _SessionStore:
             oldest_id = min(self._sessions, key=lambda sid: self._sessions[sid].last_active_at)
             del self._sessions[oldest_id]
 
-    def create(self, state: IdeationConvState) -> None:
+    def create(self, state: IdeationConvState, *, use_rag: bool = False, project_id: Optional[str] = None) -> None:
         with self._lock:
             self._sweep_expired_locked()
             self._evict_oldest_locked()
-            self._sessions[state["session_id"]] = _SessionRecord(state)
+            self._sessions[state["session_id"]] = _SessionRecord(state, use_rag=use_rag, project_id=project_id)
 
     def get(self, session_id: str) -> IdeationConvState:
         with self._lock:
@@ -143,6 +180,13 @@ class _SessionStore:
                 self._sessions[session_id] = record
             record.state = state
             record.last_active_at = time.time()
+
+    def get_record(self, session_id: str) -> _SessionRecord | None:
+        """용준/Claude(2026-07-22, 요청: "잠시만" 실제 취소) — busy_lock을 잡지 않고 레코드
+        참조만 반환한다(취소 API는 "지금 이 세션을 처리 중"이어도 신호를 보낼 수 있어야
+        하므로 try_acquire와 달리 락을 요구하지 않는다)."""
+        with self._lock:
+            return self._sessions.get(session_id)
 
     def try_acquire(self, session_id: str) -> _SessionRecord | None:
         """이 세션을 지금 처리해도 되면 레코드를 반환하고 락을 잡는다. 세션이 없으면
@@ -199,6 +243,14 @@ def _acquire_session_or_404(session_id: str) -> IdeationConvState:
     if record is None:
         raise HTTPException(status_code=404, detail="세션을 찾을 수 없거나 만료되었습니다.")
     return record.state
+
+
+def _acquire_session_record_or_404(session_id: str) -> "_SessionRecord":
+    """_acquire_session_or_404와 동일하지만 record 자체(취소 이벤트 등록용)를 반환한다."""
+    record = _store.try_acquire(session_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="세션을 찾을 수 없거나 만료되었습니다.")
+    return record
 
 
 def _clamp_text(value: str, field_name: str) -> str:
@@ -307,14 +359,292 @@ def _build_streaming_backends(session_id: str, model: str):
     return stream_chat_completion, call_chat_completion
 
 
-def _evidence_lookup_for(use_rag: bool, project_id: Optional[str]):
+_RAG_SPEAKER_META = {
+    "planning_expert": ("기획 위원", "planning"),
+    "dev_expert": ("개발 위원", "technology"),
+}
+
+
+def _lookup_accepts_runtime_scope(fn) -> bool:
+    """lookup 콜러블이 runtime_scope 키워드 인자를 받는지 검사한다(ai/meeting/graph/
+    ideation_nodes.py::_lookup_accepts_runtime_scope와 동일한 목적 — 여기서는 테스트가 흔히
+    주입하는 (persona_id, query) 2-인자 lambda까지 그대로 감싸야 하는 _trace_evidence_lookup에
+    적용한다). ai.rag가 실제로 만드는 lookup은 runtime_scope를 받지만, 테스트용 fake는 받지
+    않을 수 있으므로 지원 여부를 먼저 확인해 하위 호환을 유지한다."""
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return False
+    if "runtime_scope" in sig.parameters:
+        return True
+    return any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+
+
+def _trace_evidence_lookup(lookup, *, project_id: str, top_k: int):
+    """모든 아이디어 회의 RAG 호출을 발언 생성 직전/직후 로그로 감싼다.
+
+    검색 구현이나 반환값은 바꾸지 않는다. 프롬프트와 청크 원문 전체는 기록하지 않고,
+    호출 여부를 확인하는 데 필요한 검색어 미리보기·문서명·chunk_id·점수만 남긴다.
+    """
+    lookup_accepts_runtime_scope = _lookup_accepts_runtime_scope(lookup)
+
+    def traced_lookup(persona_id: str, query: str, *, runtime_scope: Optional[dict] = None):
+        speaker_name, role_id = _RAG_SPEAKER_META.get(persona_id, (persona_id, None))
+        started = time.perf_counter()
+        trace_event(
+            "IDEATION_RAG_SEARCH_START",
+            speaker=persona_id,
+            speaker_name=speaker_name,
+            role=role_id,
+            project_id=project_id,
+            top_k=top_k,
+            query=sanitize_preview(query, limit=200),
+            timing="전문가 발언 생성 전",
+        )
+        try:
+            # 용준/Claude(2026-07-23, 요청: stale closure 수정) — runtime_scope는
+            # ai/meeting/graph 노드가 evidence_lookup을 호출하는 바로 그 순간의 최신 graph
+            # state에서 읽은 session_id/selected_candidate_document_id다. lookup(아래
+            # _evidence_lookup_for가 만든 실제 ai.rag 콜러블)이 이 값을 받으면 lookup을
+            # 만들 때 캡처해둔 closure 스냅샷(요청 시작 시점 값)보다 우선한다.
+            if lookup_accepts_runtime_scope:
+                evidence = lookup(persona_id, query, runtime_scope=runtime_scope)
+            else:
+                evidence = lookup(persona_id, query)
+        except Exception:
+            trace_event(
+                "IDEATION_RAG_SEARCH_FAILED",
+                level=logging.ERROR,
+                speaker=persona_id,
+                speaker_name=speaker_name,
+                role=role_id,
+                project_id=project_id,
+                elapsed_ms=round((time.perf_counter() - started) * 1000, 1),
+            )
+            raise
+
+        trace_event(
+            "IDEATION_RAG_SEARCH_COMPLETE",
+            speaker=persona_id,
+            speaker_name=speaker_name,
+            role=role_id,
+            project_id=project_id,
+            result_count=len(evidence),
+            elapsed_ms=round((time.perf_counter() - started) * 1000, 1),
+            sources=[
+                {
+                    "document": item.get("document_name"),
+                    "chunk_id": item.get("chunk_id"),
+                    "page": item.get("page"),
+                    "score": item.get("score"),
+                }
+                for item in evidence
+                if isinstance(item, dict)
+            ],
+        )
+        # 용준/Claude(2026-07-22, 요청: 로그 — IDEATION_TARGET_EVIDENCE_SEARCHED) — criteria/
+        # target(그중 선택된 후보 target/사용자 답변 target)이 실제로 몇 건씩 검색됐는지 남긴다.
+        # ai.rag의 반환 dict가 이미 document_role/ideation_source_type을 담고 있으므로(요청:
+        # 역할별 검색 데이터 구성 + 세션 범위 검색) 여기서는 그 값을 세는 것만 한다 — 판정
+        # 로직 자체는 ai.rag에 있다.
+        criteria_count = sum(1 for item in evidence if isinstance(item, dict) and item.get("document_role") == "criteria")
+        target_items = [item for item in evidence if isinstance(item, dict) and item.get("document_role") == "target"]
+        candidate_target_count = sum(
+            1 for item in target_items if item.get("ideation_source_type") == "ideation_candidate"
+        )
+        user_answer_target_count = sum(
+            1 for item in target_items if item.get("ideation_source_type") == "user_session_answer"
+        )
+        expected_roles = {"criteria", "target"}
+        found_roles = {item.get("document_role") for item in evidence if isinstance(item, dict)}
+        missing_document_roles = sorted(expected_roles - found_roles)
+        trace_event(
+            "IDEATION_TARGET_EVIDENCE_SEARCHED",
+            speaker=persona_id,
+            criteria_count=criteria_count,
+            target_count=len(target_items),
+            candidate_target_count=candidate_target_count,
+            user_answer_target_count=user_answer_target_count,
+            missing_document_roles=missing_document_roles,
+        )
+        return evidence
+
+    setattr(traced_lookup, "trace_project_id", project_id)
+    setattr(traced_lookup, "trace_top_k", top_k)
+    return traced_lookup
+
+
+def _evidence_lookup_for(
+    use_rag: bool,
+    project_id: Optional[str],
+    *,
+    session_id: Optional[str] = None,
+    selected_candidate_document_id: Optional[str] = None,
+):
     if not use_rag:
+        trace_event(
+            "IDEATION_RAG_CONFIGURATION",
+            enabled=False,
+            project_id=project_id,
+            reason="use_rag_false",
+        )
         return None
     from ai.rag.orchestration.ideation_evidence_service import make_ideation_evidence_lookup
 
-    return make_ideation_evidence_lookup(
-        project_id=project_id, role_retrieval_service=_role_retrieval_service, top_k=5
+    lookup = make_ideation_evidence_lookup(
+        project_id=project_id,
+        role_retrieval_service=_role_retrieval_service,
+        top_k=5,
+        session_id=session_id,
+        selected_candidate_document_id=selected_candidate_document_id,
     )
+    lookup = _trace_evidence_lookup(lookup, project_id=project_id, top_k=5)
+    trace_event(
+        "IDEATION_RAG_CONFIGURATION",
+        enabled=True,
+        project_id=project_id,
+        top_k=5,
+        roles={"planning_expert": "planning", "dev_expert": "technology"},
+        session_id=session_id,
+        selected_candidate_document_id=selected_candidate_document_id,
+    )
+    return lookup
+
+
+def _index_target_evidence_for(use_rag: bool, project_id: Optional[str]):
+    """용준/Claude(2026-07-22, 요청: 선택된 아이디어/사용자 답변을 target evidence로 색인) —
+    evidence_lookup/ground_claims와 동일한 정책: use_rag=False거나 project_id가 없으면(요청
+    17-3번 "project_id 없는 세션에서 전역 target 문서를 만들면 안 됨") 색인 콜러블 자체를
+    주입하지 않는다 — ai/meeting/graph 쪽은 index_target_evidence=None이면 색인을 건너뛰고
+    안전하게 진행한다(evidence_lookup=None과 같은 패턴)."""
+    if not use_rag or not project_id:
+        return None
+    from ai.rag.orchestration.ideation_target_indexing_service import (
+        IdeationTargetIndexingError,
+        index_selected_candidate_as_target,
+        index_user_answer_as_target,
+    )
+    from app.api.routes.documents import _get_indexing_service
+
+    def index_target_evidence(kind: str, payload: dict) -> dict:
+        indexing_service = _get_indexing_service()
+        started = time.perf_counter()
+        session_id = payload.get("session_id")
+        if kind == "candidate":
+            candidate_id = payload.get("candidate_id")
+            trace_fields = {"session_id": session_id, "candidate_id": candidate_id, "source_type": "ideation_candidate"}
+            try:
+                result = index_selected_candidate_as_target(
+                    indexing_service=indexing_service,
+                    project_id=project_id,
+                    session_id=session_id,
+                    candidate_id=candidate_id,
+                    candidate=payload.get("candidate") or {},
+                )
+            except IdeationTargetIndexingError as exc:
+                trace_event(
+                    "IDEATION_TARGET_EVIDENCE_UPSERT",
+                    level=logging.WARNING,
+                    created_or_updated="failed",
+                    error=sanitize_preview(str(exc), limit=100),
+                    **trace_fields,
+                )
+                raise
+        elif kind == "user_answer":
+            user_message_id = payload.get("user_message_id")
+            trace_fields = {
+                "session_id": session_id,
+                "user_message_id": user_message_id,
+                "source_type": "user_session_answer",
+            }
+            try:
+                result = index_user_answer_as_target(
+                    indexing_service=indexing_service,
+                    project_id=project_id,
+                    session_id=session_id,
+                    user_message_id=user_message_id,
+                    answer_text=payload.get("answer_text") or "",
+                    pending_question=payload.get("pending_question"),
+                    pending_question_topic=payload.get("pending_question_topic"),
+                )
+            except IdeationTargetIndexingError as exc:
+                trace_event(
+                    "IDEATION_TARGET_EVIDENCE_UPSERT",
+                    level=logging.WARNING,
+                    created_or_updated="failed",
+                    error=sanitize_preview(str(exc), limit=100),
+                    **trace_fields,
+                )
+                raise
+        else:
+            raise ValueError(f"알 수 없는 target evidence 종류입니다: {kind!r}")
+
+        trace_event(
+            "IDEATION_TARGET_EVIDENCE_UPSERT",
+            project_id=project_id,
+            document_id=result.document_id,
+            chunk_count=result.chunk_count,
+            content_hash=result.content_hash,
+            created_or_updated="upserted",
+            elapsed_ms=round((time.perf_counter() - started) * 1000, 1),
+            **trace_fields,
+        )
+        return {"document_id": result.document_id, "chunk_count": result.chunk_count, "status": "ok"}
+
+    return index_target_evidence
+
+
+# 용준/Claude(2026-07-22, 요청: RAG 근거 실제 활용 강화) — ai/meeting/graph는 ai.rag를 직접
+# import하지 않는다(ai/rag/tests/test_meeting_evidence_service.py::TestScopeBoundary가
+# 강제하는 경계). evidence_lookup과 같은 이유로, claim-evidence 연결 검증(RAG-004 관련성
+# 판정 재사용)도 이 API 레이어가 실제 구현을 주입한다.
+_ROLE_RELEVANCE_KEYWORDS = {
+    "planning_expert": ["실현 가능성", "경제성", "평가기준", "심사", "차별성", "사업성", "공모전"],
+    "dev_expert": ["데이터", "API", "구현", "보안", "성능", "아키텍처", "연동", "기술"],
+}
+
+
+def _ground_claims_for(use_rag: bool):
+    if not use_rag:
+        return None
+    from ai.rag.evidence_linking.claim_grounding import ground_claims as _ground_claims_impl
+
+    def grounder(persona_id: str, claims, retrieved_evidence: list[dict]) -> dict:
+        return _ground_claims_impl(
+            claims, retrieved_evidence, role_keywords=_ROLE_RELEVANCE_KEYWORDS.get(persona_id)
+        )
+
+    return grounder
+
+
+def _evidence_planner_for(use_rag: bool):
+    """용준/Claude(2026-07-23, Phase 1 "Shadow Deterministic Evidence Planner", Phase 2 "Active
+    Evidence Injection") — evidence_lookup/ground_claims와 같은 lazy-import 정책(ai/meeting은
+    ai.rag를 모른다). SHADOW/DISCUSSION 둘 다 꺼져 있으면(기본값) planner 콜러블 자체를
+    주입하지 않는다 — make_conv_discussion_node가 evidence_planner=None으로 실행되어 기존
+    동작과 완전히 동일하다.
+
+    두 플래그가 동시에 켜져도 planner는 턴당 한 번만 실행된다(ideation_conv_nodes.py::
+    _run_shadow_evidence_planner가 유일한 호출 지점) — 여기서는 그 결과를 "실제 발언에 쓸지"
+    여부만 반환된 콜러블의 active 속성(evidence_lookup.trace_project_id와 같은 패턴, 시그니처
+    변경 없이 그래프 조립 함수들을 그대로 통과시킨다)으로 표시한다."""
+    if not use_rag or not (
+        settings.ENABLE_IDEATION_EVIDENCE_PLANNER_SHADOW or settings.ENABLE_IDEATION_EVIDENCE_PLANNER_DISCUSSION
+    ):
+        return None
+    from ai.rag.orchestration.ideation_evidence_planner import build_evidence_plan
+
+    def planner(*, persona_id, effective_issue, retrieved_evidence, runtime_scope, shadow_history):
+        return build_evidence_plan(
+            persona_id=persona_id,
+            effective_issue=effective_issue,
+            retrieved_evidence=retrieved_evidence,
+            runtime_scope=runtime_scope,
+            shadow_history=shadow_history,
+        )
+
+    planner.active = bool(settings.ENABLE_IDEATION_EVIDENCE_PLANNER_DISCUSSION)
+    return planner
 
 
 def _serialize_state(state: IdeationConvState) -> dict:
@@ -357,11 +687,15 @@ def _serialize_state(state: IdeationConvState) -> dict:
         "consensus": state["consensus"],
         "unresolved_issues": state["unresolved_issues"],
         "idea_proposal": state.get("idea_proposal"),
+        "idea_canvas": state.get("idea_canvas"),
         "ideation_mode": state.get("ideation_mode", "refinement"),
         "active_stage": active_stage_for(state["phase"]),
         "idea_candidates": state.get("idea_candidates", []),
         "original_idea_candidates": state.get("original_idea_candidates", []),
         "selected_idea": state.get("selected_idea"),
+        # 용준/Claude(2026-07-22, 요청: 선택된 아이디어를 target 문서로 생성) — 순수 추가
+        # 필드. 색인이 주입되지 않았거나(use_rag=False) 실패했으면 None이다.
+        "selected_idea_document_id": state.get("selected_idea_document_id"),
         "selection_reason": state.get("selection_reason"),
         "resolved_topics": state.get("resolved_topics", []),
         "pending_question_topic": state.get("pending_question_topic"),
@@ -373,11 +707,6 @@ def _serialize_state(state: IdeationConvState) -> dict:
         # 클라이언트는 무시하면 그대로 동작한다. 구버전 세션(discussion_rounds 키가 없는
         # state)에는 빈 배열을 기본값으로 준다.
         "discussion_rounds": state.get("discussion_rounds", []),
-        # 가은/Claude(2026-07-22, 요청: 아이디어 기획 캔버스 자동 갱신 — 경이 협의 완료) —
-        # 순수 추가 필드. 매 라운드 canvas_update 노드가 갱신하는 기획 캔버스 값(키 이름은
-        # selected_idea와 동일). 프론트(IdeaCanvasPanel.jsx)는 idea_canvas가 없으면
-        # selected_idea로 폴백해 그린다. 구버전 세션 state에는 키가 없을 수 있다.
-        "idea_canvas": state.get("idea_canvas"),
         # 가은/Claude(2026-07-22, 요청: 신청양식 항목 약한 주입): 순수 추가 필드 — 세션
         # 시작 시 넘긴 항목을 그대로 노출한다(디버깅/향후 화면 표시용, 세션 중 바뀌지 않음).
         "application_form_items": state.get("application_form_items", []),
@@ -413,10 +742,20 @@ class StartRequest(BaseModel):
 class ReplyRequest(BaseModel):
     message: str
     model: str = Field(default="")
+    # 용준/Claude(2026-07-22, 요청: "잠시만" 버튼 — 질문 대상 선택): 선택 필드다(기존
+    # /reply, /reply/stream 호출과 하위 호환) — 값이 있으면 지정 위원이 먼저 답하는
+    # reply_to_interjection 경로로 라우팅한다(아래 reply_conversation_stream 참고).
+    target_speaker_id: Optional[str] = None
+    interrupted_request_id: Optional[str] = None
+    active_issue_id: Optional[str] = None
 
 
 class FinalizeRequest(BaseModel):
     model: str = Field(default="")
+
+
+class CancelRequest(BaseModel):
+    request_id: Optional[str] = None
 
 
 # 가은/Claude(2026-07-21): 실측 제보 — 이 화면(board "작성 전" 흐름)이 늘 DEV_LLM_REVIEWER_
@@ -444,7 +783,12 @@ async def start_conversation(request: StartRequest):
     user_idea = {"description": user_idea_text}
 
     llm_call = _build_llm_call(session_id, _effective_model(request.model))
-    evidence_lookup = _evidence_lookup_for(request.use_rag, request.project_id)
+    # 용준/Claude(2026-07-22, 요청: 세션 범위 검색) — /start 시점에는 아직 후보를 선택하지
+    # 않았으므로(discovery 모드 시작) selected_candidate_document_id는 항상 None이다.
+    evidence_lookup = _evidence_lookup_for(request.use_rag, request.project_id, session_id=session_id)
+    ground_claims = _ground_claims_for(request.use_rag)
+    index_target_evidence = _index_target_evidence_for(request.use_rag, request.project_id)
+    evidence_planner = _evidence_planner_for(request.use_rag)
 
     logger.info("[ideation-conversation] 시작 session_id=%s max_rounds=%d", session_id, effective_max_rounds)
     try:
@@ -456,13 +800,18 @@ async def start_conversation(request: StartRequest):
             llm_call=llm_call,
             max_rounds=effective_max_rounds,
             evidence_lookup=evidence_lookup,
+            ground_claims=ground_claims,
+            index_target_evidence=index_target_evidence,
+            evidence_planner=evidence_planner,
             application_form_items=request.application_form_items,
         )
     except Exception:
         logger.exception("[ideation-conversation] 시작 실패 session_id=%s", session_id)
         raise HTTPException(status_code=502, detail="대화형 회의 시작 중 오류가 발생했습니다. 서버 로그를 확인하세요.")
 
-    _store.create(state)
+    # 용준/Claude(2026-07-22, RAG 근거 유실 수정 2탄): 이후 /reply·/reply/stream이 evidence_lookup을
+    # 다시 만들 수 있도록 이번 세션의 use_rag/project_id를 함께 저장한다.
+    _store.create(state, use_rag=request.use_rag, project_id=request.project_id)
     return _serialize_state(state)
 
 
@@ -470,13 +819,44 @@ async def start_conversation(request: StartRequest):
 async def reply_conversation(session_id: str, request: ReplyRequest):
     _require_preview_enabled()
     try:
-        previous_state = _acquire_session_or_404(session_id)
+        record = _acquire_session_record_or_404(session_id)
     except _SessionBusyError:
         raise HTTPException(status_code=409, detail="이 세션은 이미 다른 요청을 처리하고 있습니다.")
+    previous_state = record.state
 
+    trace_tokens = bind_trace_context(session_id)
     try:
         message = _clamp_text(request.message, "message")
+        trace_event("IDEATION_REQUEST_STARTED", mode="sync", user_message=sanitize_preview(message))
+        if previous_state.get("phase") in ("expert_discussion", "awaiting_user_decision"):
+            trace_event(
+                "IDEATION_USER_INTERJECTION",
+                issue=previous_state.get("active_issue_id"),
+                content_length=len(message),
+                user_message=sanitize_preview(message),
+            )
         llm_call = _build_llm_call(session_id, _effective_model(request.model))
+        # 용준/Claude(2026-07-22, RAG 근거 유실 수정 2탄): /start에서 저장해둔 use_rag/project_id로
+        # evidence_lookup을 다시 만든다 — 예전에는 여기서 evidence_lookup을 아예 넘기지 않아
+        # (기본값 None) 첫 턴 이후 모든 턴이 RAG 검색 없이 진행됐다.
+        # 용준/Claude(2026-07-22, 요청: 세션 범위 검색 + 후보 변경 시 이전 candidate target
+        # 제외; 2026-07-23 정정) — 아래 selected_candidate_document_id는 이 요청이 "시작될
+        # 때"(candidate_selection 노드 실행 전)의 값일 뿐이다 — 후보 선택과 첫 전문가 검색이
+        # 같은 /reply 안에서 이어지면(candidate_selection이 to_refinement로 곧장
+        # planning_expert_discussion까지 진행) 이 값은 여전히 이전 상태(대부분 None)다.
+        # 실제 "지금 선택된 후보" 값은 그래프 노드가 evidence_lookup을 호출하는 순간의
+        # runtime_scope(ai/meeting/graph/ideation_conv_nodes.py::_runtime_scope_for)가
+        # 매번 다시 계산해 우선 적용한다 — 아래 인자는 그 runtime_scope가 없는 호출(예:
+        # /start 이전 단계)을 위한 하위 호환 기본값일 뿐이다.
+        evidence_lookup = _evidence_lookup_for(
+            record.use_rag,
+            record.project_id,
+            session_id=session_id,
+            selected_candidate_document_id=previous_state.get("selected_idea_document_id"),
+        )
+        ground_claims = _ground_claims_for(record.use_rag)
+        index_target_evidence = _index_target_evidence_for(record.use_rag, record.project_id)
+        evidence_planner = _evidence_planner_for(record.use_rag)
 
         try:
             state = await run_in_threadpool(
@@ -484,6 +864,10 @@ async def reply_conversation(session_id: str, request: ReplyRequest):
                 previous_state=previous_state,
                 user_message=message,
                 llm_call=llm_call,
+                evidence_lookup=evidence_lookup,
+                ground_claims=ground_claims,
+                index_target_evidence=index_target_evidence,
+                evidence_planner=evidence_planner,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
@@ -495,6 +879,8 @@ async def reply_conversation(session_id: str, request: ReplyRequest):
         return _serialize_state(state)
     finally:
         _store.release(session_id)
+        trace_event("IDEATION_SESSION_UNLOCKED", mode="sync")
+        reset_trace_context(trace_tokens)
 
 
 # NDJSON 스트림 소비자(비동기 이벤트 제너레이터)가 "이 스트림이 끝났다"를 판별하는 데
@@ -515,26 +901,57 @@ async def reply_conversation_stream(session_id: str, request: ReplyRequest, http
 
     그래프 실행(reply_ideation_conversation)은 동기 함수라 별도 스레드에서 돌리고, 그
     스레드가 sink()로 큐에 넣는 이벤트를 이 async 제너레이터가 꺼내 그대로 클라이언트에게
-    전달하는 "생산자(스레드)-소비자(이벤트 루프)" 패턴을 쓴다. 세션 state는 그래프 실행이
-    끝까지 성공했을 때만(canonical state) _store에 저장한다 — 스트리밍 중 클라이언트
-    연결이 끊겨도 워커 스레드는 계속 실행되어 정상적으로 state를 저장한다(요청: "스트리밍
-    중 연결이 끊겨도 세션 state가 손상되지 않음")."""
+    전달하는 "생산자(스레드)-소비자(이벤트 루프)" 패턴을 쓴다.
+
+    용준/Claude(2026-07-22, 요청: "잠시만" 실제 취소 + 지정 위원 우선 응답): 세션마다
+    이번 요청의 request_id/cancel_event를 등록하고(POST /cancel이 이 값을 보고 신호를
+    보낸다), on_snapshot 콜백으로 그래프 노드가 완료될 때마다 세션 state를 증분 저장한다 —
+    그래야 도중에 취소돼도 이미 완료된 발언은 canonical state에 남고, 취소된(미완성) 발언만
+    빠진다. request.target_speaker_id가 있으면(사용자가 "잠시만"으로 특정 위원을 지정해
+    질문한 경우) reply_ideation_conversation 대신 reply_to_interjection으로 라우팅한다."""
     _require_preview_enabled()
     _require_streaming_enabled()
     message = _clamp_text(request.message, "message")
+    target_speaker_id = request.target_speaker_id
+    if target_speaker_id is not None and target_speaker_id not in ("planning_expert", "dev_expert", "both"):
+        raise HTTPException(status_code=400, detail="target_speaker_id는 planning_expert/dev_expert/both 중 하나여야 합니다.")
 
     try:
-        previous_state = _acquire_session_or_404(session_id)
+        record = _acquire_session_record_or_404(session_id)
     except _SessionBusyError:
         raise HTTPException(status_code=409, detail="이 세션은 이미 다른 요청을 처리하고 있습니다.")
+    previous_state = record.state
 
     model = _effective_model(request.model)
     event_queue: "queue.Queue[object]" = queue.Queue()
 
+    request_id = f"REQ-{uuid.uuid4().hex[:10]}"
+    cancel_event = threading.Event()
+    record.active_request_id = request_id
+    record.cancel_event = cancel_event
+
     def sink(event: dict) -> None:
+        if is_late_request_event(event.get("request_id"), request_id):
+            return
+        event.setdefault("request_id", request_id)
         event_queue.put(event)
 
+    # 용준/Claude(2026-07-22, RAG 근거 유실 수정 2탄): /start에서 저장해둔 record.use_rag/
+    # project_id로 evidence_lookup을 다시 만든다 — 예전에는 아래 reply_to_interjection/
+    # reply_ideation_conversation 호출에 evidence_lookup을 아예 넘기지 않아 첫 턴 이후
+    # 모든 스트리밍 턴이 RAG 검색 없이 진행됐다.
+    evidence_lookup = _evidence_lookup_for(
+        record.use_rag,
+        record.project_id,
+        session_id=session_id,
+        selected_candidate_document_id=previous_state.get("selected_idea_document_id"),
+    )
+    ground_claims = _ground_claims_for(record.use_rag)
+    index_target_evidence = _index_target_evidence_for(record.use_rag, record.project_id)
+    evidence_planner = _evidence_planner_for(record.use_rag)
+
     def worker() -> None:
+        trace_tokens = bind_trace_context(session_id, request_id)
         try:
             stream_chat_completion, call_chat_completion = _build_streaming_backends(session_id, model)
             llm_call = make_streaming_llm_call(
@@ -543,14 +960,78 @@ async def reply_conversation_stream(session_id: str, request: ReplyRequest, http
                 stream_chat_completion=stream_chat_completion,
                 call_chat_completion=call_chat_completion,
                 max_calls=_MAX_LLM_CALLS_PER_REQUEST,
+                cancel_event=cancel_event,
+                request_id=request_id,
             )
-            state = reply_ideation_conversation(
-                previous_state=previous_state,
-                user_message=message,
-                llm_call=llm_call,
+            sink({"type": "request_started", "request_id": request_id})
+            trace_event(
+                "IDEATION_REQUEST_STARTED",
+                mode="stream",
+                target_speaker=target_speaker_id,
+                user_message=sanitize_preview(message),
             )
+            is_user_interjection = target_speaker_id is not None or previous_state.get("phase") in (
+                "expert_discussion",
+                "awaiting_user_decision",
+            )
+            if is_user_interjection:
+                trace_event(
+                    "IDEATION_USER_INTERJECTION",
+                    target_speaker=target_speaker_id,
+                    issue=previous_state.get("active_issue_id"),
+                    interrupted_request_id=None,
+                    content_length=len(message),
+                    user_message=sanitize_preview(message),
+                )
+            if target_speaker_id is not None:
+                trace_event(
+                    "IDEATION_RESUME_STARTED",
+                    resume_target_speaker=target_speaker_id,
+                    phase=previous_state.get("phase"),
+                    next_route=previous_state.get("next_route"),
+                )
+                state = reply_to_interjection(
+                    previous_state=previous_state,
+                    user_message=message,
+                    target_speaker_id=target_speaker_id,
+                    llm_call=llm_call,
+                    evidence_lookup=evidence_lookup,
+                    ground_claims=ground_claims,
+                    index_target_evidence=index_target_evidence,
+                    evidence_planner=evidence_planner,
+                )
+            else:
+                state = reply_ideation_conversation(
+                    previous_state=previous_state,
+                    user_message=message,
+                    llm_call=llm_call,
+                    evidence_lookup=evidence_lookup,
+                    ground_claims=ground_claims,
+                    index_target_evidence=index_target_evidence,
+                    evidence_planner=evidence_planner,
+                )
             _store.update(session_id, state)
             sink({"type": "state", "state": _serialize_state(state)})
+        except IdeationCancelled as exc:
+            # 요청 13번 — 취소는 일반 오류가 아니다(phase="failed"로 만들지 않는다). 취소
+            # 시점까지 완료된 발언이 있으면(exc.partial_state) 그것만 canonical state로
+            # 저장한다 — 미완성 발언은 애초에 partial_state에 포함되지 않으므로, 화면에
+            # 남기는 것은 순전히 프런트의 로컬 기록 책임이다(요청 14번).
+            logger.info("[%s] 스트리밍 요청이 사용자에 의해 취소됨 request_id=%s", session_id, request_id)
+            if exc.partial_state is not None:
+                _store.update(session_id, exc.partial_state)
+                trace_event(
+                    "IDEATION_PARTIAL_STATE_SAVED",
+                    phase=exc.partial_state.get("phase"),
+                    message_count=len(exc.partial_state.get("messages", [])),
+                )
+            trace_event(
+                "IDEATION_GRAPH_CANCELLED",
+                phase=(exc.partial_state or previous_state).get("phase"),
+                next_route=(exc.partial_state or previous_state).get("next_route"),
+                completed_messages=len((exc.partial_state or previous_state).get("messages", [])),
+            )
+            sink({"type": "cancelled", "request_id": request_id})
         except ValueError as exc:
             sink({"type": "error", "code": "invalid_request", "message": str(exc)})
         except Exception:
@@ -563,7 +1044,11 @@ async def reply_conversation_stream(session_id: str, request: ReplyRequest, http
                 }
             )
         finally:
+            record.active_request_id = None
+            record.cancel_event = None
             _store.release(session_id)
+            trace_event("IDEATION_SESSION_UNLOCKED", mode="stream")
+            reset_trace_context(trace_tokens)
             event_queue.put(_STREAM_DONE_SENTINEL)
 
     threading.Thread(target=worker, daemon=True).start()
@@ -624,7 +1109,14 @@ async def start_conversation_stream(request: StartRequest, http_request: Request
     notice_and_criteria = {"competition_name": competition_name, "notice_document": competition_document}
     user_idea = {"description": user_idea_text}
     model = _effective_model(request.model)
-    evidence_lookup = _evidence_lookup_for(request.use_rag, request.project_id)
+    # 용준/Claude(2026-07-22, 요청: 세션 범위 검색 / RAG 근거 유실 수정 2탄)의 비스트리밍
+    # /start와 동일한 RAG 배선 — 가은/Claude(2026-07-22): 스트리밍 시작 경로만 이 배선이
+    # 빠져 있으면 회의 시작을 스트리밍으로 하는 세션만 근거 품질이 조용히 떨어지는
+    # 회귀가 되므로 그대로 맞춘다.
+    evidence_lookup = _evidence_lookup_for(request.use_rag, request.project_id, session_id=session_id)
+    ground_claims = _ground_claims_for(request.use_rag)
+    index_target_evidence = _index_target_evidence_for(request.use_rag, request.project_id)
+    evidence_planner = _evidence_planner_for(request.use_rag)
 
     logger.info("[ideation-conversation] 스트리밍 시작 session_id=%s max_rounds=%d", session_id, effective_max_rounds)
 
@@ -650,9 +1142,15 @@ async def start_conversation_stream(request: StartRequest, http_request: Request
                 llm_call=llm_call,
                 max_rounds=effective_max_rounds,
                 evidence_lookup=evidence_lookup,
+                ground_claims=ground_claims,
+                index_target_evidence=index_target_evidence,
+                evidence_planner=evidence_planner,
                 application_form_items=request.application_form_items,
             )
-            _store.create(state)
+            # 용준/Claude(2026-07-22, RAG 근거 유실 수정 2탄) 패턴과 동일 — 이후
+            # /reply·/reply/stream이 evidence_lookup을 다시 만들 수 있도록 이번 세션의
+            # use_rag/project_id를 함께 저장한다(스트리밍 시작 경로도 예외 없이).
+            _store.create(state, use_rag=request.use_rag, project_id=request.project_id)
             sink({"type": "state", "state": _serialize_state(state)})
         except ValueError as exc:
             sink({"type": "error", "code": "invalid_request", "message": str(exc)})
@@ -689,6 +1187,60 @@ async def start_conversation_stream(request: StartRequest, http_request: Request
             yield (json.dumps(item, ensure_ascii=False) + "\n").encode("utf-8")
 
     return StreamingResponse(event_generator(), media_type="application/x-ndjson; charset=utf-8")
+
+
+def _wait_for_release(record: "_SessionRecord", timeout: float) -> bool:
+    """busy_lock을 짧게 획득해봄으로써(성공하면 즉시 반납) "지금 이 세션을 처리 중인 요청이
+    남아있지 않은지"를 확인한다. 실제 처리 로직은 전혀 수행하지 않는다 — 오직 락 상태
+    확인용이다."""
+    acquired = record.busy_lock.acquire(timeout=timeout)
+    if acquired:
+        record.busy_lock.release()
+    return acquired
+
+
+@router.post("/{session_id}/cancel")
+async def cancel_conversation(session_id: str, request: CancelRequest):
+    """용준/Claude(2026-07-22, 요청: "잠시만" 실제 취소) — 지금 이 세션에서 진행 중인
+    스트리밍 요청을 취소한다. request.request_id가 주어지면 그 요청과 일치할 때만 신호를
+    보내고(다른 request_id면 이미 끝난 요청이므로 조용히 무시), 없으면 "지금 활성 요청
+    아무거나"를 취소한다(멱등 — 활성 요청이 이미 없어도 에러 없이 성공 처리한다).
+
+    session_locked=false를 반환할 때까지(또는 타임아웃까지) 워커 스레드가 실제로 세션
+    락을 반납하길 기다린다 — 프런트가 이 응답을 받은 뒤에만 다음 reply를 보내야
+    세션 lock 409를 피할 수 있다(요청: "취소 완료 전에 새 reply를 보내 409가 발생하지
+    않게")."""
+    _require_preview_enabled()
+    cancel_started = time.perf_counter()
+    record = _store.get_record(session_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="세션을 찾을 수 없거나 만료되었습니다.")
+
+    cancel_event = record.cancel_event
+    active_request_id = record.active_request_id
+    trace_tokens = bind_trace_context(session_id, active_request_id)
+    trace_event(
+        "IDEATION_CANCEL_REQUESTED",
+        supplied_request_id=request.request_id,
+        active_request_id=active_request_id,
+        phase=record.state.get("phase"),
+        next_route=record.state.get("next_route"),
+    )
+    try:
+        if cancel_event is not None and (request.request_id is None or request.request_id == active_request_id):
+            cancel_event.set()
+            trace_event("IDEATION_CANCEL_SIGNALLED")
+
+        released = await run_in_threadpool(_wait_for_release, record, _CANCEL_CONFIRM_TIMEOUT_SECONDS)
+        trace_event(
+            "IDEATION_CANCEL_COMPLETED",
+            session_locked=not released,
+            lock_released=released,
+            cancel_latency_ms=round((time.perf_counter() - cancel_started) * 1000, 1),
+        )
+        return {"cancelled": True, "session_locked": not released}
+    finally:
+        reset_trace_context(trace_tokens)
 
 
 @router.post("/{session_id}/finalize")

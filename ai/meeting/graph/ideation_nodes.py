@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import inspect
 from typing import Any, Callable
 
 from prompts import (
@@ -23,7 +24,85 @@ from .llm import LLMCall, parse_json_response
 # 결과를 그대로 프롬프트에 넣는다(ai/rag/orchestration/ideation_evidence_service.py 참고).
 # None이면 근거 없이 진행한다(검색 결과가 비면 프롬프트 스스로 "근거 부족"으로 처리하도록
 # ideation_common.txt 근거 사용 규칙에 이미 명시돼 있다).
+#
+# 용준/Claude(2026-07-23, 요청: stale closure 수정) — 대화형 회의(ideation-conversation)
+# evidence_lookup은 선택적으로 키워드 인자 runtime_scope(dict)도 받을 수 있다(호출 시점의
+# 최신 session_id/selected_candidate_document_id). 이 alias 자체는 여전히 필수 시그니처만
+# 표시한다 — 실제 호출은 아래 call_evidence_lookup()을 거쳐야 신구 evidence_lookup(2-인자
+# 콜러블/테스트 fake 포함)이 모두 안전하게 동작한다.
 EvidenceLookup = Callable[[str, str], list[dict]]
+
+
+def _lookup_accepts_runtime_scope(fn: Any) -> bool:
+    """evidence_lookup 콜러블이 runtime_scope 키워드 인자를 받는지 검사한다."""
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return False
+    if "runtime_scope" in sig.parameters:
+        return True
+    return any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+
+
+# 용준/Claude(2026-07-23, 요청: RAG 근거 실제 활용 강화 — evidence 참조 안정화) — chunk_id는
+# 색인 시 결정적 해시로 생성되는 20자 안팎의 불투명 문자열이다(ai/rag/chunking/chunker.py::
+# _generate_chunk_id, 예: "chk_3f9a1b2c4d5e6f70"). LLM이 claims[].evidence_refs에 이 값을
+# 한 글자도 틀리지 않고 그대로 베껴 써야만 claim_grounding이 연결에 성공하는데, 실제 운영
+# 로그에서 retrieved_evidence_count>0인데도 grounded_claim_count=0·evidence_status=
+# "expert_judgment_only"인 턴이 반복되는 것과 일치하는 실패 양상이다 — LLM이 해시를 정확히
+# 재현하는 데 실패하거나(존재하지 않는 chunk_id로 참조), 애초에 확신이 없어 인용 자체를
+# 시도하지 않는 쪽을 택한다. 이번 턴에 실제로 검색된 항목에 한해 "E1", "E2"처럼 짧고 순서만
+# 있으면 되는 참조 ID를 부여해 프롬프트/claim_grounding이 이 값으로 매칭하게 하면, LLM은
+# 화면에 보이는 그대로의 짧은 토큰만 복사하면 된다 — 원래 chunk_id는 각 항목에 그대로 남아
+# 있으므로(단순 추가 필드), frontend가 message.linked_evidence_refs를 evidence[].chunk_id와
+# 대조하는 기존 계약(IdeationConversationScreen.jsx)은 ai.rag.evidence_linking.claim_grounding.
+# ground_claims()가 매칭에 성공한 뒤 실제 chunk_id로 되돌려 채우므로 그대로 유지된다.
+def _assign_evidence_refs(items: list[dict]) -> list[dict]:
+    """검색 결과 각 항목에 이번 턴 한정 순번 참조 ID("ref")를 부여한 새 리스트를 반환한다.
+    항목이 dict가 아니거나 이미 ref가 있으면 그대로 둔다(방어적 — 실제로는 항상 plain dict가
+    들어온다)."""
+    result: list[dict] = []
+    for idx, item in enumerate(items):
+        if not isinstance(item, dict):
+            result.append(item)
+            continue
+        if "ref" in item:
+            result.append(item)
+            continue
+        item_with_ref = dict(item)
+        item_with_ref["ref"] = f"E{idx + 1}"
+        result.append(item_with_ref)
+    return result
+
+
+def call_evidence_lookup(
+    evidence_lookup: "EvidenceLookup | None",
+    persona_id: str,
+    query: str,
+    *,
+    runtime_scope: dict[str, Any] | None = None,
+) -> list[dict]:
+    """evidence_lookup(persona_id, query)를 호출하되, runtime_scope가 주어지고 콜러블이
+    이를 지원하면 함께 전달한다(요청: candidate_selection 직후 같은 요청 안에서 이어지는
+    전문가 검색이 요청 시작 시점에 캡처된 stale selected_candidate_document_id 대신 호출
+    시점의 최신 값을 쓰도록 하기 위함 — ai/meeting/graph/ideation_conv_nodes.py의 evidence_lookup
+    호출부가 이 함수를 통해서만 호출한다). ai/meeting은 ai.rag를 모르므로 runtime_scope의
+    내용(session_id/selected_candidate_document_id)에 대해 아무 것도 가정하지 않고 그대로
+    전달만 한다.
+
+    runtime_scope를 지원하지 않는 콜러블(기존 (persona_id, query) 2-인자 테스트 fake, 배치형
+    호출자 등)은 기존과 동일하게 2-인자로만 호출한다 — 완전히 하위 호환이다.
+
+    반환 직전 _assign_evidence_refs로 순번 참조 ID를 부여한다(위 설명 참고) — evidence_lookup이
+    무엇을 반환하든(실제 RAG 검색이든 테스트 fake든) 이 함수를 거치는 모든 호출자가 동일하게
+    안정적인 ref를 받는다."""
+    if evidence_lookup is None:
+        return []
+    if runtime_scope is not None and _lookup_accepts_runtime_scope(evidence_lookup):
+        items = evidence_lookup(persona_id, query, runtime_scope=runtime_scope)
+    else:
+        items = evidence_lookup(persona_id, query)
+    return _assign_evidence_refs(items)
 
 _VALID_STANCES = {"동의", "조건부_동의", "반박", "보완", "대안_제시", "사용자에게_질문"}
 _TURN_LIST_FIELDS = (
@@ -116,7 +195,7 @@ def make_ideation_expert_node(
 
     def node(state: IdeationState) -> dict:
         query = _topic_query(state)
-        retrieved = evidence_lookup(persona_id, query) if evidence_lookup is not None else []
+        retrieved = call_evidence_lookup(evidence_lookup, persona_id, query)
         prompt = build_ideation_turn_prompt(
             persona_id,
             state["notice_and_criteria"],

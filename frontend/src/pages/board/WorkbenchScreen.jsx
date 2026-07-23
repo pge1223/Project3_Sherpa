@@ -380,7 +380,7 @@ export default function WorkbenchScreen({ projectId }) {
             className="card glass"
             style={{
               flex: '0 0 auto', padding: 14,
-              border: `1px solid ${(formatCheck.page_verdict === '부족' || formatCheck.sparse_pages?.length)
+              border: `1px solid ${(formatCheck.page_verdict === '부족' || formatCheck.overall_verdict === '부족')
                 ? 'var(--coral-dim)' : 'var(--green-dim)'}`,
             }}
           >
@@ -408,9 +408,10 @@ export default function WorkbenchScreen({ projectId }) {
               <div>
                 <div style={{
                   fontSize: 12.5, fontWeight: 600, marginBottom: 3,
-                  color: formatCheck.sparse_pages?.length ? 'var(--coral)' : 'var(--green)',
+                  color: formatCheck.overall_verdict === '부족' ? 'var(--coral)' : 'var(--green)',
                 }}>
                   밀도: 평균 {Math.round((formatCheck.overall_coverage || 0) * 100)}% 채움
+                  {formatCheck.overall_verdict ? ` (${formatCheck.overall_verdict})` : ''}
                 </div>
                 <p style={{ fontSize: 12, lineHeight: 1.6, color: 'var(--text-2)' }}>{formatCheck.density_message}</p>
               </div>
