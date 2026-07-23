@@ -109,6 +109,8 @@ from fastapi import APIRouter, Header, HTTPException
 from fastapi.responses import StreamingResponse
 from jose import jwt, JWTError
 from openai import OpenAI
+
+from app.core.llm import trace_openai_client
 from starlette.concurrency import run_in_threadpool
 
 from ai.meeting.scoring import attach_impl_guides, build_revision_comparison, is_technical_persona
@@ -267,7 +269,7 @@ def _build_real_llm_call(meeting_id: str):
     chair_model = settings.chair_model()
 
     # 429/5xx 자동 재시도가 쌓여 호출이 반복되는 걸 막기 위해 SDK 기본 재시도(2회)보다 낮춘다.
-    client = OpenAI(api_key=settings.OPENAI_API_KEY, max_retries=1)
+    client = trace_openai_client(OpenAI(api_key=settings.OPENAI_API_KEY, max_retries=1))
     call_count = {"n": 0}
 
     def llm_call(prompt: str) -> str:
@@ -427,7 +429,7 @@ def _build_rubric_extraction_prompt(
 
 def _call_rubric_extraction_llm(prompt: str) -> str:
     model = settings.reviewer_model()
-    client = OpenAI(api_key=settings.OPENAI_API_KEY, max_retries=1)
+    client = trace_openai_client(OpenAI(api_key=settings.OPENAI_API_KEY, max_retries=1))
     resp = client.chat.completions.create(
         model=model,
         messages=[{"role": "user", "content": prompt}],
@@ -846,7 +848,7 @@ def _build_mentor_followup_prompt(
 
 def _call_characteristics_llm(prompt: str) -> str:
     model = settings.reviewer_model()
-    client = OpenAI(api_key=settings.OPENAI_API_KEY, max_retries=1)
+    client = trace_openai_client(OpenAI(api_key=settings.OPENAI_API_KEY, max_retries=1))
     resp = client.chat.completions.create(
         model=model,
         messages=[{"role": "user", "content": prompt}],

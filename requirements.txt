@@ -5,6 +5,11 @@ jsonschema
 pytest
 openai
 
+# LangSmith 트레이싱(관측성, 2026-07-23) - langchain-core의 전이 의존성으로 이미 설치돼
+# 있지만(langchain-huggingface/langchain-chroma가 물고 옴), ai/meeting/graph/llm.py와
+# backend/app/core/llm.py가 langsmith.wrappers.wrap_openai를 직접 import하므로 명시한다.
+langsmith
+
 # Backend (윤한)
 fastapi
 uvicorn[standard]
