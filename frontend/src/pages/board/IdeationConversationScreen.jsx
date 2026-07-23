@@ -7,8 +7,9 @@ import {
   replyIdeationConversation,
   replyIdeationConversationStream,
   startIdeationConversation,
+  startIdeationConversationStream,
 } from '../../api/ideationConversationApi'
-import { getAnnouncementAnalysis } from '../../api/documentApi'
+import { getAnnouncementAnalysis, getApplicationFormAnalysis } from '../../api/documentApi'
 import IdeaCanvasPanel from './IdeaCanvasPanel'
 import {
   EXPERT_RECOMMEND_MESSAGE,
@@ -417,24 +418,6 @@ function ErrorBanner({ error, onRetry }) {
   )
 }
 
-// 요청: "스트리밍이 비활성화되거나 fallback됐다면 화면 또는 콘솔에 그 이유가 드러나게
-// 해주세요. 조용히 기존 /reply로 fallback해서는 안 됩니다." — /reply/stream이 404(플래그
-// 꺼짐)로 응답해 동기식 /reply로 전환할 때 이 배너를 띄운다(handleSend가 console.warn도
-// 함께 남긴다). ErrorBanner와 달리 재시도 버튼이 없다 — 오류가 아니라 "이번 세션은 계속
-// 이 방식으로 동작한다"는 지속 안내이기 때문이다.
-function StreamFallbackNotice({ message }) {
-  if (!message) return null
-  return (
-    <div
-      className="card glass"
-      style={{ borderColor: 'var(--amber-dim, var(--glass-border))', marginBottom: 14, display: 'flex', alignItems: 'flex-start', gap: 10, padding: 12 }}
-    >
-      <AlertCircle size={14} color="var(--amber, var(--coral))" style={{ marginTop: 1, flexShrink: 0 }} />
-      <div style={{ fontSize: 12.5, color: 'var(--text-1)', lineHeight: 1.6 }}>{message}</div>
-    </div>
-  )
-}
-
 export function IdeationScreen({
   projectId,
   criteriaDocuments,
@@ -455,9 +438,10 @@ export function IdeationScreen({
   // createEmptyStreamState()로 비우고 ideationConv(canonical)만 그린다 — 그래서 스트리밍
   // 미리보기와 canonical 메시지가 동시에 화면에 남아 중복되는 경우가 구조적으로 없다.
   const [streamState, setStreamState] = useState(() => createEmptyStreamState())
-  // 요청: "스트리밍이 비활성화되거나 fallback됐다면 화면 또는 콘솔에 그 이유가 드러나게
-  // 해주세요" — 동기식 /reply로 전환했을 때 사용자에게 보여줄 지속 안내 문구.
-  const [streamFallbackNotice, setStreamFallbackNotice] = useState(null)
+  // 가은/Claude(2026-07-22, 요청: 회의 시작 대기 체감 개선 1단계): /start/stream이 흘려주는
+  // 진행 문구("아이디어 후보를 만들고 있습니다" -> "후보의 실현 가능성을 검토하고 있습니다").
+  // 비어 있으면 기존 고정 문구를 보여준다.
+  const [startPhaseLabel, setStartPhaseLabel] = useState('')
   // 용준/Claude(2026-07-22, 요청: "잠시만" 버튼) — 취소 확인을 기다리는 동안(백엔드에 취소
   // 신호를 보내고 세션 락이 실제로 풀릴 때까지) true. 이 사이에는 새 reply를 보내지 않는다
   // (요청: "취소 완료 전에 새 reply를 보내 세션 lock 409가 발생하지 않게").
@@ -469,6 +453,10 @@ export function IdeationScreen({
   // 미완성 발언이므로 ideationConv(canonical)에는 절대 섞이지 않는다(요청: "검증되지 않은
   // structured JSON은 저장하지 않는다").
   const [interruptedMessages, setInterruptedMessages] = useState([])
+  // 가은/Claude(2026-07-22): 아이디어 기획 캔버스(IdeaCanvasPanel)의 "심사기준 대응 포인트"
+  // 시드용. runStart는 원래 이 분석을 start API 페이로드를 만드는 데만 쓰고 버렸는데,
+  // 캔버스가 계속 보여줘야 하므로 상태로 유지한다. 세션 재개(resume) 경로에서는 start를
+  // 다시 부르지 않으므로 거기서도 별도로 채운다.
   const [announcementAnalysis, setAnnouncementAnalysis] = useState(null)
 
   const startedRef = useRef(false)
@@ -477,8 +465,10 @@ export function IdeationScreen({
   const inputRef = useRef(null)
   // 스트리밍 엔드포인트가 비활성화(404)로 확인되면 이 세션 동안은 다시 시도하지 않고
   // 동기식 API로만 보낸다(요청: "플래그가 꺼져 있으면 기존 비스트리밍 API로 돌아갈 수
-  // 있도록") — 단, 전환 시점에는 console.warn + streamFallbackNotice로 반드시 알린다
-  // (요청: "조용히 기존 /reply로 fallback해서는 안 됩니다").
+  // 있도록"). 가은/Claude(2026-07-22, 요청: 안내 배너 제거): 전환 사실은 이제 화면 배너
+  // 없이 console.warn으로만 남긴다 — 스트리밍 기본값이 켜진 뒤로(backend/app/config.py::
+  // ENABLE_IDEATION_STREAMING=True) 이 전환은 개발자가 의도적으로 플래그를 껐을 때만
+  // 일어나므로, 일반 사용자에게 설정 안내 문구를 보여줄 이유가 없어졌다.
   const streamingSupportedRef = useRef(true)
   // 네트워크로부터 최종 'state'(또는 'error') 이벤트를 이미 받았지만, 아직 화면 타이핑이
   // 그 텍스트를 다 따라잡지 못해 canonical로 교체를 미루고 있는 상태를 담는다. ref인
@@ -555,20 +545,73 @@ export function IdeationScreen({
   async function runStart() {
     setStarting(true)
     setError(null)
+    setStartPhaseLabel('')
     try {
       let analysis = { has_announcement: false }
       if (projectId) {
         analysis = await getAnnouncementAnalysis(projectId)
       }
       setAnnouncementAnalysis(analysis)
-      const data = await startIdeationConversation({
+
+      // 가은/Claude(2026-07-22, 요청: 업로드 영역 통합) — 신청서 양식 전용 문서 목록이 따로
+      // 없다("공모전 공고 · 평가기준 · 신청서 양식"을 EntryScreen의 한 업로드 영역에서 함께
+      // 올린다). criteriaDocuments가 준비된 상태(색인 완료 또는 확인 필요)일 때만 조회한다
+      // — 신청서 양식을 실제로 안 올렸으면 백엔드가 items를 빈 배열로 돌려줄 뿐이다.
+      // 실패해도(네트워크 오류 등) 회의 시작 자체를 막지 않는다 — "참고 자료"일 뿐 필수가
+      // 아니기 때문이다.
+      let applicationFormItems = []
+      const hasReadyCriteriaDoc = criteriaDocuments.some((doc) => doc.status === 'done' || doc.status === 'warning')
+      if (projectId && hasReadyCriteriaDoc) {
+        try {
+          const formAnalysis = await getApplicationFormAnalysis(projectId)
+          applicationFormItems = formAnalysis.items || []
+        } catch (err) {
+          console.warn('[ideation-conv] 신청양식 항목 조회에 실패해 항목 없이 회의를 시작합니다.', err)
+        }
+      }
+
+      const payload = {
         competitionName: competitionNameFrom(analysis),
         competitionDocument: buildCompetitionDocumentText(analysis),
         userIdea: '', // discovery 모드로 시작해야 하므로 반드시 빈 문자열로 보낸다.
         maxRounds: 3,
         useRag: resolveUseRag(projectId, criteriaDocuments),
         projectId,
-      })
+        applicationFormItems,
+      }
+
+      // 가은/Claude(2026-07-22, 요청: 회의 시작 대기 체감 개선 1단계): 시작도 답장과 같은
+      // 스트리밍 통로를 먼저 시도한다 — 후보 생성(10~30초+) 동안 고정 문구 대신 실제 진행
+      // 단계(phase 이벤트)가 표시된다. 스트리밍이 꺼져 있으면(404) 기존 동기식 start로
+      // 조용히 폴백하되 console.warn은 남긴다(reply 쪽과 같은 정책).
+      let data = null
+      if (streamingSupportedRef.current) {
+        try {
+          let finalState = null
+          let streamError = null
+          await startIdeationConversationStream(payload, {
+            onEvent: (event) => {
+              if (event.type === 'phase') setStartPhaseLabel(event.label || '')
+              else if (event.type === 'state') finalState = event.state
+              else if (event.type === 'error') streamError = event
+            },
+          })
+          if (streamError) throw new Error(streamError.message || '대화형 회의 시작 중 오류가 발생했습니다.')
+          if (!finalState) throw new Error('스트리밍이 최종 결과 없이 종료되었습니다. 다시 시도해 주세요.')
+          data = finalState
+        } catch (err) {
+          if (classifyIdeationConvError(err).type !== 'disabled') throw err
+          streamingSupportedRef.current = false
+          console.warn(
+            '[ideation-stream] POST /start/stream 이 비활성화(404) 응답을 반환해 동기식 /start로 전환합니다. ' +
+              '백엔드 backend/.env의 ENABLE_IDEATION_STREAMING 값을 확인하세요.',
+            err,
+          )
+        }
+      }
+      if (!data) {
+        data = await startIdeationConversation(payload)
+      }
       setIdeationConv(data)
       const key = ideationSessionStorageKey(projectId)
       if (key) sessionStorage.setItem(key, data.session_id)
@@ -576,6 +619,7 @@ export function IdeationScreen({
       setError(classifyIdeationConvError(err))
     } finally {
       setStarting(false)
+      setStartPhaseLabel('')
     }
   }
 
@@ -665,7 +709,6 @@ export function IdeationScreen({
     if (!target && !canReplyOrContinue) return
     setSending(true)
     setError(null)
-    setStreamFallbackNotice(null)
     setInterjectTarget(null)
 
     if (!streamingSupportedRef.current && !target) {
@@ -706,16 +749,14 @@ export function IdeationScreen({
       const classified = classifyIdeationConvError(err)
       if (classified.type === 'disabled') {
         // 스트리밍 자체가 꺼져 있다(/reply/stream 404) — 이번 세션은 이후 계속 동기식
-        // API만 쓴다. 요청: "조용히 기존 /reply로 fallback해서는 안 됩니다" — 콘솔과
-        // 화면 배너 양쪽에 이유를 남긴 뒤에만 전환한다.
+        // API만 쓴다. 가은/Claude(2026-07-22, 요청: 안내 배너 제거): "조용히 fallback 금지"
+        // 취지는 console.warn으로 유지하되, 사용자용 화면 배너는 더 이상 띄우지 않는다
+        // (스트리밍이 기본 활성화된 뒤로는 개발자가 의도적으로 끈 경우에만 오는 경로다).
         streamingSupportedRef.current = false
         console.warn(
           '[ideation-stream] POST /reply/stream 이 비활성화(404) 응답을 반환해 동기식 /reply로 전환합니다. ' +
             '백엔드 backend/.env의 ENABLE_IDEATION_STREAMING 값을 확인하세요.',
           err,
-        )
-        setStreamFallbackNotice(
-          '실시간 스트리밍 응답이 비활성화되어 있어 일반 응답 방식으로 전환했습니다. (백엔드 ENABLE_IDEATION_STREAMING 설정을 확인하세요)',
         )
         await sendNonStreaming(text)
         setSending(false)
@@ -847,12 +888,13 @@ export function IdeationScreen({
         </div>
 
         <ErrorBanner error={error} onRetry={handleRestart} />
-        <StreamFallbackNotice message={streamFallbackNotice} />
         <StreamingCursorStyle />
 
         <div className="card glass" style={{ minHeight: 360, maxHeight: 520, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 4, padding: 16 }}>
           {starting && !ideationConv && (
-            <p style={{ color: 'var(--text-2)', fontSize: 13 }}>공모전 분석을 바탕으로 아이디어 후보를 만들고 있어요...</p>
+            <p style={{ color: 'var(--text-2)', fontSize: 13 }}>
+              {startPhaseLabel ? `${startPhaseLabel}...` : '공모전 분석을 바탕으로 아이디어 후보를 만들고 있어요...'}
+            </p>
           )}
           {canonicalMessages.map((m) => (
             <MessageBubble key={m.message_id} message={m} allMessages={visibleMessages} />
