@@ -300,4 +300,22 @@ def make_streaming_llm_call(
             raise IdeationCancelled(session_id, request_id)
         return "".join(full_raw_parts)
 
+    def discard_streamed_prompt(prompt: str, reason: str) -> None:
+        """검증에 실패한 임시 초안을 프런트에서 제거한다.
+
+        canonical state에는 원래 저장되지 않지만 두 번째 실패 뒤에는 다음 재시도가 없어
+        화면에 남을 수 있으므로, 명시적인 reset 이벤트를 보낸다.
+        """
+        # pop해서 다음 재시도 시작 시 같은 메시지에 reset을 중복 전송하지 않는다.
+        stream_id = reset_tokens.pop(_prompt_key(prompt), None)
+        if not stream_id:
+            return
+        sink({"type": "message_reset", "message_id": stream_id})
+        trace_event(
+            "IDEATION_STREAM_MESSAGE_DISCARDED",
+            message_id=stream_id,
+            reason=reason,
+        )
+
+    setattr(llm_call, "discard_streamed_prompt", discard_streamed_prompt)
     return llm_call

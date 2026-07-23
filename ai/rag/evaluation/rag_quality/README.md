@@ -84,3 +84,21 @@ Faithfulness/Persona Evidence Fit 판정의 유일한 근거 컨텍스트다(LLM
   0건이라 평가 대상에서 제외했다 — 실제 사례 문서가 색인되면 별도 하위 모듈로 확장 가능.
 - `estimated_cost_usd`는 정확한 토큰 사용량이 아니라 호출 1건당 대략적인 상수를 곱한
   근사치다.
+
+## 다중 문서 품질 게이트
+
+`multi_document_quality.py`는 기존 Recall 평가에 Planner 선택과 claim-grounding 검수를
+추가한다. `datasets/ideation_multi_document_template.json`을 복사해 서로 다른 실제 프로젝트
+3~5개, 프로젝트당 최소 5개 쟁점을 채우고 사람이 청크·주장 유형·지원 여부를 확인한 뒤
+`human_verified=true`로 바꾼다.
+
+```bash
+python -m ai.rag.evaluation.rag_quality.multi_document_quality \
+  reports/ideation_multi_document_observations.json \
+  --output reports/ideation_multi_document_quality.json
+```
+
+기본 통과 기준은 검수된 3개 프로젝트·15케이스, Recall@5 0.80, Planner precision/coverage
+0.80, citation precision 및 claim type accuracy 0.90, unsupported document fact 0.05 이하,
+issue match 0.90, Planner fallback 0.10 이하이다. 미검수 케이스는 참고용으로만 세고 점수에서
+제외한다.
