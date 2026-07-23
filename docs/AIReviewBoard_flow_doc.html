@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<title>AI Review Board — User Flow / 요구사항 흐름도</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/static/pretendard.css" />
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mermaid/10.9.0/mermaid.min.js"></script>
+<style>
+  :root{
+    --bg-0:#faf8f4; --bg-1:#ffffff; --bg-2:#f1eee5;
+    --border: rgba(28,26,46,0.10);
+    --purple:#7c5cea; --purple-dim: rgba(124,92,234,0.10);
+    --coral:#e0603d; --coral-dim: rgba(224,96,61,0.10);
+    --green:#16a37a; --green-dim: rgba(22,163,122,0.10);
+    --amber:#b8830b; --amber-dim: rgba(184,131,11,0.12);
+    --text-0:#1c1a2e; --text-1:#5b5770; --text-2:#918d9f;
+    --mono:'JetBrains Mono', ui-monospace, monospace;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0; background:
+      radial-gradient(1000px 550px at 10% -10%, var(--purple-dim), transparent 60%),
+      radial-gradient(900px 500px at 100% 0%, var(--green-dim), transparent 55%),
+      var(--bg-0);
+    color:var(--text-0); font-family:'Pretendard', -apple-system, sans-serif;
+    padding:48px 56px;
+  }
+  .eyebrow{ font-family:var(--mono); font-size:11px; letter-spacing:0.06em; color:var(--purple);
+    background:var(--purple-dim); display:inline-flex; padding:4px 10px; border-radius:99px; margin-bottom:14px; }
+  h1{ font-size:26px; margin:0 0 6px; }
+  .sub{ color:var(--text-2); font-size:13.5px; margin-bottom:36px; }
+  .section{ background:var(--bg-1); border:1px solid var(--border); border-radius:18px; padding:28px 30px; margin-bottom:28px;
+    box-shadow:0 2px 16px rgba(28,26,46,0.05); }
+  .section h2{ font-size:16px; margin:0 0 4px; display:flex; align-items:center; gap:8px; }
+  .tag{ font-family:var(--mono); font-size:10.5px; padding:2px 8px; border-radius:99px; }
+  .tag.purple{ background:var(--purple-dim); color:var(--purple); }
+  .tag.coral{ background:var(--coral-dim); color:var(--coral); }
+  .section p.desc{ color:var(--text-2); font-size:12.5px; margin:6px 0 20px; line-height:1.6; }
+  .mermaid{ font-family:'Pretendard', sans-serif; }
+  .legend{ display:flex; gap:18px; flex-wrap:wrap; margin-top:18px; padding-top:16px; border-top:1px solid var(--border); }
+  .legend div{ font-size:11.5px; color:var(--text-2); display:flex; align-items:center; gap:6px; }
+  .dot{ width:9px; height:9px; border-radius:50%; }
+  .note{ background:var(--amber-dim); border:1px solid rgba(184,131,11,0.2); border-radius:12px; padding:12px 16px;
+    font-size:12px; color:#8a6607; margin-top:16px; line-height:1.7; }
+</style>
+</head>
+<body>
+
+<div class="eyebrow">2026-07-22 · 프로토타입 화면 기준 정리</div>
+<h1>AI Review Board — User Flow &amp; 요구사항 흐름도</h1>
+<div class="sub">현재 구현된 라이트 테마 프로토타입(AIReviewBoard_App.jsx) 화면 구성을 기준으로 정리. 방향성 문서(2026-07-20) 로직을 실제 화면 단위로 매핑한 것과, 그 이면의 요구사항/분기 로직 두 가지로 나눠서 봄.</div>
+
+<div class="section">
+  <h2>1. User Flow <span class="tag purple">실제 구현 화면 기준</span></h2>
+  <p class="desc">진입 화면부터 각 화면 전환, 워크벤치 내 오버레이(위원 소집), 버전 이력 루프까지 — 지금 프로토타입에 있는 화면 단위 그대로.</p>
+  <pre class="mermaid">
+flowchart TD
+  A["진입 화면<br/>모드 선택 + 공고 URL/PDF 입력"] --> B{"모드 선택"}
+  B -->|작성 전| C1["공모전 분석"]
+  B -->|작성 후| C2["공모전 분석"]
+
+  C1 --> D["주제 아이디어 회의<br/>기획·개발 위원 순차 질문 (채팅)"]
+  D --> E["주제 후보 비교 카드"]
+  E --> F["주제 확정 카드<br/>문제정의 · 해결안 · 대상 · 기대효과 · 검증방법"]
+
+  C2 --> G["기획서 업로드"]
+  G --> H["문서 개요<br/>문서 하이라이트 · 오탈자 검색 · 사이드 코멘트"]
+  H --> K["버전 이력<br/>v1.0 → v1.1 → v2.0, 항목별 반영 상태"]
+
+  classDef pre fill:#f3efff,stroke:#7c5cea,color:#1c1a2e;
+  classDef post fill:#fdece6,stroke:#e0603d,color:#1c1a2e;
+  classDef common fill:#eafaf3,stroke:#16a37a,color:#1c1a2e;
+  class C1,D,E,F pre;
+  class C2,G,H,K post;
+  class A common;
+  </pre>
+  <div class="legend">
+    <div><span class="dot" style="background:#7c5cea"></span>작성 전 전용 화면</div>
+    <div><span class="dot" style="background:#e0603d"></span>작성 후 전용 화면</div>
+    <div><span class="dot" style="background:#16a37a"></span>공통</div>
+  </div>
+  <div class="note">
+    좌측 내비 레일에서 같은 모드 안의 이전 단계로는 언제든 이동 가능 (Shell 컴포넌트 공통 기능). 모드 간 전환은 현재 프로토타입엔 없음 — 필요하면 별도 확인 필요. 워크벤치 화면과 위원회 소집 오버레이는 이 흐름에서 제외했습니다.
+  </div>
+</div>
+
+<div class="section">
+  <h2>2. 요구사항 흐름도 <span class="tag coral">조건 분기 · 로직 기준</span></h2>
+  <p class="desc">화면이 아니라 "무엇을 근거로, 어떤 조건에서, 무엇을 보여줄지"의 요구사항 레벨 분기. 방향성 문서 0·3·6장 로직을 반영.</p>
+  <pre class="mermaid">
+flowchart TD
+  A["공모전 URL/PDF 입력"] --> B{"심사기준·배점이<br/>공고문에 명시되어 있는가"}
+  B -->|있음| C["심사기준을 각 위원 의견·점수의<br/>최우선 근거로 사용<br/>(예: 기술성 30점)"]
+  B -->|없음| D["공고 목적 · 제출항목 · 수상경향을<br/>근거로 참고 분석 생성<br/>'공식 심사기준 미확인' 명시"]
+
+  C --> E{"사용자 상태"}
+  D --> E
+
+  E -->|작성 전| F["AI 위원 질문<br/>관심사 · 역량 · 보유자원"]
+  F --> G["주제 후보 2~3개 제안<br/>적합성 · 차별성 · 리스크 비교"]
+  G --> H["문제정의/해결안/대상/기대효과/검증방법<br/>초안 제공 → 기획서 작성 출발점"]
+
+  E -->|작성 후| I["즉시 피드백 기본 제공<br/>기준별 점수 · 근거 · 수정 체크리스트"]
+  I --> M["새 버전과 이전 버전 비교<br/>미반영 / 부분반영 / 해결 / 신규 리스크"]
+
+  classDef cond fill:#fff8e6,stroke:#b8830b,color:#1c1a2e;
+  classDef pre fill:#f3efff,stroke:#7c5cea,color:#1c1a2e;
+  classDef post fill:#fdece6,stroke:#e0603d,color:#1c1a2e;
+  class B,E cond;
+  class F,G,H pre;
+  class I,M post;
+  </pre>
+  <div class="legend">
+    <div><span class="dot" style="background:#b8830b"></span>조건 분기</div>
+    <div><span class="dot" style="background:#7c5cea"></span>작성 전 로직</div>
+    <div><span class="dot" style="background:#e0603d"></span>작성 후 로직</div>
+  </div>
+  <div class="note">
+    위원회 소집 관련 분기는 이 다이어그램에서 제외했습니다. 별도로 다뤄야 하면 말씀해주세요.
+  </div>
+</div>
+
+<script>
+  mermaid.initialize({ startOnLoad: true, theme: 'base',
+    themeVariables: {
+      primaryColor: '#f3efff', primaryTextColor: '#1c1a2e', primaryBorderColor: '#7c5cea',
+      lineColor: '#918d9f', fontFamily: 'Pretendard, sans-serif', fontSize: '13px'
+    }
+  });
+</script>
+</body>
+</html>
