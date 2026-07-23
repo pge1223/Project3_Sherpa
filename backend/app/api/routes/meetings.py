@@ -98,6 +98,7 @@ import json
 import logging
 import re
 import sys
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -260,6 +261,12 @@ def get_current_user(authorization: Optional[str]) -> str:
         raise HTTPException(status_code=401, detail="유효하지 않은 토큰입니다")
 
 
+# 경이/Claude(2026-07-23): 채점 과정 트레이스 로그 파일(팀장 제출용 — 위원이 "공고문 평가기준·
+# 배점 + 평가 대상 문서 근거"를 실제로 받아 채점·피드백을 산출하는지, User RAG 검증용). 각 LLM
+# 호출의 프롬프트(입력)와 응답(출력) 원본을 그대로 append한다. 터미널에서 `tail -f` 로 실시간 관찰.
+_SCORING_TRACE_FILE = Path(tempfile.gettempdir()) / "reviewboard_scoring_trace.log"
+
+
 def _build_real_llm_call(meeting_id: str):
     """실제 OpenAI 호출. LLM_PROFILE(dev|quality|premium)에 따라 모델을 고르고, 호출마다
     로그를 남기고, 상한을 넘으면 예외로 중단한다."""
@@ -277,14 +284,20 @@ def _build_real_llm_call(meeting_id: str):
                 f"[{meeting_id}] LLM 호출 상한({_MAX_LLM_CALLS_PER_MEETING}회) 초과 — "
                 "루프 또는 재시도 폭주 의심, 중단합니다."
             )
-        model = chair_model if _CHAIR_MARKER in prompt else reviewer_model
+        is_chair = _CHAIR_MARKER in prompt
+        model = chair_model if is_chair else reviewer_model
         started = time.time()
+        # 경이/Claude(2026-07-23): temperature=0(결정론) — 기본값 1.0에서는 같은 문서를 채점해도
+        # 매번 ±수 점씩 흔들려(노이즈가 품질을 가림) "더 좋은 문서가 더 낮게" 나오거나 개선본이
+        # 하향되는 문제가 있었다(실측). 채점·종합은 재현성이 중요한 판단 작업이라 0으로 고정.
         resp = client.chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": prompt}],
             response_format={"type": "json_object"},
+            temperature=0,
         )
         elapsed = time.time() - started
+        content = resp.choices[0].message.content
         logger.info(
             "[%s] LLM 호출 #%d model=%s elapsed=%.1fs usage=%s",
             meeting_id,
@@ -293,7 +306,25 @@ def _build_real_llm_call(meeting_id: str):
             elapsed,
             resp.usage.model_dump() if resp.usage else None,
         )
-        return resp.choices[0].message.content
+        # 채점 과정 트레이스: 프롬프트(위원에게 준 공고문 기준+문서 근거+지시)와 응답(점수·피드백)
+        # 원본을 그대로 남긴다 — 팀장 제출/터미널 tail -f 관찰용. 실패해도 채점은 계속되게 방어.
+        try:
+            with open(_SCORING_TRACE_FILE, "a", encoding="utf-8") as tf:
+                tf.write("\n" + "=" * 92 + "\n")
+                tf.write(
+                    f"[{meeting_id}] LLM 호출 #{call_count['n']} · "
+                    f"역할={'위원장 종합' if is_chair else '위원 채점/근거평가'} · model={model} · "
+                    f"temperature=0 · elapsed={elapsed:.1f}s\n"
+                )
+                tf.write("-" * 92 + "\n")
+                tf.write("── 프롬프트(입력): 위원에게 준 공고문 평가기준·배점 + 평가 대상 문서 근거 + 채점 지시 ──\n")
+                tf.write(prompt.rstrip() + "\n")
+                tf.write("-" * 92 + "\n")
+                tf.write("── 응답(출력): 위원이 낸 항목별 점수·판정·강점/지적/제안 ──\n")
+                tf.write((content or "").rstrip() + "\n")
+        except OSError as exc:
+            logger.warning("[%s] 트레이스 기록 실패: %s", meeting_id, exc)
+        return content
 
     return llm_call
 
