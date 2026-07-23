@@ -12,6 +12,7 @@ import {
   uploadDocument,
   getDocumentStatus,
   getAnnouncementAnalysis,
+  getApplicationFormAnalysis,
   getContestWorksByTitle,
   deleteDocument,
   getDocuments,
@@ -408,9 +409,18 @@ function EntryScreen({ onEnter, onModeSelect, loading, error, projectId, ensureP
       </div>
 
       <div className="card glass">
-        <div style={{ fontSize: 13, color: "var(--text-1)", marginBottom: 10, display: "flex", alignItems: "center", gap: 6 }}>
-          <Link2 size={14} /> 공모전 공고 · 평가기준
-          <span className="badge amber mono" style={{ marginLeft: 6 }}>선택 입력</span>
+        <div style={{ fontSize: 13, color: "var(--text-1)", marginBottom: 4, display: "flex", alignItems: "center", gap: 6 }}>
+          <Link2 size={14} /> 공모전 공고 · 평가기준 · 신청서 양식
+          {/* 가은/Claude(2026-07-22): "분석 시작"이 공고문 등록·색인 완료를 요구하도록
+              바뀌면서(아래 canStart 참고) 선택 입력 -> 필수 입력으로 변경. */}
+          <span className="badge purple mono" style={{ marginLeft: 6 }}>필수 입력</span>
+        </div>
+        {/* 가은/Claude(2026-07-22, 요청: 업로드 영역 통합) — 신청서 양식 전용 카드를 따로
+            두지 않고 여기 함께 올린다. 신청서 양식을 올리면 회의 시작 시 기입 항목만 뽑아
+            위원 발언에 참고 자료로 약하게 반영된다(질문 주제·순서는 안 바뀜). */}
+        <div style={{ fontSize: 12, color: "var(--text-2)", marginBottom: 10 }}>
+          공고문·평가기준과 함께 신청서 양식도 올려두면, 위원들이 논의할 때 신청서에 옮기기
+          좋은 표현으로 다듬어줘요.
         </div>
 
         <div style={{ display: "flex", gap: 4, background: "var(--bg-2)", borderRadius: 999, padding: 4, marginBottom: 14 }}>
@@ -457,7 +467,7 @@ function EntryScreen({ onEnter, onModeSelect, loading, error, projectId, ensureP
             <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
               <Upload size={20} color="var(--purple)" />
               <div>
-                <div style={{ fontSize: 14, fontWeight: 700 }}>{isCriteriaDragging ? '여기에 놓으세요' : '평가 기준 문서'}</div>
+                <div style={{ fontSize: 14, fontWeight: 700 }}>{isCriteriaDragging ? '여기에 놓으세요' : '공고문 · 평가기준 · 신청서 양식'}</div>
                 <div style={{ fontSize: 12, color: 'var(--text-2)' }}>PDF, DOCX, PPTX, HWP, HWPX</div>
               </div>
             </div>
@@ -509,14 +519,43 @@ function EntryScreen({ onEnter, onModeSelect, loading, error, projectId, ensureP
 
       {error && <p style={{ color: "var(--coral)", fontSize: 13, marginTop: 12 }}>{error}</p>}
 
-      <button
-        className="btn-primary"
-        style={{ marginTop: 24, width: "100%", opacity: mode ? 1 : 0.4, display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}
-        disabled={!mode || loading}
-        onClick={() => onEnter(mode)}
-      >
-        {loading ? "준비하는 중..." : "분석 시작"} <ArrowRight size={15} />
-      </button>
+      {/* 가은/Claude(2026-07-22): 정책 변경 — 공고문·평가기준 등록이 "선택"에서 "필수"로.
+          공고문 없이 시작하면 이후 화면이 전부 "미등록" 폴백으로만 돌아 분석 가치가 없어서,
+          ① 공고문(URL 가져오기 또는 파일 업로드)이 실제로 등록되고 ② 색인(문서 분석)까지
+          끝나야 "분석 시작"이 눌리게 한다. warning(색인은 됐지만 내용 확인 필요)은 처리
+          자체는 끝난 상태라 시작을 막지 않는다 — error만 있는 경우는 등록 문서가 없는
+          것과 동일하게 취급한다. */}
+      {(() => {
+        const hasReadyCriteriaDoc = documents.some((doc) => doc.status === 'done' || doc.status === 'warning');
+        const isIndexingCriteriaDoc = documents.some((doc) => doc.status === 'embedding');
+        const canStart = !!mode && hasReadyCriteriaDoc && !isIndexingCriteriaDoc && !criteriaLoading;
+        const guide = !mode
+          ? '위에서 진행 방식을 먼저 선택해주세요.'
+          : isIndexingCriteriaDoc || criteriaLoading
+            ? '공고문 분석(색인)이 끝나면 시작할 수 있어요.'
+            : !hasReadyCriteriaDoc
+              ? '공모전 공고 URL을 가져오거나 평가 기준 문서를 업로드해야 시작할 수 있어요.'
+              : '';
+        return (
+          <>
+            <button
+              className="btn-primary"
+              style={{ marginTop: 24, width: "100%", opacity: canStart ? 1 : 0.4, display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}
+              disabled={!canStart || loading}
+              onClick={() => onEnter(mode)}
+            >
+              {loading
+                ? "준비하는 중..."
+                : isIndexingCriteriaDoc || criteriaLoading
+                  ? "공고문 분석 중..."
+                  : "분석 시작"} <ArrowRight size={15} />
+            </button>
+            {guide && !loading && (
+              <p style={{ fontSize: 12.5, color: "var(--text-2)", marginTop: 10, textAlign: "center" }}>{guide}</p>
+            )}
+          </>
+        );
+      })()}
     </div>
   );
 }
@@ -538,6 +577,12 @@ function AnalysisScreen({ mode, onNext, onBack, projectId }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [analysis, setAnalysis] = useState(null);
+  // 가은/Claude(2026-07-22, 요청: 신청양식 항목 패널 분리) — "평가에서 갈리는 지점"
+  // (심사 기준·배점)과 "신청양식에서 써야 할 항목"(실제 빈칸)은 성격이 다른 정보라 섞이면
+  // 헷갈린다(실측: 도시 부문·기업 부문 두 신청서가 한 파일에 있어 평가기준 10개가 한
+  // 리스트에 뒤섞여 나온 사례). getApplicationFormAnalysis는 이미 아이디어 회의 시작 시
+  // 내부적으로 쓰던 것과 같은 함수 — 여기서는 화면에 직접 보여주는 용도로 별도 호출한다.
+  const [formAnalysis, setFormAnalysis] = useState(null);
   const [detailOpen, setDetailOpen] = useState(false);
   const [ideaTopic, setIdeaTopic] = useState(null);
   const [workDetail, setWorkDetail] = useState(null); // { contestTitle, works } | null
@@ -571,6 +616,7 @@ function AnalysisScreen({ mode, onNext, onBack, projectId }) {
     if (!projectId) {
       setLoading(false);
       setAnalysis({ has_announcement: false });
+      setFormAnalysis(null);
       return;
     }
     let cancelled = false;
@@ -580,6 +626,11 @@ function AnalysisScreen({ mode, onNext, onBack, projectId }) {
       .then((data) => { if (!cancelled) setAnalysis(data); })
       .catch((err) => { if (!cancelled) setError(err.message); })
       .finally(() => { if (!cancelled) setLoading(false); });
+    // 신청양식 항목은 "선택 정보"라 실패해도 공고문 분석 자체를 막지 않는다 — 조용히
+    // null로 두면 아래 카드가 그냥 안 나타난다.
+    getApplicationFormAnalysis(projectId)
+      .then((data) => { if (!cancelled) setFormAnalysis(data); })
+      .catch(() => { if (!cancelled) setFormAnalysis(null); });
     return () => { cancelled = true; };
   }, [projectId]);
 
@@ -739,6 +790,37 @@ function AnalysisScreen({ mode, onNext, onBack, projectId }) {
                 </ul>
               </div>
 
+              {/* 가은/Claude(2026-07-22, 요청: 신청양식 항목 패널 분리) — 신청양식을 실제로
+                  등록했고(has_application_form) 기입란이 발견됐을 때만(items.length > 0)
+                  노출한다. "평가에서 갈리는 지점"(위 카드, 심사 기준·배점)과 섞이지 않도록
+                  별도 카드로 둔다 — 신청양식이 여러 부문(예: 도시/기업)을 한 파일에 담고
+                  있으면 항목이 섞여 보일 수 있다는 것도 함께 안내한다. */}
+              {formAnalysis?.has_application_form && formAnalysis.items.length > 0 && (
+                <div className="card glass">
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+                    <FileText size={15} color="var(--purple)" />
+                    <div style={{ fontWeight: 700, fontSize: 14 }}>신청양식에서 써야 할 항목</div>
+                  </div>
+                  <div style={{ fontSize: 11.5, color: "var(--text-2)", marginBottom: 10 }}>
+                    등록한 신청양식에서 찾은 기입란이에요. 여러 부문(도시/기업 등)이 한 문서에
+                    있으면 관련 없는 항목도 섞여 보일 수 있어요.
+                  </div>
+                  <ul style={{ margin: 0, paddingLeft: 16, fontSize: 12.5, color: "var(--text-1)", lineHeight: 1.9 }}>
+                    {formAnalysis.items.map((item, i) => (
+                      <li key={i}>
+                        <strong style={{ fontWeight: 600 }}>{item.field_name}</strong>
+                        {item.char_limit != null && (
+                          <span className="mono" style={{ color: "var(--text-2)", fontSize: 11 }}> ({item.char_limit}자 이내)</span>
+                        )}
+                        {item.description && (
+                          <div style={{ fontSize: 11.5, color: "var(--text-2)" }}>{item.description}</div>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
               <div className="card glass">
                 <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 10 }}>출처</div>
                 {evidence.length === 0 && <div style={{ fontSize: 12.5, color: "var(--text-2)" }}>표시할 근거가 없어요.</div>}
@@ -868,6 +950,16 @@ function UploadAndAnalyzeScreen({ projectId, onFeedbackReady, onBack, initialDoc
   const [reviewsReady, setReviewsReady] = useState(false)
   const progressTokenRef = useRef(null)
   const pollTimerRef = useRef(null)
+  // 가은/Claude(2026-07-22): 실측 버그 — "분석 진행률이 85%에서 15%로 되돌아간다". 원인은
+  // handleStartAnalyze의 유일한 중복 실행 방지가 `if (analyzing) return`(React state)뿐이라,
+  // 클릭 이벤트 두 번이 setAnalyzing(true)의 리렌더 커밋보다 먼저 잇달아 들어오면 두 번 다
+  // 그 가드를 통과한다 — 그러면 서로 다른 progressToken으로 분석이 두 벌 시작되고, 폴링
+  // setInterval도 두 개가 생기는데 화면엔 snapshot 하나뿐이라 "나중에 도착한 응답"이
+  // 이긴다. 먼저 시작한 분석이 85%(score_done)까지 가도, 뒤늦게 시작한 두 번째 분석의
+  // 낮은 진행률(예: reviews_done 1/12 = 15%) 응답이 나중에 도착하면 화면이 되돌아간
+  // 것처럼 보인다. state는 커밋까지 지연될 수 있어 신뢰할 수 없으므로, 클릭 즉시(동기적으로)
+  // 갱신되는 ref로 잠근다.
+  const startingRef = useRef(false)
 
   // 가은/Claude(2026-07-20): 실측 버그 — 분석 진행 중에 사이드바로 다른 단계로 이동하면
   // (unmount) 이 interval이 안 멈추고 계속 살아서 백엔드를 계속 두드렸다
@@ -928,7 +1020,10 @@ function UploadAndAnalyzeScreen({ projectId, onFeedbackReady, onBack, initialDoc
   // 가은/Claude(2026-07-20): "멘토링선택xx" — MentorSelectionPage의 후보 카드 선택 UI 없이,
   // getMentorCandidates()가 추천한 후보를 순서대로 최대 4명까지 자동으로 그대로 쓴다.
   async function handleStartAnalyze() {
-    if (analyzing) return
+    // 동기적 잠금 — React state(analyzing)는 커밋이 지연될 수 있어 빠른 두 번째 클릭이
+    // 이 함수를 다시 통과할 수 있다(위 startingRef 주석 참고). ref는 대입 즉시 반영된다.
+    if (startingRef.current || analyzing) return
+    startingRef.current = true
     setCandidatesError('')
     setAnalyzing(true)
     try {
@@ -946,7 +1041,11 @@ function UploadAndAnalyzeScreen({ projectId, onFeedbackReady, onBack, initialDoc
       pollTimerRef.current = setInterval(() => {
         getAnalyzeProgress(projectId, progressToken).then((snap) => {
           if (!snap) return
-          setSnapshot(snap)
+          // 가은/Claude(2026-07-22): 방어적 이중 안전장치 — 위 startingRef 잠금으로 중복 실행
+          // 자체를 막았지만, 네트워크 지연으로 폴링 요청·응답 순서가 뒤바뀔 가능성은 여전히
+          // 남는다(요청 A가 늦게 도착). 같은 실행 안에서 진행률이 이미 도달한 지점보다 뒤로
+          // 가는 스냅샷은 화면에 반영하지 않는다 — 진행률은 원래 한쪽으로만 진행해야 한다.
+          setSnapshot((prev) => (prev && overallPercent(snap) < overallPercent(prev) ? prev : snap))
           if (snap.chair_done && pollTimerRef.current) {
             clearInterval(pollTimerRef.current)
             pollTimerRef.current = null
@@ -960,6 +1059,7 @@ function UploadAndAnalyzeScreen({ projectId, onFeedbackReady, onBack, initialDoc
     } catch (err) {
       setCandidatesError(err.message)
       setAnalyzing(false)
+      startingRef.current = false
       if (pollTimerRef.current) {
         clearInterval(pollTimerRef.current)
         pollTimerRef.current = null

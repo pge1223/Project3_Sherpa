@@ -341,6 +341,7 @@ def build_ideation_conv_discussion_prompt(
     conversation_context: Any,
     speaks_second: bool,
     discussion_stage: str = "initial_position",
+    application_form_items: Any = None,
 ) -> str:
     """기획/개발 전문가의 "보완 의견 턴" 실행 프롬프트를 조립한다. speaks_second=True인
     쪽(라운드의 두 번째 발언자)만 다음 행동(continue_round/await_user_decision)을
@@ -350,7 +351,12 @@ def build_ideation_conv_discussion_prompt(
     discussion_stage(용준/Claude(2026-07-21, 요청: 위원 간 실제 회의로 개편)는
     "initial_position"(최초 의견, 기본값 — 기존 호출부 하위 호환) / "review"(상대 의견을
     검토) / "revision"(검토를 반영해 수정하거나 유지) 중 하나다. 어느 값이든 스키마는
-    동일하고(호출부가 항상 같은 필드를 읽을 수 있다), 프롬프트 안내문만 달라진다."""
+    동일하고(호출부가 항상 같은 필드를 읽을 수 있다), 프롬프트 안내문만 달라진다.
+
+    가은/Claude(2026-07-22, 요청: 신청양식 항목 약한 주입): application_form_items는 순수
+    추가 파라미터(기본값 None)다 — [{"field_name","description","char_limit"}] 형태의
+    항목 목록을 "참고 자료"(지시 아님)로 주입한다. None/빈 리스트면 템플릿의
+    [신청양식 참고 규칙] 섹션이 실질적으로 아무 효과가 없다(참고할 항목 자체가 없으므로)."""
     card = get_persona_card(persona_id)
     template = _read_text(IDEATION_CONV_DISCUSSION_TEMPLATE)
     replacements = {
@@ -361,6 +367,7 @@ def build_ideation_conv_discussion_prompt(
         "<<CONVERSATION_CONTEXT_JSON>>": _as_text(conversation_context),
         "<<SPEAKS_SECOND>>": "true" if speaks_second else "false",
         "<<DISCUSSION_STAGE>>": discussion_stage,
+        "<<APPLICATION_FORM_ITEMS_JSON>>": _as_text(application_form_items if application_form_items else None),
     }
     for token, value in replacements.items():
         template = template.replace(token, value)

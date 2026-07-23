@@ -245,7 +245,7 @@ class ScriptedLLM:
         raise AssertionError(f"예상하지 못한 프롬프트입니다: {prompt[:200]}")
 
 
-def _start(llm, max_rounds=3, evidence_lookup=None):
+def _start(llm, max_rounds=3, evidence_lookup=None, application_form_items=None):
     return start_ideation_conversation(
         session_id="CONV-TEST",
         notice_and_criteria=NOTICE_AND_CRITERIA,
@@ -253,6 +253,7 @@ def _start(llm, max_rounds=3, evidence_lookup=None):
         llm_call=llm,
         max_rounds=max_rounds,
         evidence_lookup=evidence_lookup,
+        application_form_items=application_form_items,
     )
 
 
@@ -372,6 +373,60 @@ def test_canvas_keeps_previous_value_when_later_update_fails():
     assert canvas_calls["n"] >= 2, "두 번째 라운드에서도 캔버스 갱신이 시도돼야 한다"
     assert state["idea_canvas"] is not None
     assert state["idea_canvas"]["problem"] == "[canvas] 손님 문의 응대 부담"
+
+
+# ---------------------------------------------------------------------------
+# 1-2. 신청양식 항목 약한 주입 — 가은/Claude(2026-07-22, 요청: "프롬프트에서 이 방향으로
+#      너무 집중되면 안 됨" — 참고 자료로만 주입되고, 항목이 없으면 discussion 프롬프트가
+#      바뀌지 않는지 확인한다)
+# ---------------------------------------------------------------------------
+
+_SAMPLE_FORM_ITEMS = [
+    {"field_name": "문제 정의", "description": "해결하려는 문제를 서술", "char_limit": 300},
+    {"field_name": "차별성", "description": None, "char_limit": None},
+]
+
+
+def test_application_form_items_injected_into_discussion_prompt_when_present():
+    """세션 시작 시 application_form_items를 넘기면, 라운드테이블 discussion 프롬프트
+    (기획/개발 전문가 모두)에 그 항목이 JSON으로 실제로 주입돼야 한다."""
+    llm = ScriptedLLM()
+    _start(llm, application_form_items=_SAMPLE_FORM_ITEMS)
+
+    discussion_prompts = [p for p in llm.captured_prompts if "[의견 규칙]" in p]
+    assert discussion_prompts, "discussion 프롬프트가 하나도 호출되지 않았습니다"
+    for prompt in discussion_prompts:
+        assert "[신청양식 항목 application_form_items" in prompt
+        assert "문제 정의" in prompt
+        assert "차별성" in prompt
+        assert '"char_limit": 300' in prompt
+
+
+def test_application_form_items_absent_renders_null_and_does_not_change_topic_flow():
+    """application_form_items를 넘기지 않으면(기존 호출부와 동일) 데이터 블록이 null로
+    렌더되고, 회의 흐름(라운드 진행/phase)은 항목이 있을 때와 완전히 동일해야 한다 —
+    "질문 주제·순서를 바꾸지 않는다"는 규칙이 실제로 구조적으로 지켜지는지 확인한다."""
+    llm_without = ScriptedLLM()
+    state_without = _start(llm_without)
+
+    llm_with = ScriptedLLM()
+    state_with = _start(llm_with, application_form_items=_SAMPLE_FORM_ITEMS)
+
+    discussion_prompts_without = [p for p in llm_without.captured_prompts if "[의견 규칙]" in p]
+    assert discussion_prompts_without
+    for prompt in discussion_prompts_without:
+        assert "[신청양식 항목 application_form_items" in prompt
+        # 데이터 블록 값이 그대로 "null" 리터럴로 렌더돼야 한다(다른 선택적 데이터 필드와
+        # 같은 관례 — REVISED_PROPOSAL_JSON 등도 없으면 "null"로 렌더된다).
+        header_and_value = prompt.split("[신청양식 항목 application_form_items", 1)[1]
+        value_line = header_and_value.split("]\n", 1)[1].split("\n", 1)[0].strip()
+        assert value_line == "null"
+
+    # 항목 유무와 무관하게 phase/메시지 순서(질문 주제·라운드 진행)는 동일하다.
+    assert state_without["phase"] == state_with["phase"]
+    types_without = [(m["speaker_id"], m["message_type"]) for m in state_without["messages"]]
+    types_with = [(m["speaker_id"], m["message_type"]) for m in state_with["messages"]]
+    assert types_without == types_with
 
 
 # ---------------------------------------------------------------------------

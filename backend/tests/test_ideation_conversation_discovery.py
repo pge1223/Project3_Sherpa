@@ -473,6 +473,58 @@ def test_start_response_includes_original_candidates_field(client: TestClient):
     assert body["merge_analysis"] is None
 
 
+# ---------------------------------------------------------------------------
+# 가은/Claude(2026-07-22, 요청: 신청양식 항목 약한 주입) — StartRequest.application_form_items가
+# 실제로 그래프까지 전달돼 discussion 프롬프트에 주입되는지 검증한다.
+# ---------------------------------------------------------------------------
+
+
+def test_start_with_application_form_items_injects_into_discussion_prompt(client: TestClient, monkeypatch):
+    captured_prompts: list[str] = []
+    base_llm = _stub_llm_call("CAPTURE-SESSION", "gpt-4o-mini")
+
+    def _capturing_llm_call(session_id: str, model: str):
+        def llm_call(prompt: str) -> str:
+            captured_prompts.append(prompt)
+            return base_llm(prompt)
+
+        return llm_call
+
+    monkeypatch.setattr(conv_route, "_build_llm_call", _capturing_llm_call)
+
+    resp = client.post(
+        "/ideation-conversation/start",
+        json={
+            "competition_name": "데모 공모전",
+            "competition_document": "실현가능성을 평가한다.",
+            "user_idea": "소상공인이 손님 문의에 자동으로 답하는 챗봇",  # refinement 모드 -> 곧바로 discussion 호출
+            "application_form_items": [
+                {"field_name": "문제 정의", "description": "해결하려는 문제", "char_limit": 300},
+            ],
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["application_form_items"] == [
+        {"field_name": "문제 정의", "description": "해결하려는 문제", "char_limit": 300}
+    ]
+
+    discussion_prompts = [p for p in captured_prompts if "[의견 규칙]" in p]
+    assert discussion_prompts
+    assert any("문제 정의" in p and "해결하려는 문제" in p for p in discussion_prompts)
+
+
+def test_start_without_application_form_items_defaults_to_empty_list(client: TestClient):
+    """필드를 아예 안 보내면(기존 클라이언트) 기본값 빈 리스트로 동작하고, 응답에도
+    빈 리스트로 노출된다 — 순수 추가 필드라 하위 호환이 유지된다."""
+    resp = client.post(
+        "/ideation-conversation/start",
+        json={"competition_name": "데모 공모전", "competition_document": "실현가능성을 평가한다."},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["application_form_items"] == []
+
+
 def test_reply_response_includes_merge_context_fields_after_combine(client: TestClient):
     start_resp = client.post(
         "/ideation-conversation/start",

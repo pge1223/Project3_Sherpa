@@ -378,6 +378,9 @@ def _serialize_state(state: IdeationConvState) -> dict:
         # selected_idea와 동일). 프론트(IdeaCanvasPanel.jsx)는 idea_canvas가 없으면
         # selected_idea로 폴백해 그린다. 구버전 세션 state에는 키가 없을 수 있다.
         "idea_canvas": state.get("idea_canvas"),
+        # 가은/Claude(2026-07-22, 요청: 신청양식 항목 약한 주입): 순수 추가 필드 — 세션
+        # 시작 시 넘긴 항목을 그대로 노출한다(디버깅/향후 화면 표시용, 세션 중 바뀌지 않음).
+        "application_form_items": state.get("application_form_items", []),
         "error": (
             {"code": "IDEATION_CONV_NODE_FAILED", "message": f"{state.get('failed_node')} 노드에서 실패했습니다."}
             if state["phase"] == "failed"
@@ -398,6 +401,13 @@ class StartRequest(BaseModel):
     use_rag: bool = False
     project_id: Optional[str] = None
     model: str = Field(default="")  # 비워두면 settings.reviewer_model()(LLM_PROFILE 기준) 사용 — 개발용 오버라이드 허용.
+    # 가은/Claude(2026-07-22, 요청: 신청양식 항목 약한 주입): 순수 추가 필드. 프론트가
+    # documents.py::get_application_form_analysis 결과를 그대로 넘긴다([{"field_name",
+    # "description","char_limit"}], 양식에 있는 만큼 전부 — 개수 상한 없음, 2026-07-22
+    # 제거됨) — discussion 프롬프트에 참고 자료로만 주입된다(질문 주제·순서는 안 바꿈,
+    # ideation_conv_discussion.txt 참고). 비워도(기본값 빈 리스트) 기존 클라이언트와
+    # 완전히 동일하게 동작한다.
+    application_form_items: list[dict] = Field(default_factory=list)
 
 
 class ReplyRequest(BaseModel):
@@ -446,6 +456,7 @@ async def start_conversation(request: StartRequest):
             llm_call=llm_call,
             max_rounds=effective_max_rounds,
             evidence_lookup=evidence_lookup,
+            application_form_items=request.application_form_items,
         )
     except Exception:
         logger.exception("[ideation-conversation] 시작 실패 session_id=%s", session_id)
@@ -562,6 +573,108 @@ async def reply_conversation_stream(session_id: str, request: ReplyRequest, http
             return event_queue.get(timeout=_DISCONNECT_POLL_SECONDS)
         except queue.Empty:
             return None  # 타임아웃 — 아직 다음 이벤트가 없다(정상, disconnect 재확인용).
+
+    async def event_generator():
+        loop = asyncio.get_event_loop()
+        while True:
+            if await http_request.is_disconnected():
+                break
+            item = await loop.run_in_executor(None, _get_next_event)
+            if item is None:
+                continue
+            if item is _STREAM_DONE_SENTINEL:
+                break
+            yield (json.dumps(item, ensure_ascii=False) + "\n").encode("utf-8")
+
+    return StreamingResponse(event_generator(), media_type="application/x-ndjson; charset=utf-8")
+
+
+@router.post("/start/stream")
+async def start_conversation_stream(request: StartRequest, http_request: Request):
+    """가은/Claude(2026-07-22, 요청: 회의 시작 대기 체감 개선 1단계): POST /start와 같은
+    일(세션 생성 + 첫 그래프 실행)을 하지만, reply/stream과 같은 NDJSON 통로로 진행
+    이벤트를 흘려보낸다. 후보 생성/실현 가능성 검토 호출은 화면 메시지를 만들지 않는
+    호출이라(ideation_conversation_streaming.py::_PHASE_ONLY_LABELS) message_delta 없이
+    phase 이벤트("아이디어 후보를 만들고 있습니다" -> "후보의 실현 가능성을 검토하고
+    있습니다")만 나간다 — 기다리는 동안 "지금 뭐 하는 중인지"를 보여주는 것이 목적이다.
+    refinement 모드(user_idea 있음)로 시작하면 라운드테이블 발언이 reply/stream과 동일하게
+    message_delta(타이핑 효과)로 스트리밍된다 — 같은 make_streaming_llm_call을 그대로
+    쓰기 때문에 추가 구현 없이 따라온다.
+
+    reply/stream과의 차이: 새 세션이므로 세션 락(acquire/release)이 없고, state는 그래프가
+    끝까지 성공했을 때만 _store.create로 저장한다. 스트리밍 중 연결이 끊겨도 워커는 계속
+    실행돼 세션 자체는 정상 생성되지만, 클라이언트가 최종 state(session_id 포함)를 받지
+    못했으면 그 세션은 사용되지 않고 TTL(30분)로 정리된다 — 프론트가 session_id를
+    sessionStorage에 저장하는 시점이 최종 state 수신 시점이기 때문이다.
+
+    라우트 경로 주의: FastAPI는 등록 순서대로 매칭하지만 "/start/stream"은 고정 경로라
+    "/{session_id}/reply/stream" 같은 패턴과 충돌하지 않는다("/start"를 session_id로
+    오인할 수 있는 경로는 GET /{session_id}뿐이고 그것은 GET, 이것은 POST다)."""
+    _require_preview_enabled()
+    _require_streaming_enabled()
+    if request.use_rag and not request.project_id:
+        raise HTTPException(status_code=400, detail="use_rag=true이면 project_id가 필요합니다.")
+
+    competition_name = _clamp_text(request.competition_name, "competition_name")
+    user_idea_text = _clamp_optional_text(request.user_idea, "user_idea")
+    competition_document = (request.competition_document or "")[:_MAX_TEXT_LENGTH]
+    effective_max_rounds = max(1, min(request.max_rounds, _MAX_ROUNDS_CAP))
+
+    session_id = f"IDEA-CONV-{uuid.uuid4().hex[:8]}"
+    notice_and_criteria = {"competition_name": competition_name, "notice_document": competition_document}
+    user_idea = {"description": user_idea_text}
+    model = _effective_model(request.model)
+    evidence_lookup = _evidence_lookup_for(request.use_rag, request.project_id)
+
+    logger.info("[ideation-conversation] 스트리밍 시작 session_id=%s max_rounds=%d", session_id, effective_max_rounds)
+
+    event_queue: "queue.Queue[object]" = queue.Queue()
+
+    def sink(event: dict) -> None:
+        event_queue.put(event)
+
+    def worker() -> None:
+        try:
+            stream_chat_completion, call_chat_completion = _build_streaming_backends(session_id, model)
+            llm_call = make_streaming_llm_call(
+                session_id,
+                sink,
+                stream_chat_completion=stream_chat_completion,
+                call_chat_completion=call_chat_completion,
+                max_calls=_MAX_LLM_CALLS_PER_REQUEST,
+            )
+            state = start_ideation_conversation(
+                session_id=session_id,
+                notice_and_criteria=notice_and_criteria,
+                user_idea=user_idea,
+                llm_call=llm_call,
+                max_rounds=effective_max_rounds,
+                evidence_lookup=evidence_lookup,
+                application_form_items=request.application_form_items,
+            )
+            _store.create(state)
+            sink({"type": "state", "state": _serialize_state(state)})
+        except ValueError as exc:
+            sink({"type": "error", "code": "invalid_request", "message": str(exc)})
+        except Exception:
+            logger.exception("[ideation-conversation] 스트리밍 시작 실패 session_id=%s", session_id)
+            sink(
+                {
+                    "type": "error",
+                    "code": "llm_failure",
+                    "message": "대화형 회의 시작 중 오류가 발생했습니다. 서버 로그를 확인하세요.",
+                }
+            )
+        finally:
+            event_queue.put(_STREAM_DONE_SENTINEL)
+
+    threading.Thread(target=worker, daemon=True).start()
+
+    def _get_next_event() -> object:
+        try:
+            return event_queue.get(timeout=_DISCONNECT_POLL_SECONDS)
+        except queue.Empty:
+            return None
 
     async def event_generator():
         loop = asyncio.get_event_loop()

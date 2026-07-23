@@ -129,3 +129,28 @@ class AnnouncementAnalysisResponse(BaseModel):
     has_similar_case_data: bool = False
     similar_works: list[SimilarWork] = []
     source_document_names: list[str] = []
+
+
+# 가은/Claude(2026-07-22, 요청: 신청양식 항목 약한 주입 → 업로드 영역 통합): "공모전 공고 ·
+# 평가기준 · 신청서 양식"을 한 업로드 영역(document_role="criteria")으로 합쳤으므로, 이
+# 엔드포인트는 announcement-analysis와 같은 문서 풀을 신청서 양식 관점으로 다시 읽어
+# 기입해야 하는 항목만 뽑는다 — announcement-analysis와 같은 "프로젝트당 1회 계산 후 캐시"
+# 패턴. 이 항목들은 ① 아이디어 회의 화면에 그대로 보여주고, ② 회의 discussion 프롬프트에
+# "참고 자료"로 약하게 주입한다(ai/meeting/prompts/ideation_conv_discussion.txt의
+# [신청양식 참고 규칙] — 질문 주제·순서는 안 바꾸고 표현만 다듬는 용도). 양식에 없는 항목을
+# 지어내지 않는다 — 못 찾은 필드는 담지 않는다(개수 자체가 그대로 신뢰도를 보여준다).
+class ApplicationFormItem(BaseModel):
+    field_name: str
+    description: str = ""
+    # 양식에 글자 수 제한이 명시돼 있지 않으면 None(모른다는 뜻 — 0이나 임의값을 지어내지 않는다).
+    char_limit: Optional[int] = None
+
+
+class ApplicationFormAnalysisResponse(BaseModel):
+    # has_application_form: "criteria 문서를 하나라도 등록해 실제로 LLM 분석을 시도했는가"를
+    # 뜻한다 — 업로드 영역이 통합돼 그 문서들이 실제 신청서 양식을 포함한다는 보장은 없으므로,
+    # "신청서 양식이 실제로 발견됐는가"는 items가 비어 있는지로 판단해야 한다(True + items=[]는
+    # "문서는 있었지만 신청서 양식 기입란은 못 찾았다"는 유효한 상태다).
+    has_application_form: bool
+    items: list[ApplicationFormItem] = []
+    source_document_names: list[str] = []

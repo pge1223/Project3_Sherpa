@@ -57,6 +57,8 @@ from app.repositories.document_repository import DocumentRepository
 from app.schemas.document import (
     AnnouncementAnalysisResponse,
     AnnouncementEvidence,
+    ApplicationFormAnalysisResponse,
+    ApplicationFormItem,
     ContestWorkDetail,
     ContestWorksByTitleResponse,
     DocumentResponse,
@@ -821,6 +823,60 @@ async def _load_criteria_documents_text(project_id: str) -> tuple[str, list[str]
     return combined, names
 
 
+# 가은/Claude(2026-07-22, 요청: "공모전 공고·평가기준·신청서 양식을 같은 업로드 영역으로
+# 합치자"): 신청양식 전용 document_role/업로드 카드를 따로 두지 않는다 — 사용자가 이
+# 화면에서 올리는 문서는 공고문이든 평가기준이든 신청서 양식이든 전부 document_role
+# ="criteria" 하나로 저장되고(EntryScreen의 단일 업로드 영역, 안내 문구만 "공모전 공고,
+# 평가기준, 신청서 양식"으로 확장), announcement-analysis와 application-form-analysis가
+# 같은 문서 풀(_load_criteria_documents_text)을 각자의 관점으로 다시 읽는다 — 신청서
+# 양식을 안 올렸으면(또는 올린 문서 중 실제 신청서 양식이 없으면) 프롬프트 규칙에 따라
+# items가 자연히 빈 배열이 된다(지어내지 않는다).
+#
+# 가은/Claude(2026-07-22, 요청: 신청양식 항목 약한 주입): 신청양식 원문에서 실제로 기입해야
+# 하는 항목만 뽑는다. announcement-analysis와 원칙이 같다 — 양식에 없는 항목·분량 제한을
+# 지어내지 않는다(char_limit은 명시가 없으면 null).
+#
+# 가은/Claude(2026-07-22, 요청: 상한 제거 — "신청서 항목은 제대로 들어가야지. 말하는
+# 주제가 신청서 항목 방향으로만 치우쳐지면 안 된다는 거였어"): 이전에는 항목 수를 6개로
+# 제한했는데, 그건 "회의 주제가 신청서 쪽으로 쏠리지 않게" 하려던 목적에 맞지 않는
+# 장치였다 — 그 방지는 discussion 프롬프트의 [신청양식 참고 규칙](질문 주제·순서를 안
+# 바꾸고, 표현만 다듬는 데만 쓰고, "신청양식"이라는 말 자체를 발언에 안 씀)이 실제로
+# 담당하고, 여기서 항목 개수를 줄이는 건 그 목적과 무관하게 항목만 누락시켰다(실측:
+# LLM이 상한 지시를 못 지키면 코드가 앞에서부터 자르면서 정작 중요한 내용 필드가
+# 잘려나가고 연락처 필드만 남는 사고가 재현됨). 이제 원문에 실제로 있는 항목은 개수
+# 제한 없이 전부 추출한다 — 유효성 검증(field_name 비어있지 않은지)만 남긴다.
+_APPLICATION_FORM_TRUNCATE_CHARS = _ANNOUNCEMENT_TRUNCATE_CHARS
+
+
+def _build_application_form_analysis_prompt(text: str) -> str:
+    truncated = text[:_APPLICATION_FORM_TRUNCATE_CHARS]
+    return f"""당신은 공모전·지원사업 관련 문서 묶음(공고문, 평가기준, 신청서 양식이 섞여 있을
+수 있습니다)에서, 신청서 양식에 실제로 존재하는 기입란/작성란 항목만 뽑는 보조입니다.
+공고문이나 평가기준 설명은 항목이 아닙니다 — 신청서 양식 문서에 실제로 있는 기입란만
+고르세요. 문서 묶음에 신청서 양식 자체가 없으면 items를 빈 배열로 두세요(지어내지 마세요).
+
+다음은 항목이 아닙니다 — 포함하지 마세요: 접수 절차 안내, 제출 방법, 문의처, 심사 일정,
+서명·날인란, 개인정보 수집 동의 문구, 표지·제목만 있는 섹션, 평가기준·심사 항목 설명.
+
+field_name은 양식에 실제로 쓰인 항목 이름을 그대로 씁니다(의역하지 않습니다).
+description은 그 항목에 무엇을 써야 하는지 양식 원문 기준으로 1문장 이내로 요약합니다 —
+원문에 설명이 없으면 빈 문자열로 둡니다(지어내지 마세요).
+char_limit은 양식에 명시된 글자 수 제한이 있을 때만 정수로 채우고, 없으면 null입니다
+(추측해서 채우지 마세요).
+
+양식에 실제로 있는 기입란은 개수 제한 없이 전부 뽑으세요 — 일부만 골라내지 마세요.
+
+[문서 원문]
+{truncated}
+
+다음 JSON 형식으로만 응답하세요:
+{{
+  "items": [
+    {{"field_name": "...", "description": "...", "char_limit": null}}
+  ]
+}}"""
+
+
 def _build_announcement_analysis_prompt(text: str) -> str:
     truncated = text[:_ANNOUNCEMENT_TRUNCATE_CHARS]
     return f"""당신은 공모전·지원사업 공고문을 분석하는 보조입니다. 아래 공고문 원문을 읽고
@@ -830,7 +886,11 @@ announcement_title은 이 공고의 정식 명칭(공모전/지원사업 이름)
 
 official_facts는 원문에 실제로 있는 내용만 담으세요 — 원문에 없는 정보는 절대
 지어내지 말고, 못 찾은 항목은 빈 배열이나 "미공개"로 남기세요. 특히 evaluation_criteria에
-배점이 원문에 없으면 반드시 ["배점 미공개"] 하나만 담으세요.
+배점이 원문에 없으면 반드시 ["배점 미공개"] 하나만 담으세요. 원문에 배점 숫자가 전혀
+없는데 "평가 항목이 5개이니 100점을 5등분하면 20점" 같은 방식으로 배점을 계산해서
+항목 이름에 붙이지 마세요(예: "혁신성 (20)") — 항목 개수로 배점을 역산하는 것도
+지어내는 것과 같습니다. 각 항목의 이름만 그대로 쓰고, 원문에 그 항목 옆에 숫자(점수)가
+실제로 적혀 있을 때만 그 숫자를 그대로 붙이세요.
 
 strategic_analysis는 원문을 근거로 한 당신의 추론(전략적 분석)입니다 — 사실 단정이
 아니라 판단임을 유지하고, 근거 없는 단정을 피하세요.
@@ -875,6 +935,14 @@ def _call_announcement_analysis_llm(prompt: str) -> str:
         model=model,
         messages=[{"role": "user", "content": prompt}],
         response_format={"type": "json_object"},
+        # 가은/Claude(2026-07-22, 요청: 신청양식 항목 누락 재현 — "이 내용이 없다?"): temperature를
+        # 지정하지 않으면 OpenAI 기본값(1.0)이 적용돼, 같은 문서·같은 프롬프트로 반복 호출해도
+        # 매번 다른 항목이 빠지거나(실측: 도시 부문 신청서의 핵심 내용 필드가 통째로 누락된
+        # 사례) 배점을 지어내는(실측: "혁신성 (20)") 등 변동성이 컸다. 이 함수는 announcement-
+        # analysis/application-form-analysis 둘 다에 쓰이는데, 둘 다 "문서에 실제로 있는
+        # 내용을 있는 그대로 뽑는" 추출 작업이라 창의성이 필요 없다 — 0에 가깝게 낮춰 매번
+        # 같은 입력에 최대한 같은(빠짐없는) 결과가 나오게 한다.
+        temperature=0,
     )
     return resp.choices[0].message.content
 
@@ -989,4 +1057,61 @@ async def get_announcement_analysis(
         source_document_names=names,
     )
     await project_repo.update_project(project_id, {"announcement_analysis_cache": result.model_dump()})
+    return result
+
+
+@router.post("/{project_id}/application-form-analysis", response_model=ApplicationFormAnalysisResponse)
+async def get_application_form_analysis(
+    project_id: str,
+    authorization: Optional[str] = Header(None, alias="authorization"),
+):
+    """가은/Claude(2026-07-22, 요청: 업로드 영역 통합) — announcement-analysis와 같은 문서
+    풀(document_role="criteria", 공고문·평가기준·신청서 양식이 한 영역에서 함께 업로드됨)을
+    다시 읽어 그중 신청서 양식에 해당하는 기입 항목만 추출한다. announcement-analysis와
+    정책이 같다(프로젝트당 1회 계산 후 캐시, 문서가 없으면 LLM을 부르지 않고
+    has_application_form=False, 지어내지 않고 원문에 없으면 빈 값) — 캐시 필드 이름과
+    프롬프트 관점(신청서 양식 항목 추출 vs 공고문 분석)만 다르다."""
+    user_email = get_current_user(authorization)
+    project = await verify_project_owner(project_id, user_email)
+
+    cached = project.get("application_form_analysis_cache")
+    if cached:
+        logger.info("[application-form-analysis] project_id=%s 캐시된 분석 결과 재사용", project_id)
+        return ApplicationFormAnalysisResponse(**cached)
+
+    text, names = await _load_criteria_documents_text(project_id)
+    if not text.strip():
+        # 문서를 하나도 등록하지 않았으면 LLM을 호출하지 않는다 — 회의 화면은 이 값을
+        # 그대로 "선택 사항"으로 취급해 항목 없이 정상 진행한다(약한 주입은 없을 뿐 회의
+        # 자체를 막지 않는다).
+        return ApplicationFormAnalysisResponse(has_application_form=False)
+
+    prompt = _build_application_form_analysis_prompt(text)
+    raw = await run_in_threadpool(_call_announcement_analysis_llm, prompt)
+
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        parsed = {}
+
+    items_raw = parsed.get("items") if isinstance(parsed, dict) else None
+    items: list[ApplicationFormItem] = []
+    for item in (items_raw if isinstance(items_raw, list) else []):
+        if not isinstance(item, dict) or not str(item.get("field_name") or "").strip():
+            continue
+        char_limit = item.get("char_limit")
+        items.append(
+            ApplicationFormItem(
+                field_name=str(item["field_name"]).strip(),
+                description=str(item.get("description") or "").strip(),
+                char_limit=char_limit if isinstance(char_limit, int) else None,
+            )
+        )
+
+    result = ApplicationFormAnalysisResponse(
+        has_application_form=True,
+        items=items,
+        source_document_names=names,
+    )
+    await project_repo.update_project(project_id, {"application_form_analysis_cache": result.model_dump()})
     return result

@@ -1059,6 +1059,7 @@ def make_conv_discussion_node(
             context,
             speaks_second,
             discussion_stage=discussion_stage,
+            application_form_items=state.get("application_form_items") or None,
         )
         validate = lambda raw, _stage=discussion_stage: _validate_discussion_response(raw, _stage)  # noqa: E731
         raw, ok, attempts = _safe_call_structured_json(llm_call, prompt, validate, f"discussion__{persona_id}")

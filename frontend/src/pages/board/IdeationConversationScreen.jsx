@@ -6,8 +6,9 @@ import {
   replyIdeationConversation,
   replyIdeationConversationStream,
   startIdeationConversation,
+  startIdeationConversationStream,
 } from '../../api/ideationConversationApi'
-import { getAnnouncementAnalysis } from '../../api/documentApi'
+import { getAnnouncementAnalysis, getApplicationFormAnalysis } from '../../api/documentApi'
 import {
   EXPERT_RECOMMEND_MESSAGE,
   FEASIBILITY_LABEL,
@@ -294,6 +295,10 @@ export function IdeationScreen({
   // createEmptyStreamState()로 비우고 ideationConv(canonical)만 그린다 — 그래서 스트리밍
   // 미리보기와 canonical 메시지가 동시에 화면에 남아 중복되는 경우가 구조적으로 없다.
   const [streamState, setStreamState] = useState(() => createEmptyStreamState())
+  // 가은/Claude(2026-07-22, 요청: 회의 시작 대기 체감 개선 1단계): /start/stream이 흘려주는
+  // 진행 문구("아이디어 후보를 만들고 있습니다" -> "후보의 실현 가능성을 검토하고 있습니다").
+  // 비어 있으면 기존 고정 문구를 보여준다.
+  const [startPhaseLabel, setStartPhaseLabel] = useState('')
   // 가은/Claude(2026-07-22): 아이디어 기획 캔버스(IdeaCanvasPanel)의 "심사기준 대응 포인트"
   // 시드용. runStart는 원래 이 분석을 start API 페이로드를 만드는 데만 쓰고 버렸는데,
   // 캔버스가 계속 보여줘야 하므로 상태로 유지한다. 세션 재개(resume) 경로에서는 start를
@@ -385,20 +390,73 @@ export function IdeationScreen({
   async function runStart() {
     setStarting(true)
     setError(null)
+    setStartPhaseLabel('')
     try {
       let analysis = { has_announcement: false }
       if (projectId) {
         analysis = await getAnnouncementAnalysis(projectId)
       }
       setAnnouncementAnalysis(analysis)
-      const data = await startIdeationConversation({
+
+      // 가은/Claude(2026-07-22, 요청: 업로드 영역 통합) — 신청서 양식 전용 문서 목록이 따로
+      // 없다("공모전 공고 · 평가기준 · 신청서 양식"을 EntryScreen의 한 업로드 영역에서 함께
+      // 올린다). criteriaDocuments가 준비된 상태(색인 완료 또는 확인 필요)일 때만 조회한다
+      // — 신청서 양식을 실제로 안 올렸으면 백엔드가 items를 빈 배열로 돌려줄 뿐이다.
+      // 실패해도(네트워크 오류 등) 회의 시작 자체를 막지 않는다 — "참고 자료"일 뿐 필수가
+      // 아니기 때문이다.
+      let applicationFormItems = []
+      const hasReadyCriteriaDoc = criteriaDocuments.some((doc) => doc.status === 'done' || doc.status === 'warning')
+      if (projectId && hasReadyCriteriaDoc) {
+        try {
+          const formAnalysis = await getApplicationFormAnalysis(projectId)
+          applicationFormItems = formAnalysis.items || []
+        } catch (err) {
+          console.warn('[ideation-conv] 신청양식 항목 조회에 실패해 항목 없이 회의를 시작합니다.', err)
+        }
+      }
+
+      const payload = {
         competitionName: competitionNameFrom(analysis),
         competitionDocument: buildCompetitionDocumentText(analysis),
         userIdea: '', // discovery 모드로 시작해야 하므로 반드시 빈 문자열로 보낸다.
         maxRounds: 3,
         useRag: resolveUseRag(projectId, criteriaDocuments),
         projectId,
-      })
+        applicationFormItems,
+      }
+
+      // 가은/Claude(2026-07-22, 요청: 회의 시작 대기 체감 개선 1단계): 시작도 답장과 같은
+      // 스트리밍 통로를 먼저 시도한다 — 후보 생성(10~30초+) 동안 고정 문구 대신 실제 진행
+      // 단계(phase 이벤트)가 표시된다. 스트리밍이 꺼져 있으면(404) 기존 동기식 start로
+      // 조용히 폴백하되 console.warn은 남긴다(reply 쪽과 같은 정책).
+      let data = null
+      if (streamingSupportedRef.current) {
+        try {
+          let finalState = null
+          let streamError = null
+          await startIdeationConversationStream(payload, {
+            onEvent: (event) => {
+              if (event.type === 'phase') setStartPhaseLabel(event.label || '')
+              else if (event.type === 'state') finalState = event.state
+              else if (event.type === 'error') streamError = event
+            },
+          })
+          if (streamError) throw new Error(streamError.message || '대화형 회의 시작 중 오류가 발생했습니다.')
+          if (!finalState) throw new Error('스트리밍이 최종 결과 없이 종료되었습니다. 다시 시도해 주세요.')
+          data = finalState
+        } catch (err) {
+          if (classifyIdeationConvError(err).type !== 'disabled') throw err
+          streamingSupportedRef.current = false
+          console.warn(
+            '[ideation-stream] POST /start/stream 이 비활성화(404) 응답을 반환해 동기식 /start로 전환합니다. ' +
+              '백엔드 backend/.env의 ENABLE_IDEATION_STREAMING 값을 확인하세요.',
+            err,
+          )
+        }
+      }
+      if (!data) {
+        data = await startIdeationConversation(payload)
+      }
       setIdeationConv(data)
       const key = ideationSessionStorageKey(projectId)
       if (key) sessionStorage.setItem(key, data.session_id)
@@ -406,6 +464,7 @@ export function IdeationScreen({
       setError(classifyIdeationConvError(err))
     } finally {
       setStarting(false)
+      setStartPhaseLabel('')
     }
   }
 
@@ -625,7 +684,9 @@ export function IdeationScreen({
 
         <div className="card glass" style={{ minHeight: 360, maxHeight: 520, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 4, padding: 16 }}>
           {starting && !ideationConv && (
-            <p style={{ color: 'var(--text-2)', fontSize: 13 }}>공모전 분석을 바탕으로 아이디어 후보를 만들고 있어요...</p>
+            <p style={{ color: 'var(--text-2)', fontSize: 13 }}>
+              {startPhaseLabel ? `${startPhaseLabel}...` : '공모전 분석을 바탕으로 아이디어 후보를 만들고 있어요...'}
+            </p>
           )}
           {dedupeMessagesById(ideationConv?.messages).map((m) => <MessageBubble key={m.message_id} message={m} />)}
           {/* 스트리밍 임시 메시지 — message_start를 받는 즉시 말풍선이 생기고, 실제 LLM

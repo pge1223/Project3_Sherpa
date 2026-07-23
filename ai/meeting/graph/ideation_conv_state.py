@@ -307,6 +307,17 @@ class IdeationConvState(TypedDict):
     # 없을 수 있으므로 읽는 쪽은 항상 `.get("idea_canvas")`로 접근한다(하위 호환).
     idea_canvas: dict | None
 
+    # 가은/Claude(2026-07-22, 요청: 신청양식 항목 약한 주입): 공모전 신청양식에서 추출한
+    # 항목 목록([{field_name, description, char_limit}], 양식에 있는 만큼 전부 — 개수
+    # 상한 없음). 세션 시작 시 한 번
+    # 채워지고 이후 절대 바뀌지 않는다(discussion_rounds처럼 매 라운드 갱신되는 값이
+    # 아니다). make_conv_discussion_node가 매 발언 프롬프트에 "참고 자료"로만 주입한다
+    # (질문 주제·순서는 여전히 TOPIC_PRIORITY가 결정 — 이 값은 같은 주제를 물을 때 표현만
+    # 다듬는 데 쓰인다, ideation_conv_discussion.txt의 [신청양식 참고 규칙] 참고). 없으면
+    # 빈 리스트(양식 미등록) — 구버전 저장 state에는 이 키가 없을 수 있으므로 읽는 쪽은
+    # 항상 `.get("application_form_items", [])`로 접근한다(하위 호환).
+    application_form_items: list[dict]
+
 
 def _extract_initial_idea_text(user_idea: dict | str | None) -> str:
     """user_idea에서 trim된 초기 아이디어 텍스트를 뽑아낸다. dict({"description": ...})와
@@ -348,6 +359,7 @@ def initial_conv_state(
     notice_and_criteria: dict,
     user_idea: dict,
     max_rounds: int = 3,
+    application_form_items: list[dict] | None = None,
 ) -> IdeationConvState:
     """준비 상태. user_idea(trim 결과)가 있으면 refinement로 시작한다 — 용준/Claude(2026-07-21,
     요청: 전문가 라운드테이블 전환) 진행자의 안건 제시 메시지(LLM 호출 없음, 위
@@ -397,6 +409,7 @@ def initial_conv_state(
         discussion_next_action=None,
         discussion_review_stance=None,
         idea_canvas=None,
+        application_form_items=application_form_items or [],
     )
 
 
