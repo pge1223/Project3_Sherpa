@@ -3,6 +3,7 @@ PDF Parser using PyMuPDF
 =======================
 """
 
+import logging
 import fitz  # PyMuPDF
 from typing import Optional, Set
 
@@ -17,6 +18,8 @@ from ai.rag.parsers.schemas import (
 )
 from ai.rag.parsers.exceptions import CorruptedDocumentError, EmptyDocumentError
 from ai.rag.parsers.config import MIN_TEXT_LENGTH_PER_PAGE, SCAN_PAGE_RATIO_THRESHOLD
+
+logger = logging.getLogger(__name__)
 
 
 class PDFParser(BaseParser):
@@ -284,6 +287,15 @@ class PDFParser(BaseParser):
         if len(blocks) == 0:
             raise EmptyDocumentError(
                 "PDF에서 텍스트를 추출할 수 없습니다. 스캔 문서이거나 손상된 파일일 수 있습니다."
+            )
+
+        if ocr_images_count > 0:
+            # 데모 파이프라인 점검용 — OCR 폴백이 실제로 몇 번 시도됐고 몇 번 성공했는지는
+            # create_result()의 warnings에는 "전부 실패"인 경우만 요약돼 남으므로, 부분
+            # 성공까지 포함한 원시 카운트를 여기서 따로 남긴다.
+            logger.info(
+                "[pdf-ocr] file=%s ocr_images_count=%d ocr_failed_count=%d scanned_pages=%s",
+                self.file_path.name, ocr_images_count, ocr_failed_count, scanned_pages,
             )
 
         return self.create_result(

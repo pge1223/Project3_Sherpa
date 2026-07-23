@@ -22,6 +22,8 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException
 from openai import OpenAI
+
+from app.core.llm import trace_openai_client
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
@@ -64,7 +66,7 @@ def _build_preview_llm_call(meeting_id: str):
     (max_retries=1, 호출 상한, JSON 응답 강제)를 쓰되, 위원장/위원 모델을 구분하지 않고
     항상 DEV_LLM_REVIEWER_MODEL(가장 저렴한 dev 모델)만 쓴다 — 이건 품질 검증이 아니라
     파이프라인 연결 검증용이다."""
-    client = OpenAI(api_key=settings.OPENAI_API_KEY, max_retries=1)
+    client = trace_openai_client(OpenAI(api_key=settings.OPENAI_API_KEY, max_retries=1))
     call_count = {"n": 0}
 
     def llm_call(prompt: str) -> str:
