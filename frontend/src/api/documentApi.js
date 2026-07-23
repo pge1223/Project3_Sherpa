@@ -5,7 +5,9 @@ function authHeaders() {
   return token ? { Authorization: `Bearer ${token}` } : {}
 }
 
-// document_role: 'target'(평가 대상 문서/기획서, 기본값) | 'criteria'(공고문·평가기준)
+// document_role: 'target'(평가 대상 문서/기획서, 기본값) | 'criteria'(공고문·평가기준·신청서
+// 양식 — 가은/Claude 2026-07-22, 요청: 업로드 영역 통합. 신청서 양식도 이 role로 올라가고,
+// getApplicationFormAnalysis()가 같은 문서 풀에서 기입 항목만 다시 추출한다)
 export async function uploadDocument(projectId, file, sourceType = 'pdf', documentRole = 'target') {
   const formData = new FormData()
   formData.append('file', file)
@@ -74,6 +76,19 @@ export async function getAnnouncementAnalysis(projectId) {
     headers: { ...authHeaders() },
   })
   return parseApiResponse(res, '공고문 분석을 불러오지 못했습니다.')
+}
+
+// 가은/Claude(2026-07-22, 요청: 신청양식 항목 약한 주입): document_role="application_form"
+// 문서에서 기입해야 하는 항목만 뽑는다 — getAnnouncementAnalysis와 완전히 같은 패턴
+// (문서가 없으면 has_application_form: false만 오고 LLM은 호출되지 않는다). 이 결과의
+// items를 아이디어 회의 시작 payload의 application_form_items로 그대로 넘기면,
+// 회의 discussion 프롬프트에 참고 자료로만 약하게 주입된다(질문 주제·순서는 바뀌지 않음).
+export async function getApplicationFormAnalysis(projectId) {
+  const res = await fetch(`${API_BASE_URL}/documents/${projectId}/application-form-analysis`, {
+    method: 'POST',
+    headers: { ...authHeaders() },
+  })
+  return parseApiResponse(res, '신청양식 분석을 불러오지 못했습니다.')
 }
 
 // 재인/Claude(2026-07-21): "AI 피드백"(워크벤치) 화면 — 기획서 원문(parsed_text)을

@@ -360,7 +360,7 @@ def test_invalid_question_topic_value_is_rejected():
 # ---------------------------------------------------------------------------
 
 
-def test_discussion_node_retries_then_fails_when_confirmed_exceeds_limit():
+def test_discussion_node_retries_then_uses_safe_fallback_when_confirmed_exceeds_limit():
     payload = {
         "stance": "보완",
         "spoken_text": "발화 판단입니다",
@@ -382,8 +382,9 @@ def test_discussion_node_retries_then_fails_when_confirmed_exceeds_limit():
 
     node = make_conv_discussion_node("planning_expert", llm_call=llm_call)
     update = node(_base_state())
-    assert update["phase"] == "failed"
+    assert update.get("phase") != "failed"
     assert call_count["n"] == 2
+    assert "추가로 확인" in update["messages"][0]["content"]
 
 
 # ---------------------------------------------------------------------------
@@ -392,7 +393,7 @@ def test_discussion_node_retries_then_fails_when_confirmed_exceeds_limit():
 # ---------------------------------------------------------------------------
 
 
-def test_discussion_node_retries_then_fails_when_judgment_too_long():
+def test_discussion_node_retries_then_uses_safe_fallback_when_judgment_too_long():
     long_judgment = "가" * 201  # 200자 상한 초과
     payload = {
         "stance": "보완",
@@ -414,11 +415,10 @@ def test_discussion_node_retries_then_fails_when_judgment_too_long():
 
     node = make_conv_discussion_node("dev_expert", llm_call=llm_call)
     update = node(_base_state())
-    assert update["phase"] == "failed"
+    assert update.get("phase") != "failed"
     assert call_count["n"] == 2
-    # 문자열이 잘리지 않고 그대로 실패 처리됐는지 — 잘린 judgment로 메시지가 만들어지지
-    # 않는다(메시지 자체가 생성되지 않는다).
-    assert "messages" not in update
+    # 잘린 원문을 저장하지 않고 서버 생성 안전 메시지로 교체한다.
+    assert update["messages"][0]["structured"]["judgment"] != long_judgment
 
 
 def test_discussion_node_succeeds_when_within_length_limits():
@@ -466,7 +466,7 @@ def test_discussion_node_succeeds_when_within_length_limits():
 # ---------------------------------------------------------------------------
 
 
-def test_discussion_node_retries_then_fails_when_spoken_text_too_long():
+def test_discussion_node_retries_then_uses_safe_fallback_when_spoken_text_too_long():
     long_spoken_text = "가" * 301  # 300자 상한 초과
     payload = {
         "stance": "보완",
@@ -489,9 +489,9 @@ def test_discussion_node_retries_then_fails_when_spoken_text_too_long():
 
     node = make_conv_discussion_node("planning_expert", llm_call=llm_call)
     update = node(_base_state())
-    assert update["phase"] == "failed"
+    assert update.get("phase") != "failed"
     assert call_count["n"] == 2
-    assert "messages" not in update
+    assert update["messages"][0]["content"] != long_spoken_text
 
 
 def test_question_node_rejects_blank_spoken_text():

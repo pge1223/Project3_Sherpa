@@ -27,7 +27,7 @@ from graph import (  # noqa: E402
     reply_ideation_conversation,
     start_ideation_conversation,
 )
-from graph.ideation_conv_nodes import make_conv_question_node  # noqa: E402
+from graph.ideation_conv_nodes import make_conv_discussion_node, make_conv_question_node  # noqa: E402
 
 NOTICE_AND_CRITERIA = {
     "competition_name": "지역 소상공인 디지털전환 공모전",
@@ -264,7 +264,7 @@ class ScriptedLLM:
         raise AssertionError(f"예상하지 못한 프롬프트입니다: {prompt[:200]}")
 
 
-def _start(llm, max_rounds=3, evidence_lookup=None):
+def _start(llm, max_rounds=3, evidence_lookup=None, application_form_items=None):
     return start_ideation_conversation(
         session_id="CONV-TEST",
         notice_and_criteria=NOTICE_AND_CRITERIA,
@@ -272,6 +272,7 @@ def _start(llm, max_rounds=3, evidence_lookup=None):
         llm_call=llm,
         max_rounds=max_rounds,
         evidence_lookup=evidence_lookup,
+        application_form_items=application_form_items,
     )
 
 
@@ -336,6 +337,60 @@ def test_roundtable_updates_idea_canvas_without_changing_meeting_phase():
     canvas_prompts = [prompt for prompt in llm.captured_prompts if "[캔버스 갱신 규칙]" in prompt]
     assert len(canvas_prompts) == 1
     assert "[기획 전문가 최초 의견 planning_position]" in canvas_prompts[0]
+
+
+# ---------------------------------------------------------------------------
+# 1-2. 신청양식 항목 약한 주입 — 가은/Claude(2026-07-22, 요청: "프롬프트에서 이 방향으로
+#      너무 집중되면 안 됨" — 참고 자료로만 주입되고, 항목이 없으면 discussion 프롬프트가
+#      바뀌지 않는지 확인한다)
+# ---------------------------------------------------------------------------
+
+_SAMPLE_FORM_ITEMS = [
+    {"field_name": "문제 정의", "description": "해결하려는 문제를 서술", "char_limit": 300},
+    {"field_name": "차별성", "description": None, "char_limit": None},
+]
+
+
+def test_application_form_items_injected_into_discussion_prompt_when_present():
+    """세션 시작 시 application_form_items를 넘기면, 라운드테이블 discussion 프롬프트
+    (기획/개발 전문가 모두)에 그 항목이 JSON으로 실제로 주입돼야 한다."""
+    llm = ScriptedLLM()
+    _start(llm, application_form_items=_SAMPLE_FORM_ITEMS)
+
+    discussion_prompts = [p for p in llm.captured_prompts if "[의견 규칙]" in p]
+    assert discussion_prompts, "discussion 프롬프트가 하나도 호출되지 않았습니다"
+    for prompt in discussion_prompts:
+        assert "[신청양식 항목 application_form_items" in prompt
+        assert "문제 정의" in prompt
+        assert "차별성" in prompt
+        assert '"char_limit": 300' in prompt
+
+
+def test_application_form_items_absent_renders_null_and_does_not_change_topic_flow():
+    """application_form_items를 넘기지 않으면(기존 호출부와 동일) 데이터 블록이 null로
+    렌더되고, 회의 흐름(라운드 진행/phase)은 항목이 있을 때와 완전히 동일해야 한다 —
+    "질문 주제·순서를 바꾸지 않는다"는 규칙이 실제로 구조적으로 지켜지는지 확인한다."""
+    llm_without = ScriptedLLM()
+    state_without = _start(llm_without)
+
+    llm_with = ScriptedLLM()
+    state_with = _start(llm_with, application_form_items=_SAMPLE_FORM_ITEMS)
+
+    discussion_prompts_without = [p for p in llm_without.captured_prompts if "[의견 규칙]" in p]
+    assert discussion_prompts_without
+    for prompt in discussion_prompts_without:
+        assert "[신청양식 항목 application_form_items" in prompt
+        # 데이터 블록 값이 그대로 "null" 리터럴로 렌더돼야 한다(다른 선택적 데이터 필드와
+        # 같은 관례 — REVISED_PROPOSAL_JSON 등도 없으면 "null"로 렌더된다).
+        header_and_value = prompt.split("[신청양식 항목 application_form_items", 1)[1]
+        value_line = header_and_value.split("]\n", 1)[1].split("\n", 1)[0].strip()
+        assert value_line == "null"
+
+    # 항목 유무와 무관하게 phase/메시지 순서(질문 주제·라운드 진행)는 동일하다.
+    assert state_without["phase"] == state_with["phase"]
+    types_without = [(m["speaker_id"], m["message_type"]) for m in state_without["messages"]]
+    types_with = [(m["speaker_id"], m["message_type"]) for m in state_with["messages"]]
+    assert types_without == types_with
 
 
 # ---------------------------------------------------------------------------
@@ -1002,21 +1057,21 @@ def test_node_recovers_when_json_is_wrapped_in_explanatory_prose():
     assert "핵심 질문" in state["messages"][0]["content"]
 
 
-def test_empty_llm_response_falls_back_to_failed_phase():
-    """새 기본 진입점(planning_expert_discussion)이 빈 응답을 받아도 안전하게
-    phase="failed"로 끝나는지 확인한다."""
+def test_empty_discussion_response_falls_back_to_safe_expert_judgment():
+    """discussion의 빈 응답은 회의 실패가 아니라 안전한 전문가 판단으로 복구한다."""
 
     def llm(prompt: str) -> str:
         return ""
 
-    state = start_ideation_conversation(
+    state = initial_conv_state(
         session_id="CONV-TEST-EMPTY-RESPONSE",
         notice_and_criteria=NOTICE_AND_CRITERIA,
         user_idea=USER_IDEA,
-        llm_call=llm,
     )
-    assert state["phase"] == "failed"
-    assert state["failed_node"] == "discussion__planning_expert"
+    update = make_conv_discussion_node("planning_expert", llm)(state)
+    assert update.get("phase") != "failed"
+    assert update["previous_speaker"] == "planning_expert"
+    assert "추가로 확인" in update["messages"][0]["content"]
 
 
 def test_sufficiency_call_failure_fails_open_and_conversation_still_progresses():
@@ -1033,9 +1088,7 @@ def test_sufficiency_call_failure_fails_open_and_conversation_still_progresses()
 
 
 def test_discussion_node_rejects_blank_judgment_instead_of_producing_empty_card():
-    """judgment/reason이 빈 문자열인 의견 응답 — 빈 카드를 만들지 않고 재시도 후에도
-    여전히 비어 있으면 phase="failed"로 끝난다(요청 7번 배경의 재현 방지). 기획 위원이
-    라운드테이블의 첫 발언자이므로 start() 한 번으로 재현된다(개발 위원은 호출되지 않는다)."""
+    """빈 LLM 카드는 저장하지 않고 서버가 만든 안전 메시지로 교체한다."""
 
     def llm(prompt: str) -> str:
         if "[의견 규칙]" in prompt:
@@ -1046,15 +1099,15 @@ def test_discussion_node_rejects_blank_judgment_instead_of_producing_empty_card(
                     {"stance": "보완", "judgment": "", "reason": "   ", "referenced_message_ids": [], "evidence": []},
                     ensure_ascii=False,
                 )
-            raise AssertionError("기획 전문가 응답이 비어 있으면 개발 전문가는 호출되면 안 된다")
+            raise AssertionError("직접 호출 테스트에서는 개발 전문가를 호출하지 않는다")
         raise AssertionError(f"예상하지 못한 프롬프트: {prompt[:100]}")
 
-    state = _start(llm)
-
-    assert state["phase"] == "failed"
-    assert state["failed_node"] == "discussion__planning_expert"
-    # 실패한 기획 전문가 의견 메시지가 저장되지 않았다 — 빈 카드 금지.
-    assert not any(m["speaker_id"] == "planning_expert" and m["message_type"] == "opinion" for m in state["messages"])
+    state = initial_conv_state("BLANK-JUDGMENT", NOTICE_AND_CRITERIA, USER_IDEA)
+    update = make_conv_discussion_node("planning_expert", llm)(state)
+    message = update["messages"][0]
+    assert update.get("phase") != "failed"
+    assert message["content"]
+    assert message["structured"]["judgment"] == "문제 정의에 대한 추가 확인이 필요합니다."
 
 
 # ---------------------------------------------------------------------------
