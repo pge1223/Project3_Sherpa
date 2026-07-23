@@ -100,6 +100,16 @@ export async function getProjectReport(projectId) {
   return parseApiResponse(res, '결과를 불러오지 못했습니다.')
 }
 
+// 경이/Claude(2026-07-23, RPT-004 C단계): 버전 비교 — 최근 2개 회의(직전 vs 이번 수정본)를
+// build_revision_comparison으로 비교한 결과. 회의가 1개뿐이면 {available:false}. 완성 리포트
+// (VersionTrackerTestPage)가 v1.0→v1.1 이전/현재 막대·해결/신규/잔존 뱃지를 그릴 때 쓴다.
+export async function getProjectComparison(projectId) {
+  const res = await fetch(`${API_BASE_URL}/projects/${projectId}/comparison`, {
+    headers: { ...authHeaders() },
+  })
+  return parseApiResponse(res, '버전 비교 결과를 불러오지 못했습니다.')
+}
+
 // 가은/Claude(2026-07-21): "내 프로젝트"에서 이어서 열 때, 분석이 이미 끝난
 // 프로젝트인지(회의 존재 여부) 싸게 확인하는 용도 — MTG-005 기존 엔드포인트.
 // getProjectReport()와 달리 impl_guides(LLM 호출 포함)를 계산하지 않아 존재 확인
