@@ -112,7 +112,12 @@ from jose import jwt, JWTError
 from openai import OpenAI
 from starlette.concurrency import run_in_threadpool
 
-from ai.meeting.scoring import attach_impl_guides, build_revision_comparison, is_technical_persona
+from ai.meeting.scoring import (
+    attach_impl_guides,
+    build_revision_comparison,
+    build_version_history,
+    is_technical_persona,
+)
 from ai.rag.evidence_linking.service import EvidenceLinkingService
 from ai.rag.evidence_sufficiency.service import EvidenceSufficiencyService
 from ai.rag.orchestration import MeetingEvidenceOrchestrationService
@@ -1460,10 +1465,13 @@ async def get_project_report(
 
 
 # 경이/Claude(2026-07-23): RPT-004 버전 비교 엔드포인트 — "다음 수정본 제출"(C)로 수정본을
-# 재분석하면 프로젝트에 meeting이 하나 더 쌓인다(analyze는 매번 meeting_repo.create). 최근
-# 2개 meeting(after=최신 v1.n, before=직전 v1.n-1)을 build_revision_comparison(ai/meeting/
-# scoring/comparison.py, 순수 비교 로직)에 넘겨 항목별 점수 증감·해결/신규/잔존 지적을 돌려준다.
-# 회의가 1개뿐이면(첫 제출) available=false로, 프론트는 단일 버전만 그린다.
+# 재분석할 때마다 프로젝트에 meeting이 하나씩 쌓인다(analyze는 매번 meeting_repo.create,
+# 덮어쓰지 않는다). 이 회의들을 오래된→최신 순으로 정렬해 build_version_history(ai/meeting/
+# scoring/comparison.py)로 v1.0 → v1.1 → v1.2 … 전체 버전 히스토리를 만든다. 이전 구현은
+# 최근 2개만 비교해 프론트가 항상 [v1.0, v1.1] 2개만 그렸고, 3번째 제출부터 오래된 버전이
+# 사라지고 라벨이 밀리는 문제가 있었다 — 이제 제출한 만큼 버전이 누적된다.
+#   · versions: 전체 버전(각 총점·항목별 점수/판정/소속위원/지적 + 직전 대비 new/resolved)
+#   · comparison: 최신 두 버전 pairwise(기존 build_revision_comparison, 하위호환·경고용)
 @router.get("/{project_id}/comparison")
 async def get_project_comparison(
     project_id: str,
@@ -1476,15 +1484,22 @@ async def get_project_comparison(
         raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없습니다.")
 
     meetings = await meeting_repo.find_by_project_id(project_id)  # created_at 내림차순
-    if len(meetings) < 2:
-        return {"available": False, "meeting_count": len(meetings)}
+    if not meetings:
+        return {"available": False, "meeting_count": 0, "versions": []}
 
-    after_doc = meetings[0]   # 최신 = 이번 수정본
-    before_doc = meetings[1]  # 직전 = 이전 버전
-    comparison = await run_in_threadpool(build_revision_comparison, before_doc, after_doc)
+    ordered = list(reversed(meetings))  # 오래된 → 최신 = v1.0, v1.1, v1.2 …
+    versions = await run_in_threadpool(build_version_history, ordered)
+
+    comparison = None
+    if len(ordered) >= 2:
+        comparison = await run_in_threadpool(
+            build_revision_comparison, ordered[-2], ordered[-1]
+        )
+
     return {
-        "available": True,
-        "meeting_count": len(meetings),
+        "available": len(ordered) >= 2,  # 2개 이상일 때만 "비교" 성립(단일 제출은 출발점)
+        "meeting_count": len(ordered),
+        "versions": versions,
         "comparison": comparison,
     }
 
