@@ -4,6 +4,8 @@ Unified Document Parser
 파일 확장자에 따라 적절한 파서를 선택하는 래퍼
 """
 
+import logging
+import time
 from pathlib import Path
 
 from ai.rag.parsers.base_parser import BaseParser
@@ -14,6 +16,8 @@ from ai.rag.parsers.hwpx_parser import HWPParser, HWPXParser
 from ai.rag.parsers.schemas import DocumentExtractionResult, FileType
 from ai.rag.parsers.exceptions import UnsupportedFormatError, FileSizeLimitExceededError
 
+
+logger = logging.getLogger(__name__)
 
 # 파일 크기 제한 (20MB)
 MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024
@@ -70,7 +74,24 @@ def extract_document(file_path: str | Path) -> DocumentExtractionResult:
     parser_class = PARSER_MAP[extension]
     parser = parser_class(file_path)
 
-    return parser.parse()
+    logger.info(
+        "[parse-start] file=%s extension=%s parser=%s file_size=%d",
+        file_path.name, extension, parser_class.__name__, file_size,
+    )
+    started_at = time.perf_counter()
+    try:
+        result = parser.parse()
+    except Exception:
+        logger.exception(
+            "[parse-failed] file=%s parser=%s elapsed_ms=%.1f",
+            file_path.name, parser_class.__name__, (time.perf_counter() - started_at) * 1000,
+        )
+        raise
+    logger.info(
+        "[parse-done] file=%s parser=%s elapsed_ms=%.1f",
+        file_path.name, parser_class.__name__, (time.perf_counter() - started_at) * 1000,
+    )
+    return result
 
 
 def get_supported_formats() -> list[str]:

@@ -1,5 +1,6 @@
 import logging
 import sys
+from datetime import datetime, timedelta
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 
@@ -8,6 +9,72 @@ LOG_DIR.mkdir(exist_ok=True)
 
 LOG_FORMAT = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
 DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+
+class _MinuteTimestampedFileHandler(logging.Handler):
+    """가은/Claude(2026-07-23, 요청: 데모 파이프라인 점검용 전용 로그) — 표준
+    TimedRotatingFileHandler는 "현재 활성 파일"의 이름을 생성 시점 그대로 고정해두고 지난
+    파일만 타임스탬프를 붙여 옆으로 치운다. 여기서는 반대로 "지금 보고 있는 파일 이름
+    자체"가 항상 그 파일이 열린 시각을 담고 있어야 한다는 요청이라, 매 emit()마다 마지막
+    파일을 연 지 1분이 지났는지 검사해서 지났으면 새 타임스탬프로 새 파일을 연다. 로그가
+    없는 동안(비활성 구간)은 새 파일을 만들지 않는다 — 첫 emit()이 열 때만 생성된다."""
+
+    def __init__(self, log_dir: Path, prefix: str, rotate_interval: timedelta, encoding: str = "utf-8"):
+        super().__init__()
+        self._log_dir = log_dir
+        self._prefix = prefix
+        self._rotate_interval = rotate_interval
+        self._encoding = encoding
+        self._stream = None
+        self._opened_at: datetime | None = None
+
+    def _needs_new_file(self) -> bool:
+        return self._stream is None or (datetime.now() - self._opened_at) >= self._rotate_interval
+
+    def _open_new_file(self) -> None:
+        if self._stream is not None:
+            try:
+                self._stream.close()
+            except Exception:
+                pass
+        now = datetime.now()
+        self._opened_at = now
+        filename = self._log_dir / f"{self._prefix}_{now.strftime('%Y%m%d%H%M%S')}.txt"
+        self._stream = open(filename, "a", encoding=self._encoding)
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            with self.lock:
+                if self._needs_new_file():
+                    self._open_new_file()
+                self._stream.write(self.format(record) + "\n")
+                self._stream.flush()
+        except Exception:
+            self.handleError(record)
+
+    def close(self) -> None:
+        with self.lock:
+            if self._stream is not None:
+                try:
+                    self._stream.close()
+                finally:
+                    self._stream = None
+        super().close()
+
+
+class _UrlPdfAnalyzerFilter(logging.Filter):
+    """가은/Claude(2026-07-23): "1번(URL 분석 및 업로드된 파일 분석) 파이프라인" 범위만
+    고른다 — ai/rag/parsers, ai/rag/loaders 쪽 로거이거나(파일 파싱/OCR/문서 추출),
+    documents.py의 fetch-url/upload 색인 로그([fetch-url]/[upload] 접두사, 기존 컨벤션)만
+    통과시킨다. 회의 진행·RAG 검색 등 다른 구간 로그는 이 파일에 섞이지 않는다."""
+
+    _LOGGER_PREFIXES = ("ai.rag.parsers", "ai.rag.loaders")
+    _MESSAGE_PREFIXES = ("[fetch-url]", "[upload]")
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.name.startswith(self._LOGGER_PREFIXES):
+            return True
+        return record.getMessage().startswith(self._MESSAGE_PREFIXES)
 
 
 def setup_logger() -> logging.Logger:
@@ -72,6 +139,23 @@ def setup_logger() -> logging.Logger:
         if not ns_logger.handlers:
             ns_logger.addHandler(console_handler)
             ns_logger.addHandler(file_handler)
+
+    # 가은/Claude(2026-07-23, 요청: 데모 파이프라인 점검용 — 1번 URL/파일 분석 전용 로그):
+    # 기존 콘솔/logs/app.log는 그대로 두고(전체 백엔드 공용), 이 구간만 따로 잘라볼 수 있게
+    # logs/url_pdf_analyzer_<생성시각>.txt를 1분 단위로 새로 만들며 병행 기록한다. root
+    # 로거에 한 번만 붙이면 "app"/"ai" 하위 모든 로거의 레코드가 propagate로 여기까지
+    # 오므로(각 로거의 level은 emit 시점에 한 번만 검사되고, 이후 부모 전파 단계에서는
+    # 핸들러 자체의 필터만 적용된다), 필터로 범위를 좁히는 쪽이 여러 로거에 개별
+    # 부착하는 것보다 안전하다 — 새 area-1 모듈이 추가돼도 필터 프리픽스만 늘리면 된다.
+    root_logger = logging.getLogger()
+    if not any(isinstance(h, _MinuteTimestampedFileHandler) for h in root_logger.handlers):
+        url_pdf_handler = _MinuteTimestampedFileHandler(
+            LOG_DIR, prefix="url_pdf_analyzer", rotate_interval=timedelta(minutes=1), encoding="utf-8",
+        )
+        url_pdf_handler.setLevel(logging.INFO)
+        url_pdf_handler.setFormatter(logging.Formatter(LOG_FORMAT, DATE_FORMAT))
+        url_pdf_handler.addFilter(_UrlPdfAnalyzerFilter())
+        root_logger.addHandler(url_pdf_handler)
 
     return logger
 

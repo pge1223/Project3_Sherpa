@@ -14,6 +14,8 @@ from starlette.concurrency import run_in_threadpool
 from jose import jwt, JWTError
 from openai import OpenAI
 
+from app.core.llm import trace_openai_client
+
 from ai.rag.converters import (
     ConversionStatus,
     DocumentConversionError,
@@ -412,6 +414,20 @@ async def fetch_url(
     document_id: Optional[str] = None
     document_status: Optional[str] = None
 
+    # 데모 파이프라인 점검용 — fetch-url은 지금까지 실패(예외)만 로그에 남았다. 응답이
+    # 200이어도 본문을 못 찾았거나(page_content=None) 첨부파일이 다 미지원/실패로
+    # 빠졌을 수 있으므로, 성공 경로도 한 줄 남겨 "URL에서 실제로 뭘 가져왔는지"를 바로
+    # 확인할 수 있게 한다.
+    logger.info(
+        "[fetch-url] 수집 완료 url=%s target_type=%s page_content=%s attachments=%d unsupported=%d failed=%d",
+        request.url,
+        result.fetch_target_type,
+        "있음" if result.page_content is not None else "없음",
+        len(result.attachments),
+        len(result.unsupported_attachments),
+        len(result.failed_attachments),
+    )
+
     if result.page_content is not None:
         try:
             merged_page_content, cleaned = await run_in_threadpool(_apply_cleaning, result.page_content)
@@ -801,7 +817,10 @@ async def preview_document_pdf(
 # 한 번에 LLM에 넣는 단순한 1회성 호출이라 mentor-candidates(get_mentor_candidates)와
 # 같은 패턴을 그대로 따른다.
 _ANNOUNCEMENT_TRUNCATE_CHARS = 16000
-_ANNOUNCEMENT_ANALYSIS_CACHE_VERSION = 3
+# 가은/Claude(2026-07-23): 재검증 로직을 바꿀 때마다(v3: temperature=0 안정화, v4: "20점"
+# 재발 프롬프트 패치, v5: 재검증을 인용-대조 방식으로 재설계) 기존 캐시엔 반영이 안 되므로
+# 버전을 올려 강제로 재계산한다.
+_ANNOUNCEMENT_ANALYSIS_CACHE_VERSION = 5
 
 # 가은/Claude(2026-07-21): scripts/classify_contest_works.py가 contest_works 문서에
 # 붙인 category와 같은 8개 taxonomy — 이 공고문을 같은 기준으로 분류해야 contest_works를
@@ -958,7 +977,7 @@ evidence는 official_facts/strategic_analysis 중 실제로 중요한 판단 3~6
 
 def _call_announcement_analysis_llm(prompt: str) -> str:
     model = settings.reviewer_model()
-    client = OpenAI(api_key=settings.OPENAI_API_KEY, max_retries=1)
+    client = trace_openai_client(OpenAI(api_key=settings.OPENAI_API_KEY, max_retries=1))
     resp = client.chat.completions.create(
         model=model,
         messages=[{"role": "user", "content": prompt}],
@@ -1039,6 +1058,84 @@ def _missing_announcement_details(text: str, facts: OfficialFacts) -> list[str]:
     return missing
 
 
+# 가은/Claude(2026-07-23, 요청: 재검증을 "찾아내라" 압박형 -> "인용해서 확인"형으로 교체):
+# _missing_announcement_details가 내는 한국어 라벨 -> official_facts 실제 필드명 매핑.
+# 검증(quote)이 통과된 라벨에 해당하는 필드만 재검증 응답 값으로 덮어쓴다.
+_MISSING_DETAIL_FIELD_MAP = {
+    "평가 기준과 배점": "evaluation_criteria",
+    "평가일": "key_dates",
+    "결과 발표일": "key_dates",
+    "시상식 일시": "key_dates",
+    "신청·심사 조건": "application_review_conditions",
+    "선정 혜택": "selection_benefits",
+}
+
+
+def _build_announcement_audit_prompt(text: str, missing_details: list[str]) -> str:
+    """1차 응답에서 놓쳤을 가능성이 있는 항목만 원문 인용으로 재확인한다. 예전엔 전체
+    스키마를 다시 채우게 시켰는데("누락을 보완한 전체 JSON을 처음부터 다시 출력"), "찾아
+    내라"는 압박이 배점처럼 원문에 정말 없는 값을 100점÷항목수로 지어내는 걸로 이어지는
+    걸 실측했다(2026-07-23). 대신 "원문에서 그 문장을 그대로 복사해와라, 없으면 없다고
+    답해라"만 시키고, quote가 실제로 원문에 있는지는 모델의 자기보고를 믿지 않고 서버
+    (_verified_audit_fields)가 직접 대조한다. 제목·전략분석·근거는 이 재검증 대상이 아니라
+    응답 스키마에서 아예 뺐다 — 1차 프롬프트 전체를 다시 붙이면 원래 스키마 지시와 이번
+    스키마 지시가 겹쳐서 모델이 헷갈릴 여지도 없앤다."""
+    truncated = text[:_ANNOUNCEMENT_TRUNCATE_CHARS]
+    missing_list = ", ".join(missing_details)
+    return f"""당신은 공모전·지원사업 공고문 분석 결과를 재확인하는 보조입니다. 1차 분석에서
+다음 항목이 원문에 있는데 빠졌을 가능성이 제기됐습니다: {missing_list}.
+
+[공고문 원문]
+{truncated}
+
+각 항목마다 위 원문을 다시 훑어보고, 그 항목을 뒷받침하는 문장을 원문 그대로(요약·의역
+없이) 복사해 quote에 넣으세요. 원문에서 그런 문장을 정말 못 찾으면 quote를 빈 문자열("")로
+두고 found를 false로 하세요. 배점처럼 숫자 자체가 원문에 없으면, 항목명(기준)은 이번에 더
+찾았더라도 그 숫자에 대한 quote는 만들어내지 말고 found를 false로 두세요 — 다른 항목의
+배점을 참고해 값을 추정하거나 100점을 항목 개수로 나누는 것도 금지입니다. quote는 서버가
+원문과 그대로 대조해서만 인정하므로, 원문에 없는 문장을 지어내도 통과되지 않습니다.
+
+다음 JSON 형식으로만 응답하세요:
+{{
+  "verification": [
+    {{"field": "위 누락 항목 이름을 정확히 그대로", "quote": "원문에서 그대로 복사한 문장 또는 \\"\\"", "found": true 또는 false}}
+  ],
+  "official_facts": {{
+    "eligibility": ["..."],
+    "deadline": "...",
+    "submission_requirements": ["..."],
+    "evaluation_criteria": ["..."],
+    "disqualification_rules": ["..."],
+    "application_review_conditions": ["..."],
+    "key_dates": ["..."],
+    "selection_benefits": ["..."]
+  }}
+}}
+
+official_facts는 found:true로 확인한 항목에 해당하는 필드만 이번 재검증 값으로 채우면
+됩니다. 확인 못한 필드는 서버가 어차피 쓰지 않으니 빈 배열로 두세요."""
+
+
+def _verified_audit_fields(verification: object, text: str) -> set[str]:
+    """재검증 응답의 quote가 실제로 원문에 있는 문장인지 서버에서 직접 대조한다 — 모델이
+    "찾았다"(found=true)고 자체 보고한 것만 믿지 않는다. 공백 차이만 정규화해서 비교하고,
+    quote가 원문에 없으면 그 항목은 검증 실패로 보고 official_facts 병합에서 제외한다."""
+    if not isinstance(verification, list):
+        return set()
+    compact_text = re.sub(r"\s+", " ", text)
+    verified_labels: set[str] = set()
+    for item in verification:
+        if not isinstance(item, dict) or not item.get("found"):
+            continue
+        quote = str(item.get("quote") or "").strip()
+        if not quote:
+            continue
+        compact_quote = re.sub(r"\s+", " ", quote)
+        if compact_quote in compact_text:
+            verified_labels.add(str(item.get("field") or ""))
+    return {_MISSING_DETAIL_FIELD_MAP[label] for label in verified_labels if label in _MISSING_DETAIL_FIELD_MAP}
+
+
 @router.post("/{project_id}/announcement-analysis", response_model=AnnouncementAnalysisResponse)
 async def get_announcement_analysis(
     project_id: str,
@@ -1077,25 +1174,35 @@ async def get_announcement_analysis(
     missing_details = _missing_announcement_details(text, official_facts)
     if missing_details:
         logger.warning(
-            "[announcement-analysis] project_id=%s 누락 감지=%s, 1회 재검증",
+            "[announcement-analysis] project_id=%s 누락 감지=%s, 인용 재검증",
             project_id,
             missing_details,
         )
-        audit_prompt = (
-            f"{prompt}\n\n"
-            f"[재검증 요청]\n첫 응답에서 다음 원문 정보가 누락됐을 가능성이 있습니다: "
-            f"{', '.join(missing_details)}. 모든 출처를 다시 확인하여 누락을 보완한 전체 JSON을 "
-            "처음부터 다시 출력하세요. 원문에 없는 내용은 추가하지 마세요."
-        )
+        audit_prompt = _build_announcement_audit_prompt(text, missing_details)
         audited_raw = await run_in_threadpool(_call_announcement_analysis_llm, audit_prompt)
         try:
             audited = json.loads(audited_raw)
         except (json.JSONDecodeError, TypeError):
             audited = None
         if isinstance(audited, dict):
-            parsed = audited
-            facts_raw = parsed.get("official_facts")
-            official_facts = _build_official_facts(facts_raw)
+            verified_fields = _verified_audit_fields(audited.get("verification"), text)
+            logger.info(
+                "[announcement-analysis] project_id=%s 인용 검증 통과 필드=%s",
+                project_id,
+                sorted(verified_fields) or "없음",
+            )
+            audited_facts_raw = audited.get("official_facts")
+            # 검증(quote 대조)을 통과한 필드만 official_facts에 덮어쓴다 — parsed(제목/전략
+            # 분석/근거)는 재검증 대상이 아니므로 그대로 1차 응답 값을 유지한다(예전엔
+            # parsed 전체를 재검증 응답으로 바꿔치기해서, 검증하지도 않은 필드까지 두 번째
+            # 생성 결과로 조용히 덮였다).
+            if verified_fields and isinstance(audited_facts_raw, dict):
+                merged_facts_raw = dict(facts_raw) if isinstance(facts_raw, dict) else {}
+                for field in verified_fields:
+                    if field in audited_facts_raw:
+                        merged_facts_raw[field] = audited_facts_raw[field]
+                facts_raw = merged_facts_raw
+                official_facts = _build_official_facts(facts_raw)
 
     strategy_raw = parsed.get("strategic_analysis") if isinstance(parsed, dict) else None
     strategy_raw = strategy_raw if isinstance(strategy_raw, dict) else {}
