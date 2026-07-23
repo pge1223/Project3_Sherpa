@@ -4,6 +4,7 @@ Base Parser Abstract Class
 """
 
 import hashlib
+import logging
 from abc import ABC, abstractmethod
 from pathlib import Path
 
@@ -14,6 +15,8 @@ from ai.rag.parsers.schemas import (
     DocumentBlock,
     DocumentExtractionResult,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class BaseParser(ABC):
@@ -85,6 +88,22 @@ class BaseParser(ABC):
         warnings: list[str] | None = None,
     ) -> DocumentExtractionResult:
         """파싱 결과를 공통 형식으로 포장"""
+        # 데모 파이프라인 점검용 — 어떤 파서가 문서에서 실제로 뭘 뽑아냈는지(블록 수/페이지 수/
+        # 스캔 여부/경고)를 형식 무관하게 한 곳(모든 파서가 공통으로 거치는 지점)에서 확인한다.
+        logger.info(
+            "[parse-result] file=%s file_type=%s file_size=%d page_count=%s block_count=%d "
+            "is_scanned_pdf=%s requires_ocr=%s warning_count=%d",
+            self.file_path.name,
+            self.get_file_type().value,
+            file_size,
+            page_count,
+            len(blocks),
+            is_scanned_pdf,
+            requires_ocr,
+            len(warnings or []),
+        )
+        if warnings:
+            logger.info("[parse-result] warnings=%s", warnings)
         return DocumentExtractionResult(
             document_id=self.generate_document_id(self.file_path),
             file_name=self.file_path.name,

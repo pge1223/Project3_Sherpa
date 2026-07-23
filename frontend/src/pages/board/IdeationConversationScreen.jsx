@@ -913,7 +913,6 @@ export function IdeationScreen({
         </div>
 
         <ErrorBanner error={phaseFailure || error} onRetry={handleRestart} />
-        <StreamFallbackNotice message={streamFallbackNotice} />
         <StreamingCursorStyle />
 
         <div className="card glass" style={{ minHeight: 360, maxHeight: 520, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 4, padding: 16 }}>
@@ -947,6 +946,46 @@ export function IdeationScreen({
             <p style={{ fontSize: 12.5, color: 'var(--text-2)' }}>
               {statusLabelFor({ phase, starting, sending, finalizing })}...
             </p>
+          )}
+          {/* 가은/Claude(2026-07-23, 요청: 후보 패널을 대화창 안으로) — 진행자가 선택을
+              요청하는 첫 버블("제안된 후보 중... 답할 수 있습니다") 바로 아래에 후보
+              카드를 띄운다. 이전엔 오른쪽 사이드 패널에 항상 떠 있었는데, 대화 흐름
+              밖이라 어느 버블에 대한 응답인지 연결이 약했다. phase가
+              awaiting_candidate_selection인 동안은 항상 그 마지막 메시지가 이 선택
+              질문이므로, 메시지 목록 맨 끝에 붙이면 자연히 그 버블 바로 아래에 온다.
+              선택하면 phase가 바뀌어(hasSelected) 이 블록 자체가 사라진다. */}
+          {phase === 'awaiting_candidate_selection' && hasCandidates && !hasSelected && (
+            <div style={{ marginTop: 4 }}>
+              <div style={{ fontSize: 12, color: 'var(--text-2)', marginBottom: 10, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                주제 후보
+              </div>
+              {ideationConv.idea_candidates.map((c, i) => (
+                <CandidateCard key={c.candidate_id || i} candidate={c} index={i} onSelect={(idx) => handleSend(candidateSelectMessage(idx))} disabled={!canReplyOrContinue} />
+              ))}
+              <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 4 }}>
+                <button
+                  aria-label="다시 추천"
+                  title="다시 추천"
+                  disabled={!canReplyOrContinue}
+                  onClick={() => handleSend(REGENERATE_MESSAGE)}
+                  style={{
+                    background: 'none',
+                    border: '1px solid var(--glass-border)',
+                    borderRadius: 999,
+                    width: 30,
+                    height: 30,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    cursor: canReplyOrContinue ? 'pointer' : 'default',
+                    opacity: canReplyOrContinue ? 1 : 0.5,
+                    color: 'var(--text-2)',
+                  }}
+                >
+                  <RefreshCw size={14} />
+                </button>
+              </div>
+            </div>
           )}
           <div ref={chatEndRef} />
         </div>
@@ -1014,11 +1053,11 @@ export function IdeationScreen({
           </div>
         )}
 
+        {/* 가은/Claude(2026-07-23, 요청: "다시 추천"을 후보 패널의 새로고침 아이콘으로 이동) —
+            이 버튼은 후보 카드 아래(위 채팅 영역)로 옮겼다. "전문가 추천"은 후보 자체를
+            새로 만드는 게 아니라 다른 답변 경로라 그대로 입력창 아래에 남긴다. */}
         {phase === 'awaiting_candidate_selection' && (
           <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-            <button className="btn-ghost" style={{ fontSize: 12 }} disabled={!canReplyOrContinue} onClick={() => handleSend(REGENERATE_MESSAGE)}>
-              다시 추천
-            </button>
             <button className="btn-ghost" style={{ fontSize: 12 }} disabled={!canReplyOrContinue} onClick={() => handleSend(EXPERT_RECOMMEND_MESSAGE)}>
               전문가 추천
             </button>
@@ -1035,26 +1074,10 @@ export function IdeationScreen({
 
         <IdeaCanvasPanel ideationConv={ideationConv} analysis={announcementAnalysis} />
 
-        {hasSelected ? (
-          <div className="card glass" style={{ marginBottom: 12, padding: 14 }}>
-            <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 6 }}>선택한 주제</div>
-            <div style={{ fontSize: 13.5, fontWeight: 700, marginBottom: 4 }}>{ideationConv.selected_idea.title}</div>
-            {ideationConv.selection_reason && (
-              <div style={{ fontSize: 12, color: 'var(--text-2)', lineHeight: 1.6 }}>{ideationConv.selection_reason}</div>
-            )}
-          </div>
-        ) : (
-          hasCandidates && (
-            <div style={{ marginBottom: 8 }}>
-              <div style={{ fontSize: 12, color: 'var(--text-2)', marginBottom: 10, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                주제 후보
-              </div>
-              {ideationConv.idea_candidates.map((c, i) => (
-                <CandidateCard key={c.candidate_id || i} candidate={c} index={i} onSelect={(idx) => handleSend(candidateSelectMessage(idx))} disabled={!canReplyOrContinue} />
-              ))}
-            </div>
-          )
-        )}
+        {/* 가은/Claude(2026-07-23, 요청: "후보 선택하면 아이디어 선택 패널 없애줘") — 후보
+            카드는 대화창 안(선택 질문 버블 아래)에서 보여주고, 선택 후에는 이 자리에
+            요약 카드도 더 이상 띄우지 않는다. 선택 결과는 아래 IdeaCanvasPanel(문제
+            상황/타깃 사용자 등)과 대화 자체로 계속 드러난다. */}
 
         {ideationConv && (ideationConv.consensus?.length > 0 || ideationConv.unresolved_issues?.length > 0) && (
           <div className="card glass" style={{ marginBottom: 12, padding: 14 }}>

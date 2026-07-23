@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 from pydantic import Field
@@ -104,6 +105,14 @@ class Settings(BaseSettings):
     # generation/facilitator/synthesis 노드에는 적용되지 않는다.
     ENABLE_IDEATION_EVIDENCE_PLANNER_DISCUSSION: bool = False
 
+    # 가은/Claude(2026-07-23, 요청: LangSmith 트레이싱 연결): LangGraph 노드(위원 리뷰/
+    # 위원장 종합/아이디어 회의)와 backend 라우트가 만드는 OpenAI 호출을 LangSmith
+    # 대시보드에서 추적할지 여부. 기본값 False — 켜지 않으면 기존 동작과 100% 동일하고
+    # 어떤 외부 호출도 추가되지 않는다.
+    LANGSMITH_TRACING: bool = False
+    LANGSMITH_API_KEY: str = ""
+    LANGSMITH_PROJECT: str = "ai-review-board"
+
     class Config:
         env_file = str(_ENV_FILE)
         env_file_encoding = "utf-8"
@@ -131,3 +140,15 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+# 가은/Claude(2026-07-23): backend/.env는 pydantic-settings가 파일에서 직접 읽을 뿐
+# os.environ에는 반영하지 않는다(backend/README.md 참고). langsmith SDK(wrap_openai가
+# 내부에서 만드는 기본 Client)는 os.environ만 보므로, LANGSMITH_TRACING이 켜져 있을 때만
+# 필요한 값을 여기서 명시적으로 브릿지한다. get_openai_client()가 매 요청마다 새
+# Client를 만들지 않고 SDK 기본 동작에 맡길 수 있게 하기 위한 최소한의 연결이다.
+if settings.LANGSMITH_TRACING:
+    os.environ.setdefault("LANGSMITH_TRACING", "true")
+    if settings.LANGSMITH_API_KEY:
+        os.environ.setdefault("LANGSMITH_API_KEY", settings.LANGSMITH_API_KEY)
+    if settings.LANGSMITH_PROJECT:
+        os.environ.setdefault("LANGSMITH_PROJECT", settings.LANGSMITH_PROJECT)
