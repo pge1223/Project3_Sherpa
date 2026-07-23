@@ -347,6 +347,7 @@ def build_ideation_conv_discussion_prompt(
     current_speaker: Any = None,
     responding_to_message: Any = None,
     evidence_plan_notice: str = "",
+    application_form_items: Any = None,
 ) -> str:
     """기획/개발 전문가의 "보완 의견 턴" 실행 프롬프트를 조립한다.
 
@@ -368,7 +369,12 @@ def build_ideation_conv_discussion_prompt(
 
     active_issue_id/open_issues/resolved_issues(새 파라미터, 기본값 None — 호출부가 안 넘기면
     빈 값으로 렌더돼 기존 동작과 동일)는 지금 회의가 쟁점 단위로 어디까지 왔는지 전문가에게
-    알려준다 — 전문가는 이 값을 보고 새 쟁점을 열지, 기존 쟁점을 이어갈지 판단한다."""
+    알려준다 — 전문가는 이 값을 보고 새 쟁점을 열지, 기존 쟁점을 이어갈지 판단한다.
+
+    가은/Claude(2026-07-22, 요청: 신청양식 항목 약한 주입): application_form_items는 순수
+    추가 파라미터(기본값 None)다 — [{"field_name","description","char_limit"}] 형태의
+    항목 목록을 "참고 자료"(지시 아님)로 주입한다. None/빈 리스트면 템플릿의
+    [신청양식 참고 규칙] 섹션이 실질적으로 아무 효과가 없다(참고할 항목 자체가 없으므로)."""
     card = get_persona_card(persona_id)
     template = _read_text(IDEATION_CONV_DISCUSSION_TEMPLATE)
     evidence_text = _as_text(retrieved_evidence)
@@ -389,6 +395,7 @@ def build_ideation_conv_discussion_prompt(
         "<<RESPONDING_TO_MESSAGE_JSON>>": _as_text(
             responding_to_message if responding_to_message is not None else {}
         ),
+        "<<APPLICATION_FORM_ITEMS_JSON>>": _as_text(application_form_items if application_form_items else None),
     }
     for token, value in replacements.items():
         template = template.replace(token, value)

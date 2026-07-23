@@ -2319,6 +2319,8 @@ def make_conv_discussion_node(
                 else {}
             ),
             evidence_plan_notice=evidence_plan_notice,
+            # 가은/Claude(2026-07-22, 요청: 신청양식 항목 약한 주입) — 순수 추가 인자.
+            application_form_items=state.get("application_form_items") or None,
         )
         validate = lambda raw, _stage=discussion_stage: _validate_discussion_response(  # noqa: E731
             raw,

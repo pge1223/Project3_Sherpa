@@ -94,6 +94,20 @@ def _facilitator_summary_payload_for(prompt: str) -> dict:
     }
 
 
+def _canvas_payload() -> dict:
+    """test_ideation_conversation_discovery.py의 캔버스 갱신 스텁과 같은 payload."""
+    return {
+        "problem": "문의 응대 부담",
+        "target_user": "소상공인",
+        "core_value": "응대 시간 절감",
+        "solution": "FAQ 자동 응답",
+        "differentiation": "저비용 구축",
+        "feasibility": "medium",
+        "risks": ["오답 위험"],
+        "contest_fit": "실현가능성 기준 대응",
+    }
+
+
 def _sync_stub_llm_call(session_id: str, model: str):
     """기존 동기식 /start, /reply(비교용)에 쓰는 완성 응답 스텁 — 스트리밍 스텁과 정확히
     같은 내용을 반환해야 "스트리밍 결과와 동기식 결과가 의미상 같다"를 비교할 수 있다."""
@@ -163,6 +177,53 @@ class _FakeStreamState:
                 yield raw[i : i + self.chunk_size]
 
         def call_chat_completion(prompt: str) -> str:
+            # 가은/Claude(2026-07-22, 캔버스 자동 갱신) — canvas_update는 화면 메시지를 만들지
+            # 않아 스트리밍 대상이 아니고, 항상 이 동기식 경로로 온다.
+            if "[캔버스 갱신 규칙]" in prompt:
+                return json.dumps(_canvas_payload(), ensure_ascii=False)
+            # 가은/Claude(2026-07-22, 회의 시작 대기 체감 개선 1단계) — /start/stream의
+            # discovery 경로(후보 생성/검토)도 화면 메시지가 없는 phase-only 호출이라 이
+            # 동기식 경로로 온다(test_ideation_conversation_discovery.py의 stub과 같은 payload).
+            if "[후보 생성 규칙]" in prompt:
+                return json.dumps(
+                    {
+                        "contest_analysis": {
+                            "purpose": "p", "key_criteria": ["a"], "required_tech_or_theme": ["b"],
+                            "suitable_problem_domains": ["c"], "constraints": ["d"], "unknown_from_notice": ["e"],
+                        },
+                        "candidates": [
+                            {
+                                "candidate_id": "candidate_1", "title": "후보1", "problem": "문제1",
+                                "target_user": "사용자1", "usage_scenario": "상황1", "core_value": "가치1",
+                                "solution": "해결1", "main_features": ["기능1"], "differentiation": "차별1",
+                                "contest_fit": "적합1", "success_metrics": ["지표1"],
+                            },
+                            {
+                                "candidate_id": "candidate_2", "title": "후보2", "problem": "문제2",
+                                "target_user": "사용자2", "usage_scenario": "상황2", "core_value": "가치2",
+                                "solution": "해결2", "main_features": ["기능2"], "differentiation": "차별2",
+                                "contest_fit": "적합2", "success_metrics": ["지표2"],
+                            },
+                        ],
+                    },
+                    ensure_ascii=False,
+                )
+            if "[검토 규칙]" in prompt:
+                return json.dumps(
+                    {
+                        "candidate_reviews": [
+                            {
+                                "candidate_id": "candidate_1", "required_data": ["d1"], "technical_approach": "t1",
+                                "mvp_scope": "m1", "feasibility": "high", "risks": ["r1"], "dev_notes": None,
+                            },
+                            {
+                                "candidate_id": "candidate_2", "required_data": ["d2"], "technical_approach": "t2",
+                                "mvp_scope": "m2", "feasibility": "medium", "risks": ["r2"], "dev_notes": None,
+                            },
+                        ]
+                    },
+                    ensure_ascii=False,
+                )
             raise AssertionError(f"예상하지 못한 프롬프트: {prompt[:100]}")
 
         return stream_chat_completion, call_chat_completion
@@ -211,6 +272,73 @@ def test_streaming_disabled_returns_404(client: TestClient, monkeypatch):
     session_id = _start_session(client)
     resp = client.post(f"/ideation-conversation/{session_id}/reply/stream", json={"message": "답변1"})
     assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# /start/stream — 가은/Claude(2026-07-22, 요청: 회의 시작 대기 체감 개선 1단계)
+# ---------------------------------------------------------------------------
+
+
+def test_start_stream_disabled_returns_404(client: TestClient, monkeypatch):
+    """플래그가 꺼져 있으면 404 — 프론트가 이 응답을 보고 동기식 /start로 폴백한다."""
+    monkeypatch.setattr(settings, "ENABLE_IDEATION_STREAMING", False)
+    resp = client.post(
+        "/ideation-conversation/start/stream",
+        json={"competition_name": "데모 공모전", "user_idea": ""},
+    )
+    assert resp.status_code == 404
+
+
+def test_start_stream_discovery_emits_phase_events_then_final_state(client: TestClient, monkeypatch):
+    """board의 실제 경로(discovery, user_idea 없음): 후보 생성/실현 가능성 검토는 화면
+    메시지를 만들지 않으므로 message_delta 없이 phase 이벤트만 나가고, 마지막에 최종
+    state 이벤트가 온다. 세션도 정상 생성되어 이후 GET으로 이어받을 수 있어야 한다."""
+    fake = _FakeStreamState(chunk_size=4)
+    monkeypatch.setattr(conv_route, "_build_streaming_backends", lambda session_id, model: fake.build())
+
+    with client.stream(
+        "POST",
+        "/ideation-conversation/start/stream",
+        json={"competition_name": "데모 공모전", "user_idea": ""},
+    ) as resp:
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("application/x-ndjson")
+        events = _read_ndjson_events(resp)
+
+    types = [e["type"] for e in events]
+    assert types[-1] == "state"
+    phase_labels = [e.get("label", "") for e in events if e["type"] == "phase"]
+    assert any("아이디어 후보를 만들고" in label for label in phase_labels)
+    assert any("실현 가능성" in label for label in phase_labels)
+    assert "message_delta" not in types  # discovery 시작은 화면 메시지를 만들지 않는다.
+
+    final_state = events[-1]["state"]
+    assert final_state["phase"] == "awaiting_candidate_selection"
+    assert len(final_state["idea_candidates"]) == 2
+    # 세션이 스토어에 저장돼 재접속(GET)으로 이어받을 수 있다.
+    get_resp = client.get(f"/ideation-conversation/{final_state['session_id']}")
+    assert get_resp.status_code == 200
+
+
+def test_start_stream_refinement_streams_roundtable_messages(client: TestClient, monkeypatch):
+    """refinement 모드(user_idea 있음)로 시작하면 라운드테이블 발언이 reply/stream과
+    동일하게 message_delta(타이핑 효과)로 스트리밍된다 — 같은 make_streaming_llm_call을
+    그대로 쓰므로 추가 구현 없이 따라오는 동작을 고정한다."""
+    fake = _FakeStreamState(chunk_size=4)
+    monkeypatch.setattr(conv_route, "_build_streaming_backends", lambda session_id, model: fake.build())
+
+    with client.stream(
+        "POST",
+        "/ideation-conversation/start/stream",
+        json={"competition_name": "데모 공모전", "user_idea": "소상공인 손님 문의 자동 응대 챗봇"},
+    ) as resp:
+        events = _read_ndjson_events(resp)
+
+    types = [e["type"] for e in events]
+    assert "message_start" in types
+    assert "message_delta" in types
+    assert types[-1] == "state"
+    assert events[-1]["state"]["phase"] == "awaiting_user_decision"
 
 
 def test_stream_event_order_message_start_delta_end_state(client: TestClient, monkeypatch):
