@@ -262,13 +262,97 @@ def _safe_call_structured_json(
             raw = parse_json_response(llm_call(prompt))
         except (ValueError, KeyError, TypeError):
             last_reason = "json_parse_failed"
+            trace_event(
+                "IDEATION_STRUCTURED_RESPONSE_VALIDATION_FAILED",
+                node=node_name,
+                attempt=attempt,
+                reason=last_reason,
+                will_retry=attempt < 2,
+            )
+            discard = getattr(llm_call, "discard_streamed_prompt", None)
+            if callable(discard):
+                discard(prompt, last_reason)
             continue
         problem = validate(raw)
         if problem is None:
             return raw, True, attempt
         last_reason = problem
+        trace_event(
+            "IDEATION_STRUCTURED_RESPONSE_VALIDATION_FAILED",
+            node=node_name,
+            attempt=attempt,
+            reason=last_reason,
+            will_retry=attempt < 2,
+        )
+        discard = getattr(llm_call, "discard_streamed_prompt", None)
+        if callable(discard):
+            discard(prompt, last_reason)
     logger.warning("[%s] 구조화 응답 검증 실패 reason=%s", node_name, last_reason)
     return None, False, 2
+
+
+def _safe_discussion_fallback(
+    *,
+    persona_id: str,
+    state: IdeationConvState,
+    discussion_stage: str,
+    responding_to_message_id: str | None,
+    responding_to_content: str | None,
+) -> dict:
+    """두 번의 구조화 응답 검증이 모두 실패했을 때 저장할 서버 생성 발언.
+
+    문서 내용을 추측하지 않는 expert_judgment만 만들고 기존 discussion 후처리와 라우터를
+    그대로 통과시킨다. 따라서 일시적인 LLM 형식 오류가 회의 전체를 failed로 만들지 않는다.
+    """
+    issue = resolve_effective_issue(state, persona_id)
+    issue_id = issue["issue_id"]
+    issue_title = issue["title"]
+    counterpart = _DISCUSSION_COUNTERPART.get(persona_id, "ideation_facilitator")
+    spoken_text = (
+        f"현재 응답 형식을 안정적으로 확인하지 못해 {issue_title}에 관한 문서 사실을 확정하기 어렵습니다. "
+        "검색 자료와 세부 조건을 추가로 확인한 뒤 판단을 보완해야 합니다."
+    )
+    responding_to = (
+        "앞선 의견의 세부 근거를 추가로 확인해야 합니다."
+        if discussion_stage == "response" and responding_to_content
+        else None
+    )
+    return {
+        "stance": "보완",
+        "judgment": f"{issue_title}에 대한 추가 확인이 필요합니다.",
+        "reason": "두 차례 생성된 구조화 응답이 검증을 통과하지 않아 문서 사실을 안전하게 확정할 수 없습니다.",
+        "suggestion": "검색 자료와 사용자 조건을 다시 확인한 뒤 구체적인 판단을 이어갑니다.",
+        "interim_conclusion": "현재 단계에서는 문서 사실을 단정하지 않고 추가 확인이 필요하다고 정리합니다.",
+        "spoken_text": spoken_text,
+        "responding_to": responding_to,
+        "agreement": "추가 검토가 필요하다는 점은 수용합니다." if responding_to else None,
+        "concern": "현재 자료만으로 구체적인 사실을 단정할 수 없습니다." if responding_to else None,
+        "revision": None,
+        "confirmed": [],
+        "unconfirmed": [f"{issue_title} 관련 세부 근거"],
+        "referenced_message_ids": [responding_to_message_id] if responding_to_message_id else [],
+        "claims": [
+            {
+                "claim_id": "safe_fallback_judgment",
+                "text": f"{issue_title}에 대한 추가 확인이 필요합니다.",
+                "claim_type": "expert_judgment",
+                "evidence_refs": [],
+            }
+        ],
+        "next_action": None,
+        "active_issue_id": issue_id,
+        "active_issue_title": issue_title,
+        "new_information": ["구조화 응답 검증 실패로 문서 사실 확정을 보류함"],
+        "proposal": None,
+        "changed_position": False,
+        "needs_counterpart_response": True,
+        "recommended_next_speaker": counterpart,
+        "issue_resolved": False,
+        "needs_user_input": False,
+        "user_question": None,
+        "safe_fallback": True,
+        "safe_fallback_reason": "structured_response_validation_failed_twice",
+    }
 
 
 def _safe_fallback_spoken_text(grounding: dict) -> str:
@@ -2246,7 +2330,23 @@ def make_conv_discussion_node(
         raw, ok, attempts = _safe_call_structured_json(llm_call, prompt, validate, f"discussion__{persona_id}")
         used = state.get("llm_calls_used", 0) + attempts
         if not ok:
-            return {"phase": "failed", "failed_node": f"discussion__{persona_id}", "llm_calls_used": used}
+            raw = _safe_discussion_fallback(
+                persona_id=persona_id,
+                state=state,
+                discussion_stage=discussion_stage,
+                responding_to_message_id=responding_to_message_id,
+                responding_to_content=(responding_to_target.get("content") if responding_to_target else None),
+            )
+            trace_event(
+                "IDEATION_STRUCTURED_RESPONSE_SAFE_FALLBACK",
+                session_id=state.get("session_id"),
+                node=f"discussion__{persona_id}",
+                attempts=attempts,
+                speaker=persona_id,
+                issue=raw["active_issue_id"],
+                next_speaker=raw["recommended_next_speaker"],
+                claim_type="expert_judgment",
+            )
 
         raw, grounding, used = _ground_and_finalize_claims(
             persona_id=persona_id,
@@ -2487,6 +2587,9 @@ def make_conv_discussion_node(
                 "linked_evidence_refs": grounding["linked_evidence_refs"],
                 "unsupported_claims": [c["text"] for c in grounding["unsupported_claims"]],
                 "missing_information": grounding["missing_information"],
+                # 서버가 만든 구조화 실패 복구 메시지인지 감사·재현 시 구분한다.
+                "safe_fallback": bool(raw.get("safe_fallback")),
+                "safe_fallback_reason": raw.get("safe_fallback_reason"),
             },
             message_id=message_id,
         )

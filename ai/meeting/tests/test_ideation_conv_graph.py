@@ -27,7 +27,7 @@ from graph import (  # noqa: E402
     reply_ideation_conversation,
     start_ideation_conversation,
 )
-from graph.ideation_conv_nodes import make_conv_question_node  # noqa: E402
+from graph.ideation_conv_nodes import make_conv_discussion_node, make_conv_question_node  # noqa: E402
 
 NOTICE_AND_CRITERIA = {
     "competition_name": "지역 소상공인 디지털전환 공모전",
@@ -1002,21 +1002,21 @@ def test_node_recovers_when_json_is_wrapped_in_explanatory_prose():
     assert "핵심 질문" in state["messages"][0]["content"]
 
 
-def test_empty_llm_response_falls_back_to_failed_phase():
-    """새 기본 진입점(planning_expert_discussion)이 빈 응답을 받아도 안전하게
-    phase="failed"로 끝나는지 확인한다."""
+def test_empty_discussion_response_falls_back_to_safe_expert_judgment():
+    """discussion의 빈 응답은 회의 실패가 아니라 안전한 전문가 판단으로 복구한다."""
 
     def llm(prompt: str) -> str:
         return ""
 
-    state = start_ideation_conversation(
+    state = initial_conv_state(
         session_id="CONV-TEST-EMPTY-RESPONSE",
         notice_and_criteria=NOTICE_AND_CRITERIA,
         user_idea=USER_IDEA,
-        llm_call=llm,
     )
-    assert state["phase"] == "failed"
-    assert state["failed_node"] == "discussion__planning_expert"
+    update = make_conv_discussion_node("planning_expert", llm)(state)
+    assert update.get("phase") != "failed"
+    assert update["previous_speaker"] == "planning_expert"
+    assert "추가로 확인" in update["messages"][0]["content"]
 
 
 def test_sufficiency_call_failure_fails_open_and_conversation_still_progresses():
@@ -1033,9 +1033,7 @@ def test_sufficiency_call_failure_fails_open_and_conversation_still_progresses()
 
 
 def test_discussion_node_rejects_blank_judgment_instead_of_producing_empty_card():
-    """judgment/reason이 빈 문자열인 의견 응답 — 빈 카드를 만들지 않고 재시도 후에도
-    여전히 비어 있으면 phase="failed"로 끝난다(요청 7번 배경의 재현 방지). 기획 위원이
-    라운드테이블의 첫 발언자이므로 start() 한 번으로 재현된다(개발 위원은 호출되지 않는다)."""
+    """빈 LLM 카드는 저장하지 않고 서버가 만든 안전 메시지로 교체한다."""
 
     def llm(prompt: str) -> str:
         if "[의견 규칙]" in prompt:
@@ -1046,15 +1044,15 @@ def test_discussion_node_rejects_blank_judgment_instead_of_producing_empty_card(
                     {"stance": "보완", "judgment": "", "reason": "   ", "referenced_message_ids": [], "evidence": []},
                     ensure_ascii=False,
                 )
-            raise AssertionError("기획 전문가 응답이 비어 있으면 개발 전문가는 호출되면 안 된다")
+            raise AssertionError("직접 호출 테스트에서는 개발 전문가를 호출하지 않는다")
         raise AssertionError(f"예상하지 못한 프롬프트: {prompt[:100]}")
 
-    state = _start(llm)
-
-    assert state["phase"] == "failed"
-    assert state["failed_node"] == "discussion__planning_expert"
-    # 실패한 기획 전문가 의견 메시지가 저장되지 않았다 — 빈 카드 금지.
-    assert not any(m["speaker_id"] == "planning_expert" and m["message_type"] == "opinion" for m in state["messages"])
+    state = initial_conv_state("BLANK-JUDGMENT", NOTICE_AND_CRITERIA, USER_IDEA)
+    update = make_conv_discussion_node("planning_expert", llm)(state)
+    message = update["messages"][0]
+    assert update.get("phase") != "failed"
+    assert message["content"]
+    assert message["structured"]["judgment"] == "문제 정의에 대한 추가 확인이 필요합니다."
 
 
 # ---------------------------------------------------------------------------

@@ -1001,6 +1001,16 @@ async def reply_conversation_stream(session_id: str, request: ReplyRequest, http
                 )
             _store.update(session_id, state)
             sink({"type": "state", "state": _serialize_state(state)})
+            if state.get("phase") == "failed":
+                failed_node = state.get("failed_node")
+                sink(
+                    {
+                        "type": "error",
+                        "code": "IDEATION_CONV_NODE_FAILED",
+                        "message": f"{failed_node or '알 수 없는'} 노드에서 회의 처리가 실패했습니다.",
+                        "failed_node": failed_node,
+                    }
+                )
         except IdeationCancelled as exc:
             # 요청 13번 — 취소는 일반 오류가 아니다(phase="failed"로 만들지 않는다). 취소
             # 시점까지 완료된 발언이 있으면(exc.partial_state) 그것만 canonical state로
