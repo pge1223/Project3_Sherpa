@@ -408,6 +408,13 @@ function ErrorBanner({ error, onRetry }) {
       <AlertCircle size={16} color="var(--coral)" style={{ marginTop: 1, flexShrink: 0 }} />
       <div style={{ flex: 1 }}>
         <div style={{ fontSize: 13, color: 'var(--text-0)', lineHeight: 1.6 }}>{error.message}</div>
+        {(error.code || error.failedNode) && (
+          <div style={{ marginTop: 5, fontSize: 11.5, color: 'var(--text-2)', fontFamily: 'var(--mono)' }}>
+            {error.code && `오류 코드: ${error.code}`}
+            {error.code && error.failedNode && ' · '}
+            {error.failedNode && `실패 노드: ${error.failedNode}`}
+          </div>
+        )}
         {onRetry && (
           <button className="btn-ghost" style={{ marginTop: 10, padding: '6px 12px', fontSize: 12, display: 'flex', alignItems: 'center', gap: 6 }} onClick={onRetry}>
             <RefreshCw size={12} /> 다시 시도
@@ -502,17 +509,28 @@ export function IdeationScreen({
     let cancelled = false
 
     function finalizeStream(finalState, errorEvent) {
-      if (errorEvent) {
-        setError(classifyIdeationConvError(new Error(errorEvent.message)))
-      } else if (finalState) {
-        setIdeationConv(finalState)
-        setDraft('')
-      } else {
-        // state/error 이벤트를 하나도 못 받은 채 스트림이 끝났다(연결이 조기 종료된 경우
-        // 등) — 회의 화면은 유지하되 무엇이 잘못됐는지 알린다.
-        setError(classifyIdeationConvError(new Error('스트리밍 응답이 완료되지 않았습니다.')))
+      try {
+        // state와 error가 함께 와도 canonical state를 먼저 보존해야 실제 오류 코드와
+        // failed_node를 화면에 표시하고 동일 입력으로 다시 시작할 수 있다.
+        if (finalState) {
+          setIdeationConv(finalState)
+          setDraft('')
+        }
+        if (errorEvent) {
+          setError({
+            ...classifyIdeationConvError(new Error(errorEvent.message)),
+            code: errorEvent.code,
+            failedNode: errorEvent.failed_node,
+          })
+        } else if (!finalState) {
+          // state/error 이벤트를 하나도 못 받은 채 스트림이 끝났다(연결이 조기 종료된 경우
+          // 등) — 회의 화면은 유지하되 무엇이 잘못됐는지 알린다.
+          setError(classifyIdeationConvError(new Error('스트리밍 응답이 완료되지 않았습니다.')))
+        }
+      } finally {
+        // 성공·서버 실패·연결 실패 어느 경로에서도 입력창이 sending 상태에 갇히지 않는다.
+        setSending(false)
       }
-      setSending(false)
     }
 
     function tick() {
@@ -658,6 +676,13 @@ export function IdeationScreen({
   }, [ideationConv?.messages?.length, streamState.messages.reduce((n, m) => n + (m.displayedContent?.length || 0), 0)])
 
   const phase = ideationConv?.phase
+  const phaseFailure = phase === 'failed'
+    ? {
+        message: ideationConv?.error?.message || '회의 처리 중 오류가 발생했습니다.',
+        code: ideationConv?.error?.code || 'IDEATION_CONV_NODE_FAILED',
+        failedNode: ideationConv?.failed_node || ideationConv?.error?.failed_node,
+      }
+    : null
   const canonicalMessages = dedupeMessagesById(ideationConv?.messages)
   const visibleMessages = [...canonicalMessages, ...interruptedMessages, ...streamState.messages]
   const busy = starting || sending || finalizing || saving
@@ -887,7 +912,7 @@ export function IdeationScreen({
           )}
         </div>
 
-        <ErrorBanner error={error} onRetry={handleRestart} />
+        <ErrorBanner error={phaseFailure || error} onRetry={handleRestart} />
         <StreamingCursorStyle />
 
         <div className="card glass" style={{ minHeight: 360, maxHeight: 520, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 4, padding: 16 }}>
@@ -1006,6 +1031,8 @@ export function IdeationScreen({
                 interjectPlaceholder ||
                 (awaitingInterjectTarget
                   ? '먼저 위쪽에서 질문 대상을 선택해 주세요.'
+                  : phase === 'failed'
+                    ? '회의 처리 오류가 발생했습니다. 위의 다시 시도 버튼을 눌러주세요.'
                   : !canReplyOrContinue
                     ? '전문가 응답을 기다리는 중입니다'
                     : phase === 'awaiting_user_decision'
@@ -1077,7 +1104,7 @@ export function IdeationScreen({
           <Sparkles size={14} />
           {finalizing ? '초안 생성 중...' : '주제 확정하고 이어서 받기'}
         </button>
-        {!canFinalize && ideationConv && phase !== 'finalized' && (
+        {!canFinalize && ideationConv && phase !== 'finalized' && phase !== 'failed' && (
           <p style={{ fontSize: 11.5, color: 'var(--text-2)', marginTop: 8 }}>{nextActionGuideFor(phase)}</p>
         )}
       </div>
