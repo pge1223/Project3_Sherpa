@@ -273,6 +273,9 @@ def get_current_user(authorization: Optional[str]) -> str:
 # 호출의 프롬프트(입력)와 응답(출력) 원본을 그대로 append한다. 터미널에서 `tail -f` 로 실시간 관찰.
 _SCORING_TRACE_FILE = Path(tempfile.gettempdir()) / "reviewboard_scoring_trace.log"
 
+# 채점 재현성용 고정 seed(temperature=0과 함께 사용). 값 자체는 임의(고정이기만 하면 됨).
+_SCORING_SEED = 7
+
 
 def _build_real_llm_call(meeting_id: str):
     """실제 OpenAI 호출. LLM_PROFILE(dev|quality|premium)에 따라 모델을 고르고, 호출마다
@@ -297,11 +300,16 @@ def _build_real_llm_call(meeting_id: str):
         # 경이/Claude(2026-07-23): temperature=0(결정론) — 기본값 1.0에서는 같은 문서를 채점해도
         # 매번 ±수 점씩 흔들려(노이즈가 품질을 가림) "더 좋은 문서가 더 낮게" 나오거나 개선본이
         # 하향되는 문제가 있었다(실측). 채점·종합은 재현성이 중요한 판단 작업이라 0으로 고정.
+        # 경이/Claude(2026-07-24): seed 고정 추가 — temperature=0만으로는 gpt-4o-mini가 애매한(경계)
+        # 문서에서 판정을 flip해 같은 문서·같은 rubric인데 총점이 31.5↔64로 흔들리는 게 실측됨.
+        # OpenAI seed는 best-effort 재현성이라 완벽하진 않지만 temperature=0과 함께 쓰면 경계 문서의
+        # 판정 흔들림을 크게 줄인다. 프롬프트의 [엄정 채점] 강제 규칙과 함께 "같은 문서=같은 점수"에 근접.
         resp = client.chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": prompt}],
             response_format={"type": "json_object"},
             temperature=0,
+            seed=_SCORING_SEED,
         )
         elapsed = time.time() - started
         content = resp.choices[0].message.content
