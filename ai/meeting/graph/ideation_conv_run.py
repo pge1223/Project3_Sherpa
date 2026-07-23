@@ -252,8 +252,12 @@ def start_ideation_conversation(
     evidence_planner=None,
     on_progress: IdeationConvProgressCallback | None = None,
     on_snapshot: IdeationConvSnapshotCallback | None = None,
+    application_form_items: list[dict] | None = None,
 ) -> IdeationConvState:
-    """세션을 시작해 기획 전문가의 첫 질문 하나만 만들고 멈춘다(요청 목표 흐름 1~3번)."""
+    """세션을 시작해 기획 전문가의 첫 질문 하나만 만들고 멈춘다(요청 목표 흐름 1~3번).
+
+    가은/Claude(2026-07-22, 요청: 신청양식 항목 약한 주입): application_form_items는 순수
+    추가 파라미터다(기본값 None) — 넘기지 않으면 기존 호출부와 완전히 동일하게 동작한다."""
     graph = assemble_ideation_conversation_graph(
         llm_call,
         evidence_lookup=evidence_lookup,
@@ -261,7 +265,10 @@ def start_ideation_conversation(
         index_target_evidence=index_target_evidence,
         evidence_planner=evidence_planner,
     )
-    state = initial_conv_state(session_id, notice_and_criteria, user_idea, max_rounds=max_rounds)
+    state = initial_conv_state(
+        session_id, notice_and_criteria, user_idea, max_rounds=max_rounds,
+        application_form_items=application_form_items,
+    )
     return _drive_graph(graph, state, on_progress, on_snapshot)
 
 

@@ -26,6 +26,10 @@ export async function startIdeationConversation({
   useRag = false,
   projectId,
   model,
+  // 가은/Claude(2026-07-22, 요청: 신청양식 항목 약한 주입): getApplicationFormAnalysis()
+  // 결과의 items를 그대로 넘기면 discussion 프롬프트에 참고 자료로만 주입된다(질문
+  // 주제·순서는 안 바뀜). 순수 추가 파라미터 — 비워도 기존 호출부와 동일하게 동작한다.
+  applicationFormItems,
 }) {
   const res = await fetch(`${API_BASE_URL}/ideation-conversation/start`, {
     method: 'POST',
@@ -38,6 +42,7 @@ export async function startIdeationConversation({
       use_rag: useRag,
       project_id: useRag ? projectId : undefined,
       model: model || undefined,
+      application_form_items: applicationFormItems || undefined,
     }),
   })
   return handleResponse(res)
@@ -90,7 +95,48 @@ export async function replyIdeationConversationStream(
     }),
     signal,
   })
+  await readNdjsonStream(res, onEvent)
+}
 
+// 가은/Claude(2026-07-22, 요청: 회의 시작 대기 체감 개선 1단계): POST /start/stream —
+// startIdeationConversation과 같은 페이로드로 시작하되, 진행 이벤트(phase: "아이디어 후보를
+// 만들고 있습니다" 등)를 도착하는 즉시 onEvent로 넘긴다. 최종 결과는 type:"state" 이벤트로
+// 온다. 스트리밍 플래그가 꺼져 있으면 404가 나므로 호출부가 기존 동기식 start로 폴백한다
+// (reply 쪽과 같은 패턴).
+export async function startIdeationConversationStream(
+  {
+    competitionName,
+    competitionDocument,
+    userIdea,
+    maxRounds = 3,
+    useRag = false,
+    projectId,
+    model,
+    applicationFormItems, // 가은/Claude(2026-07-22, 요청: 신청양식 항목 약한 주입) — startIdeationConversation과 동일한 순수 추가 필드.
+  },
+  { signal, onEvent } = {},
+) {
+  const res = await fetch(`${API_BASE_URL}/ideation-conversation/start/stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({
+      competition_name: competitionName,
+      competition_document: competitionDocument,
+      user_idea: userIdea,
+      max_rounds: maxRounds,
+      use_rag: useRag,
+      project_id: useRag ? projectId : undefined,
+      model: model || undefined,
+      application_form_items: applicationFormItems || undefined,
+    }),
+    signal,
+  })
+  await readNdjsonStream(res, onEvent)
+}
+
+// reply/start 스트리밍이 공유하는 NDJSON 응답 읽기 — 원래 replyIdeationConversationStream
+// 안에 있던 로직을 그대로 추출했다(동작 변화 없음).
+async function readNdjsonStream(res, onEvent) {
   if (!res.ok || !res.body) {
     let detail
     try {
