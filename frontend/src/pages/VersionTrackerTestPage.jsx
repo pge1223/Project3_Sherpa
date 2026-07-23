@@ -11,14 +11,17 @@
 //   build_revision_comparison() 출력. 둘 다 내 백엔드 산출물이라 mock -> 실데이터 교체만 하면 됨.
 // import: react, react-router-dom, lucide-react(가은 새 디자인과 동일 아이콘), 스타일 CSS.
 
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   ArrowLeft, TrendingUp, TrendingDown, CheckCircle2, AlertCircle, Plus,
   Lightbulb, Compass, Cpu, FlaskConical,
-  AlertTriangle, Zap, ChevronDown,
+  AlertTriangle, Zap, ChevronDown, FileText,
 } from 'lucide-react'
 import { getMyProfile } from '../api/profileApi'
+import { getProjectReport, getProjectComparison, analyzeProject, getAnalyzeProgress } from '../api/projectApi'
+import { uploadDocument, getDocuments, deleteDocument, getDocumentStatus } from '../api/documentApi'
+import { getTypoCheck, getContextCheck } from '../api/workbenchApi'
 import './VersionTrackerTest.css'
 
 const CRITERION_MAX = 25 // 4항목 × 25 = 100점
@@ -339,11 +342,34 @@ function CompareBars({ before, after, max, animKey, accent = _PLANNING_BAR }) {
 // "자세히 보기" 산문을 ①②③ 마커로 쪼개 [도입문 + 단계 배열]로 만든다 — 한 문단으로
 // 뭉쳐 초보자가 읽기 힘든 걸 번호 단계 카드로 나눠 한눈에 보이게 한다(경이 요청, 2026-07-22).
 // 마커가 없으면(전공자 간결 산문 등) steps=[]로 두고 호출부가 그대로 한 줄로 렌더한다.
-const _STEP_MARKERS = /[①②③④⑤⑥⑦⑧⑨]/
+const _CIRCLED_MARKERS = /[①②③④⑤⑥⑦⑧⑨]/
 function parseGuideSteps(prose) {
   if (!prose) return { intro: '', steps: [] }
-  const parts = prose.split(_STEP_MARKERS)
-  return { intro: (parts[0] || '').trim(), steps: parts.slice(1).map((s) => s.trim()).filter(Boolean) }
+  // 1) 원문자 ①②③ 형식
+  if (_CIRCLED_MARKERS.test(prose)) {
+    const parts = prose.split(_CIRCLED_MARKERS)
+    return { intro: (parts[0] || '').trim(), steps: parts.slice(1).map((s) => s.trim()).filter(Boolean) }
+  }
+  // 2) "1. 2. 3." 아라비아 숫자 리스트(실제 LLM 산문이 자주 쓰는 형식). 문장 중간 숫자
+  //    (예: "top-k=5", "30일", "5명") 오탐을 막기 위해, 숫자 앞은 시작/공백/괄호이고 뒤는
+  //    ".)" + 공백이며, 1부터 순차 증가(1,2,3…)하는 마커만 단계로 인정한다.
+  const re = /(?:^|[\s(])([1-9])[.)]\s+/g
+  const seq = []
+  let m
+  while ((m = re.exec(prose)) !== null) {
+    const num = Number(m[1])
+    if (num === seq.length + 1) {
+      seq.push({ num, start: m.index + m[0].lastIndexOf(m[1]), end: re.lastIndex })
+    }
+  }
+  if (seq.length >= 2) {
+    const intro = prose.slice(0, seq[0].start).trim()
+    const steps = seq
+      .map((mk, i) => prose.slice(mk.end, i + 1 < seq.length ? seq[i + 1].start : prose.length).trim())
+      .filter(Boolean)
+    return { intro, steps }
+  }
+  return { intro: '', steps: [] }
 }
 
 // 구현 가이드 단계 뷰: 도입문 + 번호 단계 카드(왼쪽에서 하나씩 슬라이드-인). diff는
@@ -446,10 +472,16 @@ function personalizeGuide(feedback, profile) {
   return { feedback_id: feedback.id, level, verbosity: VERBOSITY_BY_LEVEL[level], label: DIFFICULTY_LABEL[level], prose }
 }
 
-function CriterionCard({ c, before, index, animKey, isDev, profile, accent }) {
+function CriterionCard({ c, before, index, animKey, isDev, profile, accent, realGuides }) {
   const delta = before == null ? null : c.score - before
-  // 개발 위원의 미해결/신규 지적에만 구현 난이도 가이드를 붙인다(프로필 기반).
-  const guideFor = (f) => {
+  // 실데이터 모드(realGuides): impl_guide는 criterion 단위 1개라, 개발 위원 항목의 "첫 미해결
+  // 지적"에만 붙인다(criterion_id로 매칭). mock 모드: 미해결/신규 지적마다 프로필 기반 가이드.
+  const firstOpenIdx = c.feedback.findIndex((f) => f.status === 'open' || f.status === 'new')
+  const guideFor = (f, fi) => {
+    if (realGuides) {
+      if (!isDev || fi !== firstOpenIdx) return null
+      return realGuides.get(c.id) || null
+    }
     if (!isDev || (f.status !== 'open' && f.status !== 'new')) return null
     return personalizeGuide(f, profile)
   }
@@ -463,11 +495,11 @@ function CriterionCard({ c, before, index, animKey, isDev, profile, accent }) {
         </div>
       </div>
 
-      <CompareBars before={before} after={c.score} max={CRITERION_MAX} animKey={animKey} accent={accent?.bar} />
+      <CompareBars before={before} after={c.score} max={c.max ?? CRITERION_MAX} animKey={animKey} accent={accent?.bar} />
 
       {c.feedback.length > 0 ? (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 14 }}>
-          {c.feedback.map((f) => <FeedbackItem key={f.id} f={f} guide={guideFor(f)} />)}
+          {c.feedback.map((f, fi) => <FeedbackItem key={f.id} f={f} guide={guideFor(f, fi)} />)}
         </div>
       ) : (
         <div style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 13, color: '#16a37a', marginTop: 14, background: 'rgba(22,163,122,0.08)', padding: '10px 13px', borderRadius: 10, fontWeight: 600 }}>
@@ -576,16 +608,202 @@ function ProfileToggle({ profileKey, onChange, locked = false }) {
 }
 
 // --- 페이지 ----------------------------------------------------------------
+// 개발 위원(구현 난이도 가이드가 붙는) persona — 백엔드 is_technical_persona와 동일.
+const TECHNICAL_PERSONA_IDS = new Set(['technical_feasibility', 'dev_expert'])
+
+// 실데이터 배선(B): 백엔드 GET /projects/{id}/report 응답을 이 화면의 버전 구조로 변환한다.
+// 지금은 회의 1건 = v1.0 한 버전(수정본 재분석으로 v1.1+를 쌓는 건 C 단계). score_result.breakdown을
+// 기준 항목으로 삼고, reviewer_results에서 criterion별 이름/판정/지적(issues·suggestions)을 채운다.
+// 개발 위원(technical_feasibility)이 채점한 항목만 dev 탭, 나머지는 planning 탭.
+// impl_guides(개인화 구현 가이드)는 여기서 안 붙이고, feedback_id(=criterion_id)로 렌더 시 매칭한다.
+// 종합 위원(완성도·전달력)은 동적 rubric에서 전 항목을 겹쳐 채점하는 경향이 있어, "첫 채점자
+// 우선"으로 담당을 정하면 개발 항목(예: 실현가능성)이 기획으로 잘못 분류된다. 그래서 한 항목을
+// 여러 위원이 채점하면 우선순위로 실제 담당을 고른다: 기술 위원(개발) > 전문 위원(창의/사업) >
+// 종합 위원(완성도). 이 우선순위가 곧 그 항목의 소속 탭(dev/planning)을 결정한다.
+const GENERALIST_PERSONA_IDS = new Set(['presentation_completeness'])
+function personaRank(pid) {
+  if (TECHNICAL_PERSONA_IDS.has(pid)) return 2
+  if (GENERALIST_PERSONA_IDS.has(pid)) return 0
+  return 1
+}
+
+function reportToVersions(report) {
+  const sr = report.score_result || {}
+  const detail = new Map() // criterion_id -> {name, judgment, issues, suggestions, personaId}
+  for (const r of report.reviewer_results || []) {
+    for (const rs of r.rubric_scores || []) {
+      const cur = detail.get(rs.criterion_id)
+      if (!cur || personaRank(r.persona_id) > personaRank(cur.personaId)) {
+        detail.set(rs.criterion_id, {
+          name: rs.criterion_name,
+          judgment: rs.judgment,
+          issues: rs.issues || [],
+          suggestions: rs.suggestions || [],
+          personaId: r.persona_id,
+        })
+      }
+    }
+  }
+  const criteria = (sr.breakdown || []).map((b) => {
+    const d = detail.get(b.criterion_id) || {}
+    const committee = TECHNICAL_PERSONA_IDS.has(d.personaId) ? 'dev' : 'planning'
+    const issues = d.issues || []
+    const suggestions = d.suggestions || []
+    const feedback = []
+    const n = Math.max(issues.length, suggestions.length)
+    for (let i = 0; i < n; i++) {
+      const issue = issues[i] || ''
+      const sug = suggestions[i] || ''
+      if (!issue && !sug) continue
+      feedback.push({
+        id: `${b.criterion_id}-${i}`,
+        status: 'open', // 회의 1건(v1.0) 시점엔 모두 미해결. 해결/신규는 버전 비교(C)에서 계산.
+        text: issue || sug,
+        suggestion: issue ? sug : '',
+      })
+    }
+    return {
+      id: b.criterion_id,
+      name: d.name || b.criterion_id,
+      committee,
+      score: b.raw_score ?? 0,
+      max: b.max_score ?? CRITERION_MAX,
+      judgment: d.judgment || 'acceptable',
+      feedback,
+    }
+  })
+  return [
+    {
+      version: 'v1.0',
+      label: '현재 제출',
+      submitted_at: report.created_at,
+      total_score: sr.total_score ?? 0,
+      criteria,
+    },
+  ]
+}
+
+// C-3: 수정본 재분석으로 회의가 2개 이상이면 /comparison(build_revision_comparison) 결과로
+// [v1.0(이전), v1.1(현재)] 두 버전을 만든다. v1.1은 최신 /report의 풍부한 지적(+개인화 가이드)에
+// 비교 상태(신규/잔존/해결)를 덧입히고, v1.0은 comparison의 before 점수·판정·지적으로 채운다.
+function buildVersionsFromComparison(report, comparison) {
+  const cur = reportToVersions(report)[0] // 최신(현재) 버전, 풍부한 지적 포함
+  const compByCid = new Map((comparison.criteria || []).map((c) => [c.criterion_id, c]))
+  const metaById = new Map(cur.criteria.map((c) => [c.id, { committee: c.committee, max: c.max, name: c.name }]))
+
+  // v1.1(현재): 각 지적을 신규(new)/잔존(open)으로 표시하고, 해결된 지적(resolved)을 덧붙인다.
+  const currentCriteria = cur.criteria.map((c) => {
+    const comp = compByCid.get(c.id)
+    if (!comp) return c
+    const newSet = new Set(comp.new_issues || [])
+    const feedback = c.feedback.map((f) => ({ ...f, status: newSet.has(f.text) ? 'new' : 'open' }))
+    for (const t of comp.resolved_issues || []) {
+      feedback.push({ id: `${c.id}-resolved-${feedback.length}`, status: 'resolved', text: t, note: '이번 수정본에서 반영되어 더 이상 지적되지 않습니다' })
+    }
+    return { ...c, feedback }
+  })
+
+  // v1.0(이전): comparison의 before 점수/판정 + (해결+잔존) 지적을 그 버전 시점의 미해결로.
+  const beforeCriteria = (comparison.criteria || []).map((comp) => {
+    const meta = metaById.get(comp.criterion_id) || {}
+    const feedback = [...(comp.resolved_issues || []), ...(comp.persisting_issues || [])].map((t, i) => ({
+      id: `${comp.criterion_id}-b-${i}`, status: 'open', text: t,
+    }))
+    return {
+      id: comp.criterion_id,
+      name: comp.criterion_name || meta.name || comp.criterion_id,
+      committee: meta.committee || 'planning',
+      score: comp.before_score ?? 0,
+      max: meta.max ?? CRITERION_MAX,
+      judgment: comp.before_judgment || 'acceptable',
+      feedback,
+    }
+  })
+
+  return [
+    { version: 'v1.0', label: '이전 제출', total_score: comparison.total?.before ?? 0, criteria: beforeCriteria },
+    { version: 'v1.1', label: '현재 수정본', total_score: comparison.total?.after ?? cur.total_score, criteria: currentCriteria },
+  ]
+}
+
+// AI 피드백 탭(3번째) — 위원 채점과 별개로 문자서식·오탈자를 잡아주는 자동 검사. 점수에
+// 반영하지 않고(배점 없음), 버전마다 "수정 필요/해결"만 추적한다(경이 요청, 2026-07-23).
+// 데이터: 워크벤치 getTypoCheck(오탈자)·getContextCheck(맥락 이상) — 현재 문서 기준 라이브 검사.
+const AI_FEEDBACK = {
+  name: 'AI 피드백', Icon: FileText, desc: '문자서식 · 오탈자 (점수 미반영)',
+  color: '#16a37a', dim: 'rgba(22,163,122,0.12)',
+  gradient: 'linear-gradient(135deg, #7fd8b8 0%, #16a37a 100%)',
+}
+
+function AiFeedbackPanel({ findings }) {
+  if (!findings || findings.length === 0) {
+    return (
+      <div className="card glass" style={{ padding: 20, display: 'flex', alignItems: 'center', gap: 8, color: '#16a37a', fontWeight: 600, fontSize: 13.5 }}>
+        <CheckCircle2 size={16} /> 오탈자·문자서식 이슈가 발견되지 않았습니다 — 깔끔합니다.
+      </div>
+    )
+  }
+  return (
+    <>
+      <div className="card glass" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap', borderLeft: '4px solid #16a37a', marginBottom: 16, padding: '16px 20px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <span style={{ width: 42, height: 42, borderRadius: 12, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(22,163,122,0.12)', color: '#16a37a' }}>
+            <FileText size={21} />
+          </span>
+          <div>
+            <div style={{ fontSize: 15.5, fontWeight: 700, color: '#16a37a' }}>AI 피드백</div>
+            <div style={{ fontSize: 12, color: '#918d9f', marginTop: 2 }}>문자서식 · 오탈자 — 점수 미반영, 버전마다 수정/해결 추적</div>
+          </div>
+        </div>
+        <span className="badge amber mono">! 수정 필요 {findings.length}</span>
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+        {findings.map((f, i) => (
+          <div key={f.id || i} className="vt-fade card glass" style={{ padding: 16, animationDelay: `${i * 70}ms` }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+              <span className="mono" style={{ fontSize: 11, fontWeight: 800, padding: '3px 10px', borderRadius: 99, background: 'rgba(184,131,11,0.14)', color: '#b8830b' }}>
+                {f.kind === 'typo' ? '오탈자' : '문자서식·맥락'}
+              </span>
+              <span className="mono" style={{ fontSize: 11, color: '#e0603d', fontWeight: 700 }}>수정 필요</span>
+            </div>
+            {f.corrected ? (
+              <div style={{ fontSize: 13.5, marginBottom: 6 }}>
+                <span style={{ color: '#e0603d', textDecoration: 'line-through' }}>{f.quote}</span>
+                <span style={{ margin: '0 8px', color: '#918d9f' }}>→</span>
+                <span style={{ color: '#16a37a', fontWeight: 700 }}>{f.corrected}</span>
+              </div>
+            ) : (
+              f.quote && <div style={{ fontSize: 13, color: '#3a3750', marginBottom: 6, lineHeight: 1.6 }}>“…{f.quote}…”</div>
+            )}
+            {f.message && <div style={{ fontSize: 12.5, color: '#5b5770', lineHeight: 1.6 }}>{f.message}</div>}
+          </div>
+        ))}
+      </div>
+      <p style={{ fontSize: 11.5, color: '#a8a4b2', lineHeight: 1.7, marginTop: 18 }}>
+        ※ AI 피드백(오탈자·문자서식)은 위원 채점과 별개로 점수에 반영되지 않으며, 현재 버전 문서를 자동 검사한 결과입니다.
+      </p>
+    </>
+  )
+}
+
 // embedded: true면 /board 플로우("완성 리포트" 단계) 안에 끼워 넣는 모드 — 상단 나가기/
 // 실험 배지 바를 숨긴다(사이드바가 이미 단계 이동을 제공하므로). 기본(false)은 /version-test
-// 단독 페이지로 동작.
-export default function VersionTrackerTestPage({ embedded = false }) {
+// 단독 페이지로 동작. projectId가 오면(embedded) 그 프로젝트의 실제 /report를 렌더한다.
+export default function VersionTrackerTestPage({ embedded = false, projectId = null }) {
   const navigate = useNavigate()
   const [revealed, setRevealed] = useState(1)
   const [selectedIndex, setSelectedIndex] = useState(0)
   const [committee, setCommittee] = useState('planning')
   const [profileKey, setProfileKey] = useState('nonmajor')
   const profile = PROFILES[profileKey]
+  const [report, setReport] = useState(null)      // 실제 /report (embedded)
+  const [comparison, setComparison] = useState(null) // 버전 비교(회의 2개 이상일 때)
+  const [aiFindings, setAiFindings] = useState([])    // AI 피드백(오탈자·문자서식) — 점수 미반영
+  const [reportLoaded, setReportLoaded] = useState(false)
+  const [submitting, setSubmitting] = useState(false) // 수정본 업로드+재분석 중
+  const [submitStage, setSubmitStage] = useState('')  // 진행 상태 문구
+  const [submitError, setSubmitError] = useState('')
+  const fileInputRef = useRef(null)
 
   // /board 흐름 임베드 모드: 실제 로그인 사용자의 프로필로 고정한다(토글 대신). 백엔드
   // classify_impl_difficulty의 핵심 신호인 education.is_technical_major로 2단계(전공/비전공)를
@@ -600,27 +818,153 @@ export default function VersionTrackerTestPage({ embedded = false }) {
     return () => { cancelled = true }
   }, [embedded])
 
-  const versions = ALL_VERSIONS.slice(0, revealed)
-  const selected = versions[selectedIndex]
+  // 임베드 모드: 실제 회의 결과(/report)와 버전 비교(/comparison)를 함께 불러온다. 재분석 후
+  // 다시 부르기 위해 함수로 분리. 실패 시 mock 유지(단독 데모와 동일).
+  const loadReportAndComparison = useCallback(async () => {
+    if (!embedded || !projectId) return
+    const [r, c] = await Promise.all([
+      getProjectReport(projectId).catch(() => null),
+      getProjectComparison(projectId).catch(() => null),
+    ])
+    setReport(r)
+    setComparison(c && c.available ? c.comparison : null)
+  }, [embedded, projectId])
+
+  // AI 피드백(오탈자·맥락)은 LLM 호출이라 느릴 수 있어 메인 리포트 로딩과 분리해 비동기로 받는다.
+  const loadAiFindings = useCallback(async () => {
+    if (!embedded || !projectId) return
+    const [typos, ctx] = await Promise.all([
+      getTypoCheck(projectId).catch(() => []),
+      getContextCheck(projectId).catch(() => []),
+    ])
+    setAiFindings([
+      ...(typos || []).map((f) => ({ ...f, kind: 'typo' })),
+      ...(ctx || []).map((f) => ({ ...f, kind: 'context' })),
+    ])
+  }, [embedded, projectId])
+
+  useEffect(() => {
+    if (!embedded || !projectId) { setReportLoaded(true); return }
+    let cancelled = false
+    ;(async () => {
+      await loadReportAndComparison()
+      if (!cancelled) setReportLoaded(true)
+    })()
+    loadAiFindings() // 비동기 별도 로딩(리포트 표시를 막지 않음)
+    return () => { cancelled = true }
+  }, [embedded, projectId, loadReportAndComparison, loadAiFindings])
+
+  // 비교(회의 2개+)가 있으면 [v1.0, v1.1], 없으면 단일 버전, 실데이터 없으면 mock. realGuides는
+  // 최신 회의 impl_guides(criterion_id 키)로 개발 위원 항목 개인화 가이드를 렌더 시 매칭한다.
+  const realVersions = useMemo(() => {
+    if (!report) return null
+    if (comparison) return buildVersionsFromComparison(report, comparison)
+    return reportToVersions(report)
+  }, [report, comparison])
+  const usingReal = Boolean(realVersions)
+  const ALL = usingReal ? realVersions : ALL_VERSIONS
+  const realGuides = useMemo(() => {
+    if (!usingReal) return null
+    const m = new Map()
+    for (const g of report.impl_guides || []) m.set(g.feedback_id, g)
+    return m
+  }, [usingReal, report])
+
+  // 실데이터 버전 수가 바뀌면(1→2) 모두 펼치고 최신 버전을 선택한다(mock의 단계 공개와 분리).
+  useEffect(() => {
+    if (realVersions) {
+      setRevealed(realVersions.length)
+      setSelectedIndex(realVersions.length - 1)
+    }
+  }, [realVersions])
+
+  const versions = ALL.slice(0, revealed)
+  const selected = versions[selectedIndex] || ALL[0]
   const prev = selectedIndex > 0 ? versions[selectedIndex - 1] : null
   const totalDelta = prev ? selected.total_score - prev.total_score : null
-  const nextVersion = revealed < ALL_VERSIONS.length ? ALL_VERSIONS[revealed].version : null
+  const nextVersion = revealed < ALL.length ? ALL[revealed].version : null
   const heroScore = useCountUp(selected.total_score)
 
-  const cm = COMMITTEES[committee]
+  const cm = COMMITTEES[committee] || AI_FEEDBACK // ai_feedback 탭은 점수 영역을 안 그리지만 참조 안전용
   const cmItems = selected.criteria.filter((c) => c.committee === committee)
   const cmScore = committeeScore(selected, committee)
   const cmBefore = prev ? committeeScore(prev, committee) : null
-  const cmMax = cmItems.length * CRITERION_MAX
+  const cmMax = cmItems.reduce((s, ci) => s + (ci.max ?? CRITERION_MAX), 0)
   const cmDelta = cmBefore == null ? null : cmScore - cmBefore
   const counts = cmItems.reduce((a, c) => { c.feedback.forEach((f) => { a[f.status] += 1 }); return a }, { open: 0, new: 0, resolved: 0 })
 
   function handleNext() {
+    if (usingReal) {
+      if (!submitting) fileInputRef.current?.click() // 실모드: 진짜 수정본 파일 선택
+      return
+    }
     if (!nextVersion) return
     setRevealed((r) => { setSelectedIndex(r); return r + 1 })
   }
 
+  // C-2: 실제 수정본 업로드 → 재분석 → 재조회. analyze가 target 첫 문서를 쓰므로 기존 target을
+  // 지워 항상 "최신 수정본 1개"만 남긴다(이전 버전 데이터는 meeting 스냅샷에 보존돼 비교 가능).
+  async function handleRevisionFile(e) {
+    const file = e.target.files?.[0]
+    if (e.target) e.target.value = ''
+    if (!file || !projectId) return
+    setSubmitting(true); setSubmitError(''); setSubmitStage('수정본 업로드 중...')
+    try {
+      const docs = await getDocuments(projectId).catch(() => [])
+      for (const d of docs) {
+        if ((d.document_role || 'target') === 'target') await deleteDocument(projectId, d.id).catch(() => {})
+      }
+      // source_type은 백엔드가 파일로 추론하므로 기존 업로드와 동일하게 'pdf' 고정으로 넘긴다.
+      const uploaded = await uploadDocument(projectId, file, 'pdf', 'target')
+      setSubmitStage('문서 색인 중...')
+      const docId = uploaded?.id || uploaded?.document_id
+      for (let i = 0; i < 40 && docId; i++) {
+        const st = await getDocumentStatus(projectId, docId).catch(() => null)
+        const s = st?.status
+        if (s === 'indexed' || s === 'indexed_empty') break
+        if (s === 'indexing_failed' || s === 'conversion_failed' || s === 'indexing_timeout') {
+          throw new Error('업로드한 수정본을 색인하지 못했습니다.')
+        }
+        await new Promise((r) => setTimeout(r, 1500))
+      }
+      setSubmitStage('AI 위원 재검토 중...')
+      const token = window.crypto?.randomUUID?.() || String(Date.now())
+      let polling = true
+      ;(async () => {
+        while (polling) {
+          const p = await getAnalyzeProgress(projectId, token).catch(() => null)
+          if (p) {
+            const done = p.reviews_done || 0, total = p.reviews_total || 0
+            setSubmitStage(total ? `AI 위원 재검토 중... (${done}/${total})` : 'AI 위원 재검토 중...')
+          }
+          await new Promise((r) => setTimeout(r, 1500))
+        }
+      })()
+      await analyzeProject(projectId, undefined, token)
+      polling = false
+      setSubmitStage('결과 정리 중...')
+      await loadReportAndComparison()
+      loadAiFindings() // 새 버전 문서의 오탈자·서식 재검사(비동기)
+    } catch (err) {
+      setSubmitError(err?.message || '수정본 분석에 실패했습니다.')
+    } finally {
+      setSubmitting(false); setSubmitStage('')
+    }
+  }
+
   const animKey = `${selected.version}-${committee}-${profileKey}`
+
+  // 임베드 모드에서 실제 /report를 아직 불러오는 중이면 mock을 깜빡 보여주지 않고 로딩 표시.
+  if (embedded && projectId && !reportLoaded) {
+    return (
+      <div className="vt-root">
+        <div style={{ maxWidth: 920, margin: '0 auto', padding: '48px 24px', textAlign: 'center' }}>
+          <span className="badge purple mono"><FlaskConical size={12} /> 완성 리포트</span>
+          <h1 style={{ fontSize: 22, fontWeight: 700, marginTop: 14, color: '#1c1a2e' }}>회의 결과를 불러오는 중...</h1>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="vt-root">
@@ -668,17 +1012,34 @@ export default function VersionTrackerTestPage({ embedded = false }) {
               </h2>
               <span style={{ fontSize: 12, color: '#918d9f' }}>점을 클릭하면 해당 버전의 피드백을 볼 수 있어요</span>
             </div>
-            <button className="btn-primary" onClick={handleNext} disabled={!nextVersion} style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-              {nextVersion ? <><Plus size={14} /> 다음 수정본 제출 ({nextVersion})</> : <><CheckCircle2 size={14} /> 모든 버전 반영됨</>}
+            <button className="btn-primary" onClick={handleNext} disabled={usingReal ? submitting : !nextVersion} style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+              {usingReal
+                ? (submitting ? <>분석 중...</> : <><Plus size={14} /> 다음 수정본 제출</>)
+                : nextVersion
+                  ? <><Plus size={14} /> 다음 수정본 제출 ({nextVersion})</>
+                  : <><CheckCircle2 size={14} /> 모든 버전 반영됨</>}
             </button>
+            {/* 실제 수정본 파일 입력(숨김) — 버튼이 이걸 트리거한다(C-2) */}
+            <input ref={fileInputRef} type="file" accept=".pdf,.docx,.pptx,.hwp,.hwpx" style={{ display: 'none' }} onChange={handleRevisionFile} />
           </div>
+          {/* 업로드+재분석 진행/에러 배너 */}
+          {submitting && (
+            <div className="card glass" style={{ margin: '4px 0 8px', padding: '10px 14px', display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: '#5b5770' }}>
+              <FlaskConical size={14} className="vt-spin" style={{ color: '#7c5cea' }} /> {submitStage || '수정본 분석 중...'}
+            </div>
+          )}
+          {submitError && (
+            <div className="card glass" style={{ margin: '4px 0 8px', padding: '10px 14px', fontSize: 13, color: '#e0603d', borderLeft: '3px solid #e0603d' }}>
+              {submitError}
+            </div>
+          )}
           <ScoreTrendChart versions={versions} selectedIndex={selectedIndex} onSelect={setSelectedIndex} />
         </div>
 
-        {/* 위원 탭 */}
+        {/* 위원 탭 + AI 피드백 탭(점수 없는 문자서식·오탈자) */}
         <div style={{ display: 'flex', gap: 10, marginBottom: 16 }}>
-          {['planning', 'dev'].map((cid) => {
-            const t = COMMITTEES[cid]
+          {['planning', 'dev', 'ai_feedback'].map((cid) => {
+            const t = cid === 'ai_feedback' ? AI_FEEDBACK : COMMITTEES[cid]
             const active = committee === cid
             const Icon = t.Icon
             return (
@@ -690,6 +1051,10 @@ export default function VersionTrackerTestPage({ embedded = false }) {
           })}
         </div>
 
+        {/* AI 피드백 탭: 점수 영역 대신 오탈자·문자서식 검사 결과 */}
+        {committee === 'ai_feedback' && <AiFeedbackPanel findings={aiFindings} />}
+
+        {committee !== 'ai_feedback' && (<>
         {/* 위원 소계 요약 */}
         <div className="card glass" key={`sum-${animKey}`} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap', borderLeft: `4px solid ${cm.color}`, marginBottom: 16, padding: '16px 20px' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
@@ -721,15 +1086,26 @@ export default function VersionTrackerTestPage({ embedded = false }) {
         {/* 위원 항목 카드 */}
         <div key={`body-${animKey}`} style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
           {cmItems.map((c, i) => (
-            <CriterionCard key={c.id} c={c} before={criterionBefore(versions, selectedIndex, c.id)} index={i} animKey={animKey} isDev={committee === 'dev'} profile={profile} accent={cm} />
+            <CriterionCard key={c.id} c={c} before={criterionBefore(versions, selectedIndex, c.id)} index={i} animKey={animKey} isDev={committee === 'dev'} profile={profile} accent={cm} realGuides={selectedIndex === ALL.length - 1 ? realGuides : null} />
           ))}
         </div>
 
-        <p style={{ fontSize: 11.5, color: '#a8a4b2', lineHeight: 1.7, marginTop: 26 }}>
-          ※ 각 버전의 위원별 피드백은 <code style={codeStyle}>review_output.reviewer_results</code>,
-          버전 간 점수 증감·해결/잔존/신규는 <code style={codeStyle}>build_revision_comparison()</code>{' '}
-          출력 구조를 그대로 mock으로 넣은 것입니다. 백엔드 연동 시 mock만 실데이터로 교체하면 됩니다.
-        </p>
+        {usingReal ? (
+          <p style={{ fontSize: 11.5, color: '#a8a4b2', lineHeight: 1.7, marginTop: 26 }}>
+            ※ 이 리포트는 실제 회의 결과(<code style={codeStyle}>GET /projects/{'{id}'}/report</code>)의 점수·위원 피드백·개인화
+            구현 가이드를 그대로 렌더한 것입니다.{' '}
+            {comparison
+              ? <>버전 간 비교(해결/잔존/신규·점수 증감)는 <code style={codeStyle}>GET /projects/{'{id}'}/comparison</code>(build_revision_comparison) 결과입니다.</>
+              : <>수정본을 제출해 재분석하면 이전/현재 버전이 자동 비교됩니다.</>}
+          </p>
+        ) : (
+          <p style={{ fontSize: 11.5, color: '#a8a4b2', lineHeight: 1.7, marginTop: 26 }}>
+            ※ 각 버전의 위원별 피드백은 <code style={codeStyle}>review_output.reviewer_results</code>,
+            버전 간 점수 증감·해결/잔존/신규는 <code style={codeStyle}>build_revision_comparison()</code>{' '}
+            출력 구조를 그대로 mock으로 넣은 것입니다(단독 데모). 백엔드 연동 시 mock만 실데이터로 교체하면 됩니다.
+          </p>
+        )}
+        </>)}
       </div>
     </div>
   )

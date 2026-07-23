@@ -88,6 +88,22 @@ class Settings(BaseSettings):
     # 위함이다(요청 7번). ai/rag/evaluation/rag_quality/cli.py만 읽는다.
     EVAL_LLM_MODEL: str = "gpt-4o-mini"
 
+    # 용준/Claude(2026-07-23, Phase 1 "Shadow Deterministic Evidence Planner"): 아이디어 회의
+    # discussion 턴에서 규칙 기반 evidence planner를 그림자(shadow) 모드로 실행할지 여부.
+    # 기본값 False — 꺼져 있으면 planner 콜러블 자체를 주입하지 않아 기존 prompt/claims/
+    # grounding/routing/streaming 동작과 100% 동일하다. 켜져 있어도(True) 이 단계에서는
+    # planner 결과가 trace 로그로만 기록될 뿐 발언 생성에 전혀 쓰이지 않는다.
+    ENABLE_IDEATION_EVIDENCE_PLANNER_SHADOW: bool = False
+
+    # 용준/Claude(2026-07-23, Phase 2 "Active Evidence Injection"): Phase 1 shadow planner가
+    # 선택한 근거를 discussion(planning_expert/dev_expert) 발언 prompt와 claim grounding에
+    # 실제로 주입할지 여부. ENABLE_IDEATION_EVIDENCE_PLANNER_SHADOW와 별개 플래그다 — shadow는
+    # "로그만", 이 플래그는 "실제 사용"을 뜻한다. 기본값 False — 꺼져 있으면 기존 retrieved
+    # 전체 주입 경로와 100% 동일하게 동작한다. 두 플래그가 동시에 켜져도 planner는 턴당 한 번만
+    # 실행되고(같은 plan을 shadow 기록과 active 주입에 함께 쓴다), question/candidate
+    # generation/facilitator/synthesis 노드에는 적용되지 않는다.
+    ENABLE_IDEATION_EVIDENCE_PLANNER_DISCUSSION: bool = False
+
     class Config:
         env_file = str(_ENV_FILE)
         env_file_encoding = "utf-8"

@@ -24,6 +24,12 @@ class SourceType(str, Enum):
     FILE_UPLOAD = "file_upload"        # 사용자가 직접 업로드한 PDF/DOCX/PPTX
     URL_ATTACHMENT = "url_attachment"  # URL 수집 중 다운로드된 첨부파일 (AttachmentExtractionResult.extraction)
     URL_WEBPAGE = "url_webpage"        # URL의 HTML 본문 (CleanedWebContent)
+    # 용준/Claude(2026-07-22, 요청: 선택된 아이디어/사용자 답변을 target evidence로 색인) —
+    # 파일도 URL도 아니고, 아이디어 회의 중 선택된 후보나 사용자 답변으로부터 프로그램이
+    # 직접 조립한 텍스트다(ai/rag/orchestration/ideation_target_indexing_service.py). 기존
+    # 3개 값 중 어느 것도 정확히 맞지 않아 새로 추가한다 — FILE_UPLOAD를 재사용하면 "실제
+    # 파일을 업로드했다"는 의미가 왜곡된다.
+    IDEATION_GENERATED = "ideation_generated"  # 아이디어 회의(선택된 후보/사용자 답변)에서 생성된 텍스트
 
 
 class ChunkLocationType(str, Enum):

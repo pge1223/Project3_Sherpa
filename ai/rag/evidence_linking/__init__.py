@@ -23,6 +23,13 @@ LangGraph 위원 노드가 생성한 평가 의견을, 그 근거가 된 원문 
     linked.evidence      # list[EvidenceSource]
 """
 
+from ai.rag.evidence_linking.claim_grounding import (
+    Claim,
+    ClaimGroundingResult,
+    UnsupportedClaim,
+    ground_claims,
+    has_hard_grounding_failure,
+)
 from ai.rag.evidence_linking.config import EvidenceLinkingConfig
 from ai.rag.evidence_linking.linker import build_linked_evaluation, resolve_score
 from ai.rag.evidence_linking.quote_extractor import extract_quote, select_best_sentence, split_sentences
@@ -39,4 +46,9 @@ __all__ = [
     "extract_quote",
     "select_best_sentence",
     "split_sentences",
+    "Claim",
+    "ClaimGroundingResult",
+    "UnsupportedClaim",
+    "ground_claims",
+    "has_hard_grounding_failure",
 ]
