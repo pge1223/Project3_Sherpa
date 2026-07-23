@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { AlertCircle, ChevronDown, ChevronUp, RefreshCw, Send, Sparkles } from 'lucide-react'
 import {
   cancelIdeationConversation,
+  continueIdeationExpertTurnStream,
   finalizeIdeationConversation,
   getIdeationConversation,
   replyIdeationConversation,
@@ -11,6 +12,7 @@ import {
 } from '../../api/ideationConversationApi'
 import { getAnnouncementAnalysis, getApplicationFormAnalysis } from '../../api/documentApi'
 import IdeaCanvasPanel from './IdeaCanvasPanel'
+import IdeationAvatarStage from './IdeationAvatarStage'
 import {
   EXPERT_RECOMMEND_MESSAGE,
   FEASIBILITY_LABEL,
@@ -63,6 +65,20 @@ const REPLYABLE_PHASES = new Set([
   'awaiting_developer_answer',
   'awaiting_user_decision',
 ])
+
+// 재인/Claude(2026-07-23): 아바타 재생 대상 화자 - user는 당연히 제외, 그 외 3명
+// (진행자/기획/개발)만 IdeationAvatarStage의 AVATAR_SLOTS에 얼굴·목소리가 등록돼 있다.
+const AVATAR_SPEAKER_IDS = new Set(['ideation_facilitator', 'planning_expert', 'dev_expert'])
+
+// 재인/Claude(2026-07-23, 실측: "선택된 아이디어... 이거는 아예 코랩에 태우지마"): 후보
+// 선택 확정 직후 진행자가 말하는 이 메시지는 ai/meeting/graph/ideation_conv_discovery.py
+// ::_resolve_selection이 항상 이 문구("선택된 아이디어: ...")로 시작하는 고정 템플릿으로
+// 만든다(LLM 호출 없음, 회의 로직 쪽에서 이미 확인된 사실). 사용자가 방금 화면에서 고른
+// 내용을 그대로 되짚어 보여주는 시스템 로그 성격이라 아바타가 "말할" 필요가 없다고 판단해
+// 아바타 재생 대상에서만 제외한다(텍스트 채팅에는 그대로 보인다 - canonicalMessages는
+// 안 건드림). message_type이 다른 진행자 메시지("오늘은...", 라운드 정리)와 똑같이
+// "summary"라 타입으로는 구분이 안 되고, 이 접두어가 가장 안정적인 구분 방법이다.
+const AVATAR_EXCLUDED_CONTENT_PREFIX = '선택된 아이디어:'
 
 function ideationSessionStorageKey(projectId) {
   return projectId ? `ideation-conv-session:${projectId}` : null
@@ -222,6 +238,16 @@ function MessageBubble({ message, streaming = false, interrupted = false, allMes
         </div>
       </div>
     )
+  }
+  // 재인/Claude(2026-07-23, 실측: "저 빈 말풍선이 보기 싫어서 그래"): message_start가
+  // 오면 스트리밍 메시지가 streamState.messages에 즉시 생기지만, 첫 delta가 도착하기
+  // 전까지는 content가 빈 문자열이다 — 그 짧은 순간에 배지만 있고 속은 텅 빈 말풍선이
+  // 보였다. 실제 글자가 하나라도 도착하기 전까지는 아예 아무것도 안 그린다(위 sending &&
+  // streamState.messages.length === 0 상태 문구가 그 대기 시간 동안 대신 보여준다 - 다만
+  // message_start 자체가 phaseLabel을 null로 리셋하므로, 이 순간엔 그 문구도 안 보이고
+  // 완전히 비어 있게 된다 - 사용자가 원한 게 정확히 이거다).
+  if (streaming && !hasContent) {
+    return null
   }
 
   const isFacilitatorSummary = !streaming && message.speaker_id === 'ideation_facilitator' && message.message_type === 'summary'
@@ -460,11 +486,31 @@ export function IdeationScreen({
   // 미완성 발언이므로 ideationConv(canonical)에는 절대 섞이지 않는다(요청: "검증되지 않은
   // structured JSON은 저장하지 않는다").
   const [interruptedMessages, setInterruptedMessages] = useState([])
+  // 재인/Claude(2026-07-23, 실측: "내가 보낸 채팅이 바로 안 올라가고 늦게 올라감"):
+  // 사용자가 보낸 메시지는 서버가 canonical state에 echo해서 돌려줄 때(finalizeStream)까지
+  // 화면 어디에도 안 보였다 — 그 사이(위원 응답을 실제로 생성하는 몇 초)에는 입력창에
+  // 그대로 남아있는 것처럼 보였다. 보내는 즉시 이 로컬 전용 임시 말풍선으로 먼저 보여주고,
+  // 진짜 canonical 메시지가 도착하면(finalizeStream/sendNonStreaming) 즉시 지운다 —
+  // interruptedMessages와 같은 원칙: 서버 state에는 절대 안 섞이는 순수 화면 표시용.
+  const [optimisticUserMessage, setOptimisticUserMessage] = useState(null)
   // 가은/Claude(2026-07-22): 아이디어 기획 캔버스(IdeaCanvasPanel)의 "심사기준 대응 포인트"
   // 시드용. runStart는 원래 이 분석을 start API 페이로드를 만드는 데만 쓰고 버렸는데,
   // 캔버스가 계속 보여줘야 하므로 상태로 유지한다. 세션 재개(resume) 경로에서는 start를
   // 다시 부르지 않으므로 거기서도 별도로 채운다.
   const [announcementAnalysis, setAnnouncementAnalysis] = useState(null)
+  // 재인/Claude(2026-07-23): 아이디어 회의 아바타 연동 — canonical 메시지 중 아바타
+  // 3명(진행자/기획/개발)에 해당하는 것만 골라 재생 큐로 넘긴다. 이미 큐에 넣은
+  // message_id는 queuedAvatarIdsRef로 추적해서, 메시지 목록이 리렌더될 때마다 같은
+  // 발언을 중복으로 다시 큐잉하지 않게 막는다.
+  const [avatarPlayQueue, setAvatarPlayQueue] = useState([])
+  const queuedAvatarIdsRef = useRef(new Set())
+  // 재인/Claude(2026-07-23): handleAvatarNeedNextSpeaker가 지금 진행 중인 continue-turn
+  // fetch를 추적한다 — "잠시만"이 그 사이에 눌리면 abort()로 끊어서, 이미 중단한 뒤에
+  // 뒤늦게 도착하는 응답이 canonical state를 다시 덮어쓰지 않게 막는다(handleInterject
+  // 참고). handleAvatarNeedNextSpeaker 자신이 sending/interrupting/interjectTarget이 걸려
+  // 있으면 애초에 새로 시작하지 않으므로, 세션 락 409 자체는 이 ref 없이도 이미 피한다 —
+  // 이 ref는 그 이후(이미 시작된 호출)에 대한 정리용이다.
+  const avatarTurnAbortRef = useRef(null)
 
   const startedRef = useRef(false)
   const chatEndRef = useRef(null)
@@ -515,6 +561,16 @@ export function IdeationScreen({
         if (finalState) {
           setIdeationConv(finalState)
           setDraft('')
+          // 재인/Claude(2026-07-23, 실측: "기획위원 메시지가 2개 뜨고 립싱크 중간에 채팅이
+          // 올라갔다 사라짐"): tick()이 이 함수를 부르기 직전에 streamState를 이미
+          // createEmptyStreamState()로 비웠지만(위 tick() 참고), 그건 별도의
+          // setStreamState 호출/렌더 커밋에 걸려 있어서 이 setIdeationConv와 정확히 같은
+          // 타이밍에 화면에 반영된다는 보장이 없다 — 그 틈에 옛 스트리밍 임시 메시지와
+          // 방금 확정된 canonical 메시지가 한 프레임이라도 동시에 보이면 중복으로 렌더링
+          // 된다. canonical을 실제로 바꾸는 이 지점에서 다시 한번 명시적으로 비워
+          // "canonical이 바뀌는 순간 streamState도 반드시 함께 비워진다"를 타이밍에
+          // 의존하지 않고 보장한다.
+          setStreamState(createEmptyStreamState())
         }
         if (errorEvent) {
           setError({
@@ -529,6 +585,9 @@ export function IdeationScreen({
         }
       } finally {
         // 성공·서버 실패·연결 실패 어느 경로에서도 입력창이 sending 상태에 갇히지 않는다.
+        // optimisticUserMessage도 마찬가지 — 성공하면 finalState.messages에 진짜 echo가
+        // 들어있어 더 필요 없고, 실패해도 화면에 유령 말풍선이 영원히 남으면 안 된다.
+        setOptimisticUserMessage(null)
         setSending(false)
       }
     }
@@ -675,6 +734,100 @@ export function IdeationScreen({
     // 쓴다(요청: "delta가 들어올 때 자동 스크롤" — content가 아니라 실제 화면 표시 기준).
   }, [ideationConv?.messages?.length, streamState.messages.reduce((n, m) => n + (m.displayedContent?.length || 0), 0)])
 
+  // 재인/Claude(2026-07-23): canonical 메시지(ideationConv.messages)에 새로 추가된
+  // 아바타 대상(진행자/기획/개발) 발언만 골라 재생 큐에 넘긴다. streamState(아직
+  // 타이핑 중인 임시 메시지)가 아니라 canonical만 보는 이유: 아바타는 "확정된 발언"만
+  // 말해야 한다 — 중단(잠시만)된 발언은 canonical에 절대 안 들어오므로(handleInterject
+  // 참고) 이 큐에도 자동으로 안 들어온다.
+  useEffect(() => {
+    const messages = ideationConv?.messages || []
+    const newItems = []
+    for (const m of messages) {
+      if (!AVATAR_SPEAKER_IDS.has(m.speaker_id) || queuedAvatarIdsRef.current.has(m.message_id)) continue
+      queuedAvatarIdsRef.current.add(m.message_id)
+      // 아바타는 안 태우지만(코랩 요청 자체를 안 보냄) 텍스트 채팅에는 그대로 남는다 —
+      // canonicalMessages는 이 필터와 무관하게 ideationConv.messages를 그대로 쓴다.
+      if ((m.content || '').startsWith(AVATAR_EXCLUDED_CONTENT_PREFIX)) continue
+      newItems.push({ speakerId: m.speaker_id, text: m.content })
+    }
+    if (newItems.length > 0) {
+      setAvatarPlayQueue((prev) => [...prev, ...newItems])
+    }
+  }, [ideationConv?.messages])
+
+  // 재인/Claude(2026-07-23): 아바타 재생 도중 "재생 끝나기 3초 전" 타이머가 울릴 때
+  // 호출된다. 새 사용자 발언 없이 다음 위원(기획/개발) 발언 1건만 더 요청한다
+  // (continue-turn/stream — 백엔드 continue_ideation_expert_turn, ai/meeting/graph 쪽
+  // 회의 로직은 전혀 안 건드리고 "언제 다음 턴을 요청하느냐"만 다루는 함수). 응답이 오면
+  // canonical state를 그대로 갱신하고, 위의 큐잉 effect(ideationConv?.messages 감시)가
+  // 새 메시지를 자동으로 avatarPlayQueue에 넣어 다음 위원 재생으로 이어진다.
+  //
+  // sending/interrupting/interjectTarget 중 하나라도 걸려 있으면 부르지 않는다 — 사용자가
+  // 직접 reply/interject를 보내는 중이면 같은 세션에 동시 요청을 보내 백엔드 세션 락
+  // 409를 유발할 수 있다(호출 자체를 막는 게 가장 안전 — 실패해도 치명적이지 않지만,
+  // 아바타가 조용히 멈추는 것보다 애초에 안 보내는 편이 낫다). phase가 이미
+  // "expert_discussion"이 아니면(라운드가 이미 끝났거나 사용자가 먼저 답해 다음 라운드로
+  // 넘어간 경우) 마찬가지로 부르지 않는다 — 백엔드도 같은 조건을 다시 검사하지만, 프론트
+  // 에서 먼저 걸러야 불필요한 요청/에러 로그를 줄인다.
+  async function handleAvatarNeedNextSpeaker(finishedSpeakerId) {
+    console.log('[avatar-debug] handleAvatarNeedNextSpeaker CALLED', {
+      finishedSpeakerId,
+      hasSessionId: !!ideationConv?.session_id,
+      phase: ideationConv?.phase,
+      sending,
+      interrupting,
+      interjectTarget,
+    })
+    if (!ideationConv?.session_id) {
+      console.log('[avatar-debug] bail: no session_id')
+      return
+    }
+    if (ideationConv.phase !== 'expert_discussion') {
+      console.log('[avatar-debug] bail: phase !== expert_discussion', ideationConv.phase)
+      return
+    }
+    if (sending || interrupting || interjectTarget) {
+      console.log('[avatar-debug] bail: sending/interrupting/interjectTarget guard', { sending, interrupting, interjectTarget })
+      return
+    }
+
+    console.log('[avatar-debug] calling continueIdeationExpertTurnStream', { sessionId: ideationConv.session_id })
+    const controller = new AbortController()
+    avatarTurnAbortRef.current = controller
+    try {
+      await continueIdeationExpertTurnStream(ideationConv.session_id, {
+        signal: controller.signal,
+        onEvent: (event) => {
+          console.log('[avatar-debug] continue-turn event', event.type, event)
+          if (event.type === 'state') {
+            setIdeationConv(event.state)
+            // 재인/Claude(2026-07-23, 실측: "기획위원 발언이 화면에 2번 뜸"): 이 canonical
+            // 갱신은 handleSend의 타이핑 효과 루프(streamState/pendingFinalRef/tick)를 전혀
+            // 거치지 않는다 - 그쪽이 아직 스트리밍 임시 메시지를 못 지운 상태(sending이
+            // 막 false로 바뀐 직후처럼)에서 이 이벤트가 오면, 같은 발언이 streamState
+            // (임시, 다른 message_id)랑 canonical(방금 갱신됨) 양쪽에 동시에 남아 화면에
+            // 두 번 그려질 수 있다. ideationStreamReducer.js 상단 주석의 설계 의도
+            // ("스트리밍 미리보기와 최종 메시지가 절대 동시에 렌더링될 수 없다")를 이
+            // 경로에서도 그대로 지키려고, canonical을 바꿀 때 스트리밍 임시 상태도 같이
+            // 확실하게 비운다.
+            setStreamState(createEmptyStreamState())
+          } else if (event.type === 'error') {
+            console.warn('[ideation-avatar] continue-turn 실패, speaker=', finishedSpeakerId, event)
+          }
+        },
+      })
+      console.log('[avatar-debug] continueIdeationExpertTurnStream resolved OK')
+    } catch (err) {
+      // 조용히 무시한다 — 이 호출은 최선을 다해 다음 위원을 미리 준비시키는 배경 동작이라,
+      // 실패해도(400 phase 불일치, 세션 만료, abort 등) 화면에 에러를 띄우지 않는다.
+      if (err?.name !== 'AbortError') {
+        console.warn('[ideation-avatar] continue-turn 요청 실패, speaker=', finishedSpeakerId, err)
+      }
+    } finally {
+      if (avatarTurnAbortRef.current === controller) avatarTurnAbortRef.current = null
+    }
+  }
+
   const phase = ideationConv?.phase
   const phaseFailure = phase === 'failed'
     ? {
@@ -684,7 +837,17 @@ export function IdeationScreen({
       }
     : null
   const canonicalMessages = dedupeMessagesById(ideationConv?.messages)
-  const visibleMessages = [...canonicalMessages, ...interruptedMessages, ...streamState.messages]
+  // 재인/Claude(2026-07-23, 실측: "메시지가 2개 겹쳐 나옴" — 서버 확인 결과 실제 메시지는
+  // 1건뿐이었다): 이 세 소스는 서로 겹칠 수 있다 — 특히 single_turn 응답처럼 아주 짧은
+  // 메시지는 canonical(finalizeStream)로 넘어가는 순간과 streamState가 비워지는 순간
+  // 사이에 한 프레임이라도 둘 다 남아있으면 같은 message_id가 두 배열에 동시에 존재해
+  // 화면에 두 번 그려진다. dedupeMessagesById로 전체를 한 번 더 걸러 canonical(먼저 오는
+  // 쪽)을 우선하고 나머지에서 같은 id는 제거한다.
+  const visibleMessages = dedupeMessagesById([
+    ...canonicalMessages,
+    ...interruptedMessages,
+    ...streamState.messages,
+  ])
   const busy = starting || sending || finalizing || saving
   // awaiting_user_decision도 입력을 막지 않는다("더 이야기하기") — 백엔드
   // apply_user_answer가 이 경우도 받아 두 전문가 보완 의견으로 이어간다.
@@ -712,7 +875,9 @@ export function IdeationScreen({
       const data = await replyIdeationConversation(ideationConv.session_id, text)
       setIdeationConv(data)
       setDraft('')
+      setOptimisticUserMessage(null)
     } catch (err) {
+      setOptimisticUserMessage(null)
       setError(classifyIdeationConvError(err))
     }
   }
@@ -735,6 +900,9 @@ export function IdeationScreen({
     setSending(true)
     setError(null)
     setInterjectTarget(null)
+    // 보내는 즉시 화면에 반영 — 서버 왕복(위원 응답 생성)이 끝나기를 기다리지 않는다.
+    setOptimisticUserMessage({ message_id: 'LOCAL-OPTIMISTIC-USER', speaker_id: 'user', message_type: 'answer', content: text })
+    setDraft('')
 
     if (!streamingSupportedRef.current && !target) {
       await sendNonStreaming(text)
@@ -752,6 +920,10 @@ export function IdeationScreen({
       await replyIdeationConversationStream(ideationConv.session_id, text, {
         signal: controller.signal,
         targetSpeakerId: target || undefined,
+        // 재인/Claude(2026-07-23): 이 화면은 항상 아바타를 재생하므로, 라운드를 새로 여는
+        // reply라도 위원 발언이 한 번에 다 몰려오지 않고 첫 발언부터 페이싱 대상이 되도록
+        // 매번 true로 보낸다(handleAvatarNeedNextSpeaker가 나머지 턴을 이어서 요청함).
+        singleTurn: true,
         onEvent: (event) => {
           if (event.type === 'state') {
             finalState = event.state
@@ -768,6 +940,7 @@ export function IdeationScreen({
       pendingFinalRef.current = null
       if (err?.name === 'AbortError') {
         // 사용자가 화면을 벗어나 요청을 취소한 경우 — 오류로 취급하지 않는다.
+        setOptimisticUserMessage(null)
         setSending(false)
         return
       }
@@ -787,6 +960,7 @@ export function IdeationScreen({
         setSending(false)
         return
       }
+      setOptimisticUserMessage(null)
       setError(classified)
       setSending(false)
       return
@@ -807,6 +981,10 @@ export function IdeationScreen({
     setInterrupting(true)
     // ① 실제 네트워크 스트림 연결을 즉시 끊는다(화면 표시만 멈추는 게 아니라).
     streamAbortRef.current?.abort()
+    // 재인/Claude(2026-07-23): 아바타가 백그라운드로 미리 요청해둔 continue-turn도 함께
+    // 끊는다 — 안 끊으면 사용자가 "잠시만"으로 이미 중단한 뒤에, 뒤늦게 도착한 응답이
+    // canonical state를 다시 덮어써 방금 중단한 발언이 유령처럼 다시 나타날 수 있다.
+    avatarTurnAbortRef.current?.abort()
 
     // 사용자가 이미 읽은 부분 발언을 로컬 기록으로 보존한다(완료된 발언과 구분해서 렌더).
     const lastPartial = streamState.messages[streamState.messages.length - 1]
@@ -884,7 +1062,7 @@ export function IdeationScreen({
   }
 
   return (
-    <div className="rb-grid-2" style={{ maxWidth: 900, display: 'grid', gridTemplateColumns: '1fr 320px', gap: 20 }}>
+    <div className="rb-grid-2" style={{ maxWidth: 1410, display: 'grid', gridTemplateColumns: '1fr 320px 468px', gap: 20 }}>
       <div>
         <div className="badge coral mono" style={{ marginBottom: 10 }}>주제 아이디어 회의</div>
         {onBack && (
@@ -924,6 +1102,13 @@ export function IdeationScreen({
           {canonicalMessages.map((m) => (
             <MessageBubble key={m.message_id} message={m} allMessages={visibleMessages} />
           ))}
+          {/* 재인/Claude(2026-07-23): 사용자가 방금 보낸 메시지 — 서버 왕복이 끝나
+              canonical에 진짜 echo가 도착하기 전까지 임시로 보여준다(handleSend/
+              finalizeStream/sendNonStreaming이 도착 즉시 지운다 - 그래서 진짜 메시지와
+              동시에 두 번 보이는 순간은 없다). */}
+          {optimisticUserMessage && (
+            <MessageBubble message={optimisticUserMessage} allMessages={visibleMessages} />
+          )}
           {/* 용준/Claude(2026-07-22, 요청: 중단된 메시지 처리) — "잠시만"으로 중단된 부분
               발언. 서버에 저장되지 않는 순수 로컬 기록이므로 ideationConv.messages와 절대
               섞이지 않는다. */}
@@ -1084,6 +1269,11 @@ export function IdeationScreen({
           <p style={{ fontSize: 11.5, color: 'var(--text-2)', marginTop: 8 }}>{nextActionGuideFor(phase)}</p>
         )}
       </div>
+
+      <IdeationAvatarStage
+        playQueue={avatarPlayQueue}
+        onNeedNextSpeaker={handleAvatarNeedNextSpeaker}
+      />
     </div>
   )
 }

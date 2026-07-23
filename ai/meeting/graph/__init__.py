@@ -37,6 +37,7 @@ from .ideation_conv_nodes import (
     make_canvas_update_node,
 )
 from .ideation_conv_run import (
+    continue_ideation_expert_turn,
     finalize_ideation_conversation,
     reply_ideation_conversation,
     reply_to_interjection,
@@ -99,6 +100,7 @@ __all__ = [
     "start_ideation_conversation",
     "reply_ideation_conversation",
     "reply_to_interjection",
+    "continue_ideation_expert_turn",
     "finalize_ideation_conversation",
     "IdeationCancelled",
     "IssueRecord",
