@@ -1,3 +1,5 @@
+import ProgressBar from '../common/ProgressBar'
+
 function FileIcon() {
   return (
     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#7c4dff" strokeWidth="1.8">
@@ -35,12 +37,7 @@ export default function DocumentRow({ document }) {
         </div>
 
         {document.status === 'embedding' && (
-          <div style={styles.progressWrap}>
-            <div style={styles.progressTrack}>
-              <div style={{ ...styles.progressFill, width: `${document.progress}%` }} />
-            </div>
-            <span style={styles.progressLabel}>임베딩 중</span>
-          </div>
+          <ProgressBar percent={document.progress} label="임베딩 중" />
         )}
 
         {document.status === 'done' && <span style={styles.doneBadge}>✓ 완료</span>}
@@ -106,27 +103,6 @@ const styles = {
     fontSize: 12,
     color: '#8b8fa3',
     marginTop: 2,
-  },
-  progressWrap: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: 10,
-  },
-  progressTrack: {
-    width: 100,
-    height: 6,
-    borderRadius: 999,
-    background: '#f0eefc',
-    overflow: 'hidden',
-  },
-  progressFill: {
-    height: '100%',
-    background: '#7c4dff',
-    borderRadius: 999,
-  },
-  progressLabel: {
-    fontSize: 12,
-    color: '#8b8fa3',
   },
   doneBadge: {
     fontSize: 12,
