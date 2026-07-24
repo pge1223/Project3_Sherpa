@@ -1414,7 +1414,7 @@ export default function ReviewBoardPrototype() {
       {stage === "upload" && (
         <UploadAndAnalyzeScreen projectId={projectId} onFeedbackReady={handleFeedbackReady} onBack={goPrev} initialDocuments={targetDocuments} />
       )}
-      {stage === "workbench" && <WorkbenchScreen projectId={projectId} />}
+      {stage === "workbench" && <WorkbenchScreen projectId={projectId} onNext={goNext} />}
       {stage === "report" && <VersionTrackerTestPage embedded projectId={projectId} />}
     </Shell>
   );
